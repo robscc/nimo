@@ -2,8 +2,8 @@
 
 > 基于 [AgentScope](https://github.com/modelscope/agentscope) 构建的开源个人智能助手平台
 
-[![CI](https://github.com/YOUR_ORG/agentpal/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_ORG/agentpal/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/YOUR_ORG/agentpal/branch/main/graph/badge.svg)](https://codecov.io/gh/YOUR_ORG/agentpal)
+[![CI](https://github.com/robscc/nimo/actions/workflows/ci.yml/badge.svg)](https://github.com/robscc/nimo/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/robscc/nimo/branch/main/graph/badge.svg)](https://codecov.io/gh/robscc/nimo)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -57,8 +57,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/YOUR_ORG/agentpal.git
-cd agentpal
+git clone https://github.com/robscc/nimo.git
+cd nimo
 
 # 一键启动开发环境
 make dev
