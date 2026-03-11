@@ -64,7 +64,7 @@ class SubAgent(BaseAgent):
         ]
 
         model = _build_model(self._model_config)
-        response = await asyncio.to_thread(model, messages)
+        response = await model(messages)
         text = _extract_text(response)
         await self._remember_assistant(text)
         return text

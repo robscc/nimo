@@ -99,11 +99,9 @@ class PersonalAssistant(BaseAgent):
 
     async def _call_llm(self, messages: list[dict[str, Any]]) -> str:
         """调用 agentscope 1.x 模型，返回文本回复。"""
-        import asyncio
-
         model = _build_model(self._model_config)
-        # agentscope 1.x __call__ 是同步的，用 to_thread 避免阻塞
-        response = await asyncio.to_thread(model, messages)
+        # agentscope 1.x __call__ 是异步协程，直接 await
+        response = await model(messages)
         return _extract_text(response)
 
 
@@ -115,28 +113,41 @@ def _default_model_config() -> dict[str, Any]:
         "provider": settings.llm_provider,
         "model_name": settings.llm_model,
         "api_key": settings.llm_api_key,
+        "base_url": settings.llm_base_url,
     }
 
 
 def _build_model(config: dict[str, Any]) -> Any:
-    """根据 provider 实例化 agentscope 1.x 模型对象。"""
+    """根据 provider 实例化 agentscope 1.x 模型对象。
+
+    支持：
+    - "dashscope"  → DashScopeChatModel
+    - "openai"     → OpenAIChatModel（官方 API）
+    - "compatible" → OpenAIChatModel + 自定义 base_url（任何 OpenAI 兼容服务）
+    """
     provider = config.get("provider", "dashscope")
     model_name = config.get("model_name", "qwen-max")
     api_key = config.get("api_key", "")
+    base_url = config.get("base_url", "")
 
     if provider == "dashscope":
         from agentscope.model import DashScopeChatModel
         return DashScopeChatModel(model_name=model_name, api_key=api_key, stream=False)
-    elif provider in ("openai", "compatible"):
+
+    if provider in ("openai", "compatible"):
         from agentscope.model import OpenAIChatModel
+        # base_url 通过 client_kwargs 传入 OpenAI 客户端
+        client_kwargs: dict[str, Any] = {}
+        if base_url:
+            client_kwargs["base_url"] = base_url
         return OpenAIChatModel(
             model_name=model_name,
             api_key=api_key,
-            base_url=config.get("base_url", ""),
             stream=False,
+            client_kwargs=client_kwargs or None,
         )
-    else:
-        raise ValueError(f"不支持的 LLM provider: {provider!r}")
+
+    raise ValueError(f"不支持的 LLM provider: {provider!r}，可选：dashscope / openai / compatible")
 
 
 def _extract_text(response: Any) -> str:
