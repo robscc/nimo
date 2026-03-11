@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
+from collections.abc import AsyncGenerator
 from time import time
 from typing import Any
 
@@ -109,6 +111,106 @@ class PersonalAssistant(BaseAgent):
         await self._remember_assistant(final_text)
         return final_text
 
+    async def reply_stream(
+        self, user_input: str
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """流式对话，yield SSE 事件 dict。
+
+        事件类型::
+
+            {"type": "tool_start", "id": "...", "name": "...", "input": {...}}
+            {"type": "tool_done",  "id": "...", "name": "...", "output": "...",
+             "error": null, "duration_ms": 3}
+            {"type": "text_delta", "delta": "..."}
+            {"type": "done"}
+            {"type": "error",      "message": "..."}
+        """
+        try:
+            await self._remember_user(user_input)
+            history = await self._get_history(limit=20)
+
+            messages: list[dict[str, Any]] = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.extend(history[:-1])
+            messages.append({"role": "user", "content": user_input})
+
+            toolkit = await self._build_active_toolkit()
+            final_text = ""
+
+            for _ in range(MAX_TOOL_ROUNDS):
+                tools_schema = toolkit.get_json_schemas() if toolkit else None
+                model = _build_model(self._model_config)
+                response = await model(messages, tools=tools_schema)
+
+                tool_calls = [
+                    b for b in (response.content or [])
+                    if isinstance(b, dict) and b.get("type") == "tool_use"
+                ]
+
+                if not tool_calls:
+                    # 最终回复：分块流式输出
+                    final_text = _extract_text(response)
+                    for i in range(0, len(final_text), 4):
+                        yield {"type": "text_delta", "delta": final_text[i : i + 4]}
+                        await asyncio.sleep(0.008)
+                    break
+
+                # 转换为 OpenAI tool_calls 格式
+                openai_tool_calls = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(
+                                tc.get("input", {}), ensure_ascii=False
+                            ),
+                        },
+                    }
+                    for tc in tool_calls
+                ]
+                text_parts = [
+                    b["text"]
+                    for b in (response.content or [])
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "".join(text_parts) or None,
+                        "tool_calls": openai_tool_calls,
+                    }
+                )
+
+                # 逐一执行工具，实时 yield 事件
+                for tool_call in tool_calls:
+                    tc_id = tool_call.get("id", str(uuid.uuid4()))
+                    tc_name = tool_call.get("name", "")
+                    tc_input = tool_call.get("input", {})
+
+                    yield {"type": "tool_start", "id": tc_id, "name": tc_name, "input": tc_input}
+
+                    output_text, error_text, duration_ms = await self._run_tool(toolkit, tool_call)
+
+                    yield {
+                        "type": "tool_done",
+                        "id": tc_id,
+                        "name": tc_name,
+                        "output": output_text,
+                        "error": error_text,
+                        "duration_ms": duration_ms,
+                    }
+                    messages.append(
+                        {"role": "tool", "tool_call_id": tc_id, "content": output_text}
+                    )
+
+            await self._remember_assistant(final_text)
+            yield {"type": "done"}
+
+        except Exception as exc:  # noqa: BLE001
+            yield {"type": "error", "message": str(exc)}
+
     # ── SubAgent 派遣 ─────────────────────────────────────
 
     async def dispatch_sub_agent(
@@ -148,24 +250,24 @@ class PersonalAssistant(BaseAgent):
 
     # ── 工具执行 ──────────────────────────────────────────
 
-    async def _execute_tool(self, toolkit: Any, tool_call: dict[str, Any]) -> dict[str, Any]:
-        """执行单个工具调用，返回 OpenAI tool 消息，同步写调用日志。"""
+    async def _run_tool(
+        self, toolkit: Any, tool_call: dict[str, Any]
+    ) -> tuple[str, str | None, int]:
+        """执行单个工具，返回 (output_text, error_text, duration_ms)，并写调用日志。"""
         tool_name = tool_call.get("name", "")
         tool_input = tool_call.get("input", {})
-        tool_id = tool_call.get("id", str(uuid.uuid4()))
-
         start_ms = int(time() * 1000)
         output_text = ""
-        error_text = None
+        error_text: str | None = None
 
         try:
-            # call_tool_function 是 coroutine，await 后得到 AsyncGenerator
             tool_response = None
             async for chunk in await toolkit.call_tool_function(tool_call):
                 tool_response = chunk
             if tool_response:
                 output_text = "".join(
-                    b.get("text", "") for b in (tool_response.content or [])
+                    b.get("text", "")
+                    for b in (tool_response.content or [])
                     if isinstance(b, dict) and b.get("type") == "text"
                 )
             else:
@@ -191,7 +293,12 @@ class PersonalAssistant(BaseAgent):
             except Exception:
                 pass
 
-        # 返回 OpenAI 格式的 tool 消息
+        return output_text, error_text, duration_ms
+
+    async def _execute_tool(self, toolkit: Any, tool_call: dict[str, Any]) -> dict[str, Any]:
+        """执行单个工具调用，返回 OpenAI tool 消息（供非流式 reply() 使用）。"""
+        tool_id = tool_call.get("id", str(uuid.uuid4()))
+        output_text, _, _ = await self._run_tool(toolkit, tool_call)
         return {"role": "tool", "tool_call_id": tool_id, "content": output_text}
 
     async def _build_active_toolkit(self) -> Any:

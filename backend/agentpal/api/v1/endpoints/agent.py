@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,11 +28,6 @@ class ChatRequest(BaseModel):
     user_id: str = "anonymous"
 
 
-class ChatResponse(BaseModel):
-    session_id: str
-    reply: str
-
-
 class DispatchRequest(BaseModel):
     parent_session_id: str
     task_prompt: str
@@ -43,15 +41,35 @@ class TaskStatusResponse(BaseModel):
     error: str | None
 
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat")
 async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
-    """主助手对话接口（含工具调用）。"""
+    """主助手流式对话接口（SSE）。
+
+    返回 text/event-stream，每个事件为::
+
+        data: {"type": "tool_start", "id": "...", "name": "...", "input": {...}}
+        data: {"type": "tool_done",  "id": "...", "name": "...", "output": "...", ...}
+        data: {"type": "text_delta", "delta": "..."}
+        data: {"type": "done"}
+        data: {"type": "error",      "message": "..."}
+    """
     settings = get_settings()
     memory = MemoryFactory.create(settings.memory_backend, db=db)
-    # 传入 db 以支持工具启用状态读取和调用日志写入
     assistant = PersonalAssistant(session_id=req.session_id, memory=memory, db=db)
-    reply = await assistant.reply(req.message)
-    return ChatResponse(session_id=req.session_id, reply=reply)
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        async for event in assistant.reply_stream(req.message):
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.post("/dispatch", response_model=TaskStatusResponse)
