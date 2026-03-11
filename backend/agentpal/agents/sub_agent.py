@@ -1,21 +1,15 @@
-"""SubAgent — 异步子任务执行器，拥有独立 Session 和 Memory。
-
-设计说明：
-- SubAgent 由 PersonalAssistant.dispatch_sub_agent() 创建
-- 每个 SubAgent 持有独立的 session_id，记忆与主助手完全隔离
-- 通过 asyncio.create_task() 在后台异步运行
-- 任务完成/失败后更新 SubAgentTask 记录（状态 + 结果）
-- 后续可扩展：工具调用、多步规划、进度回调等
-"""
+"""SubAgent — 异步子任务执行器，拥有独立 Session 和 Memory。"""
 
 from __future__ import annotations
 
+import asyncio
 import traceback
 from datetime import datetime, timezone
 from typing import Any
 
 from agentpal.agents.base import BaseAgent
-from agentpal.memory.base import BaseMemory, MemoryMessage, MemoryRole
+from agentpal.agents.personal_assistant import _build_model, _extract_text
+from agentpal.memory.base import BaseMemory
 from agentpal.models.session import SubAgentTask, TaskStatus
 
 
@@ -27,7 +21,7 @@ class SubAgent(BaseAgent):
         memory:       子 Agent 的记忆后端（默认 BufferMemory，任务结束即释放）
         task:         对应的 SubAgentTask 数据库记录
         db:           AsyncSession，用于更新任务状态
-        model_config: LLM 配置
+        model_config: LLM 配置 dict
     """
 
     def __init__(
@@ -35,7 +29,7 @@ class SubAgent(BaseAgent):
         session_id: str,
         memory: BaseMemory,
         task: SubAgentTask,
-        db: Any,  # AsyncSession，避免循环导入
+        db: Any,
         model_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(session_id=session_id, memory=memory)
@@ -61,29 +55,21 @@ class SubAgent(BaseAgent):
         """执行子任务并返回结果文本。"""
         await self._remember_user(user_input)
 
-        # 构建简洁的任务提示
-        system = (
-            "你是一个专注的任务执行代理。"
-            "请认真完成被分配的任务，直接给出结果，无需多余的寒暄。"
-        )
         messages = [
-            {"role": "system", "content": system},
+            {
+                "role": "system",
+                "content": "你是一个专注的任务执行代理。请认真完成被分配的任务，直接给出结果，无需多余的寒暄。",
+            },
             {"role": "user", "content": user_input},
         ]
 
-        response = await self._call_llm(messages)
-        await self._remember_assistant(response)
-        return response
+        model = _build_model(self._model_config)
+        response = await asyncio.to_thread(model, messages)
+        text = _extract_text(response)
+        await self._remember_assistant(text)
+        return text
 
     # ── 内部方法 ──────────────────────────────────────────
-
-    async def _call_llm(self, messages: list[dict[str, Any]]) -> str:
-        """调用 LLM，返回文本。"""
-        from agentscope.models import load_model_by_config_name
-
-        model = load_model_by_config_name(self._model_config.get("config_name", "default"))
-        response = model(messages)
-        return response.text
 
     async def _update_status(
         self,
@@ -101,5 +87,4 @@ class SubAgent(BaseAgent):
         try:
             await self._db.flush()
         except Exception:
-            # DB 更新失败不应影响任务结果
             pass

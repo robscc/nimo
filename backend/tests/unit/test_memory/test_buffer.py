@@ -110,8 +110,8 @@ class TestBufferMemoryLoadFrom:
     async def test_load_from_preloads_messages(self):
         mem = BufferMemory(max_size=5)
         msgs = [make_msg(f"msg-{i}") for i in range(5)]
-        for m in msgs:
-            m.id = f"id-{i}"
+        for idx, m in enumerate(msgs):
+            m.id = f"id-{idx}"
         mem.load_from("test-session", msgs)
         result = await mem.get_recent("test-session")
         assert len(result) == 5

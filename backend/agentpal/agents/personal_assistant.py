@@ -6,12 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-import agentscope
-from agentscope.agents import UserAgent
-from agentscope.message import Msg
-
 from agentpal.agents.base import BaseAgent
-from agentpal.agents.sub_agent import SubAgent
 from agentpal.config import get_settings
 from agentpal.memory.base import BaseMemory
 from agentpal.memory.factory import MemoryFactory
@@ -31,8 +26,8 @@ class PersonalAssistant(BaseAgent):
     Args:
         session_id:    会话 ID（通常为渠道 + 用户 ID 的组合）
         memory:        记忆后端实例
-        system_prompt: 系统提示词，默认使用 DEFAULT_SYSTEM_PROMPT
-        model_config:  AgentScope 模型配置，默认从全局 Settings 读取
+        system_prompt: 系统提示词
+        model_config:  模型配置 dict，默认从全局 Settings 读取
     """
 
     def __init__(
@@ -44,10 +39,6 @@ class PersonalAssistant(BaseAgent):
     ) -> None:
         super().__init__(session_id=session_id, memory=memory, system_prompt=system_prompt)
         self._model_config = model_config or _default_model_config()
-        self._sub_tasks: dict[str, SubAgentTask] = {}  # 内存级任务索引（补充 DB）
-
-        # 初始化 AgentScope（幂等，重复调用无副作用）
-        agentscope.init(model_configs=[self._model_config])
 
     # ── 核心对话 ──────────────────────────────────────────
 
@@ -56,11 +47,10 @@ class PersonalAssistant(BaseAgent):
         await self._remember_user(user_input)
         history = await self._get_history(limit=20)
 
-        # 构建带历史的消息列表
-        messages = []
+        messages: list[dict[str, Any]] = []
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
-        messages.extend(history[:-1])  # 历史（不含刚写入的 user）
+        messages.extend(history[:-1])  # 历史（不含刚写入的 user msg）
         messages.append({"role": "user", "content": user_input})
 
         response = await self._call_llm(messages)
@@ -72,20 +62,12 @@ class PersonalAssistant(BaseAgent):
     async def dispatch_sub_agent(
         self,
         task_prompt: str,
-        db: Any,  # AsyncSession，避免循环导入用 Any
+        db: Any,
         context: dict[str, Any] | None = None,
     ) -> SubAgentTask:
-        """创建并异步启动一个 SubAgent 任务。
-
-        Args:
-            task_prompt: 子任务描述
-            db:          AsyncSession，用于持久化任务记录
-            context:     额外上下文信息
-
-        Returns:
-            SubAgentTask 记录（status=PENDING，异步执行中）
-        """
+        """创建并异步启动一个 SubAgent 任务。"""
         import asyncio
+        from agentpal.agents.sub_agent import SubAgent
 
         task_id = str(uuid.uuid4())
         sub_session_id = f"sub:{self.session_id}:{task_id}"
@@ -101,8 +83,7 @@ class PersonalAssistant(BaseAgent):
         db.add(task)
         await db.flush()
 
-        # 创建 SubAgent（使用独立 memory 实例）
-        sub_memory = MemoryFactory.create("buffer")  # SubAgent 默认纯内存
+        sub_memory = MemoryFactory.create("buffer")
         sub_agent = SubAgent(
             session_id=sub_session_id,
             memory=sub_memory,
@@ -111,27 +92,58 @@ class PersonalAssistant(BaseAgent):
             model_config=self._model_config,
         )
 
-        # 异步执行（不阻塞主对话）
         asyncio.create_task(sub_agent.run(task_prompt))
         return task
 
-    # ── 内部方法 ──────────────────────────────────────────
+    # ── LLM 调用 ──────────────────────────────────────────
 
     async def _call_llm(self, messages: list[dict[str, Any]]) -> str:
-        """调用 AgentScope LLM，返回文本回复。"""
-        settings = get_settings()
-        from agentscope.models import load_model_by_config_name
+        """调用 agentscope 1.x 模型，返回文本回复。"""
+        import asyncio
 
-        model = load_model_by_config_name(self._model_config["config_name"])
-        response = model(messages)
-        return response.text
+        model = _build_model(self._model_config)
+        # agentscope 1.x __call__ 是同步的，用 to_thread 避免阻塞
+        response = await asyncio.to_thread(model, messages)
+        return _extract_text(response)
 
+
+# ── 辅助函数 ──────────────────────────────────────────────
 
 def _default_model_config() -> dict[str, Any]:
     settings = get_settings()
     return {
-        "config_name": "default",
-        "model_type": "dashscope_chat" if settings.llm_provider == "dashscope" else "openai_chat",
+        "provider": settings.llm_provider,
         "model_name": settings.llm_model,
         "api_key": settings.llm_api_key,
     }
+
+
+def _build_model(config: dict[str, Any]) -> Any:
+    """根据 provider 实例化 agentscope 1.x 模型对象。"""
+    provider = config.get("provider", "dashscope")
+    model_name = config.get("model_name", "qwen-max")
+    api_key = config.get("api_key", "")
+
+    if provider == "dashscope":
+        from agentscope.model import DashScopeChatModel
+        return DashScopeChatModel(model_name=model_name, api_key=api_key, stream=False)
+    elif provider in ("openai", "compatible"):
+        from agentscope.model import OpenAIChatModel
+        return OpenAIChatModel(
+            model_name=model_name,
+            api_key=api_key,
+            base_url=config.get("base_url", ""),
+            stream=False,
+        )
+    else:
+        raise ValueError(f"不支持的 LLM provider: {provider!r}")
+
+
+def _extract_text(response: Any) -> str:
+    """从 agentscope 1.x ChatResponse 中提取纯文本。"""
+    # response.content 是 list[TextBlock | ToolUseBlock | ...]
+    parts: list[str] = []
+    for block in getattr(response, "content", []):
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text", ""))
+    return "".join(parts) if parts else str(response)

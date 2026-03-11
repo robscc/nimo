@@ -83,7 +83,12 @@ class TestSubAgentMemoryIsolation:
 
     @pytest.mark.asyncio
     async def test_sub_agent_writes_to_own_memory(self, sub_agent: SubAgent):
-        with patch.object(sub_agent, "_call_llm", return_value="response"):
+        mock_model = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [{"type": "text", "text": "response"}]
+        mock_model.return_value = mock_response
+
+        with patch("agentpal.agents.sub_agent._build_model", return_value=mock_model):
             await sub_agent.reply("question")
 
         user_msgs = await sub_agent.memory.get_recent(sub_agent.session_id)
