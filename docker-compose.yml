@@ -1,0 +1,42 @@
+version: "3.9"
+
+# 极简部署：仅 backend + frontend，存储层使用 SQLite（挂载 volume 持久化）
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: agentpal-backend
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8088}:8088"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: sqlite+aiosqlite:///./data/agentpal.db
+    volumes:
+      - backend_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: agentpal-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_BASE_URL: http://backend:8088
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  backend_data:
