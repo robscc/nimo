@@ -6,14 +6,14 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.agents.personal_assistant import PersonalAssistant
 from agentpal.config import get_settings
 from agentpal.database import get_db
 from agentpal.memory.factory import MemoryFactory
-from agentpal.models.session import SessionRecord, SubAgentTask, TaskStatus
-from sqlalchemy import select
+from agentpal.models.session import SubAgentTask
 
 router = APIRouter()
 
@@ -45,10 +45,11 @@ class TaskStatusResponse(BaseModel):
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
-    """主助手对话接口。"""
+    """主助手对话接口（含工具调用）。"""
     settings = get_settings()
     memory = MemoryFactory.create(settings.memory_backend, db=db)
-    assistant = PersonalAssistant(session_id=req.session_id, memory=memory)
+    # 传入 db 以支持工具启用状态读取和调用日志写入
+    assistant = PersonalAssistant(session_id=req.session_id, memory=memory, db=db)
     reply = await assistant.reply(req.message)
     return ChatResponse(session_id=req.session_id, reply=reply)
 
@@ -58,7 +59,7 @@ async def dispatch_sub_agent(req: DispatchRequest, db: AsyncSession = Depends(ge
     """派遣 SubAgent 异步执行任务。"""
     settings = get_settings()
     memory = MemoryFactory.create(settings.memory_backend, db=db)
-    assistant = PersonalAssistant(session_id=req.parent_session_id, memory=memory)
+    assistant = PersonalAssistant(session_id=req.parent_session_id, memory=memory, db=db)
     task = await assistant.dispatch_sub_agent(
         task_prompt=req.task_prompt,
         db=db,
@@ -75,9 +76,7 @@ async def dispatch_sub_agent(req: DispatchRequest, db: AsyncSession = Depends(ge
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
 async def get_task_status(task_id: str, db: AsyncSession = Depends(get_db)):
     """查询 SubAgent 任务状态。"""
-    result = await db.execute(
-        select(SubAgentTask).where(SubAgentTask.id == task_id)
-    )
+    result = await db.execute(select(SubAgentTask).where(SubAgentTask.id == task_id))
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
