@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -39,6 +40,10 @@ class Settings(BaseSettings):
     memory_backend: Literal["buffer", "sqlite", "hybrid"] = "hybrid"
     memory_buffer_size: int = 30      # BufferMemory 最大条数
     memory_sqlite_limit: int = 200    # SQLite 每次查询上限
+
+    # ── Workspace ─────────────────────────────────────────
+    # Agent 工作空间目录，默认 ~/.nimo（可通过 WORKSPACE_DIR 环境变量覆盖）
+    workspace_dir: str = str(Path.home() / ".nimo")
 
     # ── Skill 系统 ──────────────────────────────────────
     skills_dir: str = "./skills_data"   # 技能安装目录

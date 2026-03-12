@@ -4,21 +4,44 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.agents.personal_assistant import PersonalAssistant
 from agentpal.config import get_settings
 from agentpal.database import get_db
 from agentpal.memory.factory import MemoryFactory
-from agentpal.models.session import SubAgentTask
+from agentpal.models.session import SessionRecord, SessionStatus, SubAgentTask
 
 router = APIRouter()
+
+
+async def _ensure_session(db: AsyncSession, session_id: str, channel: str) -> None:
+    """Upsert SessionRecord，确保 session 始终出现在列表中。"""
+    now = datetime.now(timezone.utc)
+    stmt = (
+        sqlite_insert(SessionRecord)
+        .values(
+            id=session_id,
+            channel=channel,
+            status=SessionStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=["id"],
+            set_={"updated_at": now},
+        )
+    )
+    await db.execute(stmt)
+    await db.commit()
 
 
 class ChatRequest(BaseModel):
@@ -53,6 +76,8 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
         data: {"type": "done"}
         data: {"type": "error",      "message": "..."}
     """
+    await _ensure_session(db, req.session_id, req.channel)
+
     settings = get_settings()
     memory = MemoryFactory.create(settings.memory_backend, db=db)
     assistant = PersonalAssistant(session_id=req.session_id, memory=memory, db=db)
@@ -60,6 +85,25 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     async def event_stream() -> AsyncGenerator[str, None]:
         async for event in assistant.reply_stream(req.message):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+            # send_file_to_user 成功 → 额外 emit file 事件
+            if (
+                event.get("type") == "tool_done"
+                and event.get("name") == "send_file_to_user"
+                and not event.get("error")
+            ):
+                try:
+                    info = json.loads(event.get("output", "{}"))
+                    if info.get("status") == "sent":
+                        file_event = {
+                            "type": "file",
+                            "url": info["url"],
+                            "name": info["filename"],
+                            "mime": info.get("mime", "application/octet-stream"),
+                        }
+                        yield f"data: {json.dumps(file_event, ensure_ascii=False)}\n\n"
+                except Exception:
+                    pass
 
     return StreamingResponse(
         event_stream(),

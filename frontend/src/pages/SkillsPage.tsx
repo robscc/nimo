@@ -26,7 +26,7 @@ function Toggle({ enabled, onChange, disabled }: {
       disabled={disabled}
       className={clsx(
         "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none",
-        enabled ? "bg-indigo-600" : "bg-gray-200",
+        enabled ? "bg-nimo-500" : "bg-gray-200",
         disabled && "opacity-50 cursor-not-allowed"
       )}
     >
@@ -85,7 +85,7 @@ function SkillCard({
         {/* Icon */}
         <div className={clsx(
           "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
-          skill.enabled ? "bg-indigo-100 text-indigo-600" : "bg-gray-100 text-gray-400"
+          skill.enabled ? "bg-nimo-100 text-nimo-500" : "bg-gray-100 text-gray-400"
         )}>
           <Puzzle size={20} />
         </div>
@@ -106,7 +106,7 @@ function SkillCard({
           {skill.tools.length > 0 && (
             <div className="flex flex-wrap gap-1 mt-1.5">
               {skill.tools.map((t) => (
-                <span key={t} className="text-xs bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded font-mono">
+                <span key={t} className="text-xs bg-nimo-50 text-nimo-500 px-1.5 py-0.5 rounded font-mono">
                   {t}
                 </span>
               ))}
@@ -144,7 +144,7 @@ function SkillCard({
                   href={skill.source_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="text-indigo-600 hover:underline flex items-center gap-0.5"
+                  className="text-nimo-500 hover:underline flex items-center gap-0.5"
                   onClick={(e) => e.stopPropagation()}
                 >
                   链接 <ExternalLink size={10} />
@@ -225,7 +225,7 @@ export default function SkillsPage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="font-semibold text-gray-800 flex items-center gap-2">
-              <Package size={20} className="text-indigo-500" />
+              <Package size={20} className="text-nimo-500" />
               技能管理
             </h1>
             <p className="text-xs text-gray-400 mt-0.5">
@@ -237,12 +237,12 @@ export default function SkillsPage() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowUrlForm((o) => !o)}
-              className="flex items-center gap-1.5 text-xs text-gray-600 hover:text-indigo-600 hover:bg-indigo-50 px-3 py-2 rounded-lg transition-colors border border-gray-200"
+              className="flex items-center gap-1.5 text-xs text-gray-600 hover:text-nimo-500 hover:bg-nimo-50 px-3 py-2 rounded-lg transition-colors border border-gray-200"
             >
               <LinkIcon size={14} />
               从 URL 安装
             </button>
-            <label className="flex items-center gap-1.5 text-xs text-white bg-indigo-600 hover:bg-indigo-700 px-3 py-2 rounded-lg transition-colors cursor-pointer">
+            <label className="flex items-center gap-1.5 text-xs text-white bg-nimo-500 hover:bg-nimo-600 px-3 py-2 rounded-lg transition-colors cursor-pointer">
               <Upload size={14} />
               上传 ZIP
               <input
@@ -264,13 +264,13 @@ export default function SkillsPage() {
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
               placeholder="输入技能包 URL（支持 clawhub.ai / skills.sh / 直接 ZIP）"
-              className="flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-indigo-400 transition-colors"
+              className="flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-nimo-400 transition-colors"
               onKeyDown={(e) => e.key === "Enter" && handleUrlInstall()}
             />
             <button
               onClick={handleUrlInstall}
               disabled={installUrl.isPending || !urlInput.trim()}
-              className="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 transition-colors flex items-center gap-1.5"
+              className="px-4 py-2 text-sm rounded-lg bg-nimo-500 text-white hover:bg-nimo-600 disabled:opacity-40 transition-colors flex items-center gap-1.5"
             >
               {installUrl.isPending ? <Loader2 size={14} className="animate-spin" /> : null}
               安装

@@ -1,10 +1,14 @@
 import { useState, useRef, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Send, Trash2, Wrench, ChevronDown, ChevronRight,
-  CheckCircle2, Loader2, XCircle, Paperclip,
+  CheckCircle2, Loader2, XCircle, Paperclip, Brain,
 } from "lucide-react";
 import clsx from "clsx";
-import { clearMemory } from "../api";
+import { clearMemory, createSession, getSessionMessages } from "../api";
+import NimoIcon from "../components/NimoIcon";
+import SessionPanel from "../components/SessionPanel";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -18,14 +22,136 @@ interface ToolCallEntry {
   status: "running" | "done";
 }
 
+interface FileAttachment {
+  url: string;
+  name: string;
+  mime: string;
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
+  thinking?: string;
+  streamingThinking?: boolean;
   toolCalls?: ToolCallEntry[];
+  files?: FileAttachment[];
   streaming?: boolean;
 }
 
-const SESSION_ID = `web:${crypto.randomUUID()}`;
+// ── Thinking Bubble ────────────────────────────────────────
+
+function ThinkingBubble({ content, streaming }: { content: string; streaming?: boolean }) {
+  const [collapsed, setCollapsed] = useState(false);
+
+  // 思考完成后 1.5s 自动折叠
+  useEffect(() => {
+    if (!streaming && content) {
+      const t = setTimeout(() => setCollapsed(true), 1500);
+      return () => clearTimeout(t);
+    }
+  }, [streaming, content]);
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50/80 text-xs overflow-hidden">
+      <button
+        onClick={() => setCollapsed((c) => !c)}
+        className="w-full flex items-center gap-1.5 px-3 py-1.5 text-left hover:bg-gray-100 transition-colors"
+      >
+        {streaming
+          ? <Loader2 size={11} className="text-gray-400 animate-spin shrink-0" />
+          : <Brain size={11} className="text-gray-400 shrink-0" />}
+        <span className="text-gray-500 font-medium">思考过程</span>
+        {streaming && <span className="text-gray-400 animate-pulse ml-0.5">…</span>}
+        <span className="ml-auto text-gray-400 shrink-0">
+          {collapsed
+            ? <ChevronRight size={11} />
+            : <ChevronDown size={11} />}
+        </span>
+      </button>
+      {!collapsed && (
+        <div className="px-3 pt-2 pb-2.5 border-t border-gray-200 text-gray-500 leading-relaxed whitespace-pre-wrap max-h-52 overflow-y-auto">
+          {content}
+          {streaming && (
+            <span className="inline-block w-0.5 h-[1em] bg-gray-400 ml-0.5 align-middle animate-pulse" />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Shell Output Renderer ──────────────────────────────────
+
+type ShellParsed =
+  | { type: "error"; message: string }
+  | { type: "result"; returncode: number | null; stdout: string; stderr: string };
+
+function parseShellOutput(raw: string): ShellParsed {
+  const errorMatch = raw.match(/<error>([\s\S]*?)<\/error>/);
+  if (errorMatch) return { type: "error", message: errorMatch[1].trim() };
+
+  const rc = raw.match(/<returncode>(\d+)<\/returncode>/);
+  const stdout = raw.match(/<stdout>([\s\S]*?)<\/stdout>/)?.[1] ?? "";
+  const stderr = raw.match(/<stderr>([\s\S]*?)<\/stderr>/)?.[1] ?? "";
+  return {
+    type: "result",
+    returncode: rc ? parseInt(rc[1], 10) : null,
+    stdout: stdout.trim(),
+    stderr: stderr.trim(),
+  };
+}
+
+function ShellOutput({ command, raw }: { command: string; raw: string }) {
+  const parsed = parseShellOutput(raw);
+
+  if (parsed.type === "error") {
+    return (
+      <div className="rounded-lg bg-gray-950 text-xs font-mono overflow-hidden">
+        <div className="flex items-center gap-2 px-3 py-2 bg-gray-800">
+          <span className="text-gray-500">$</span>
+          <span className="text-gray-300 flex-1 truncate">{command}</span>
+        </div>
+        <p className="px-3 py-2 text-red-400 whitespace-pre-wrap">{parsed.message}</p>
+      </div>
+    );
+  }
+
+  const ok = parsed.returncode === 0;
+
+  return (
+    <div className="rounded-lg bg-gray-950 text-xs font-mono overflow-hidden">
+      {/* header */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-gray-800">
+        <span className="text-gray-500">$</span>
+        <span className="text-gray-300 flex-1 truncate">{command}</span>
+        {parsed.returncode !== null && (
+          <span className={clsx(
+            "px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0",
+            ok ? "bg-green-900/50 text-green-400" : "bg-red-900/50 text-red-400",
+          )}>
+            {ok ? "exit 0" : `exit ${parsed.returncode}`}
+          </span>
+        )}
+      </div>
+      {/* stdout */}
+      {parsed.stdout && (
+        <pre className="px-3 py-2.5 text-gray-300 overflow-x-auto max-h-72 whitespace-pre-wrap leading-relaxed">
+          {parsed.stdout}
+        </pre>
+      )}
+      {/* stderr */}
+      {parsed.stderr && (
+        <pre className={clsx(
+          "px-3 py-2.5 overflow-x-auto max-h-40 whitespace-pre-wrap leading-relaxed",
+          parsed.stdout && "border-t border-gray-800",
+          ok ? "text-amber-400" : "text-red-400",
+        )}>
+          {parsed.stderr}
+        </pre>
+      )}
+    </div>
+  );
+}
 
 // ── Tool Call Card ─────────────────────────────────────────
 
@@ -36,25 +162,25 @@ function ToolCallCard({ tc }: { tc: ToolCallEntry }) {
   return (
     <div className={clsx(
       "rounded-lg border text-xs overflow-hidden",
-      hasError ? "border-red-200 bg-red-50/60" : "border-indigo-100 bg-indigo-50/50",
+      hasError ? "border-red-200 bg-red-50/60" : "border-nimo-100 bg-nimo-50/50",
     )}>
       <button
         onClick={() => setOpen((o) => !o)}
         className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-black/5 transition-colors"
       >
         {tc.status === "running" ? (
-          <Loader2 size={12} className="text-indigo-500 animate-spin shrink-0" />
+          <Loader2 size={12} className="text-nimo-500 animate-spin shrink-0" />
         ) : hasError ? (
           <XCircle size={12} className="text-red-400 shrink-0" />
         ) : (
           <CheckCircle2 size={12} className="text-green-500 shrink-0" />
         )}
-        <Wrench size={12} className={clsx("shrink-0", hasError ? "text-red-400" : "text-indigo-400")} />
-        <span className={clsx("font-mono font-medium", hasError ? "text-red-700" : "text-indigo-700")}>
+        <Wrench size={12} className={clsx("shrink-0", hasError ? "text-red-400" : "text-nimo-400")} />
+        <span className={clsx("font-mono font-medium", hasError ? "text-red-700" : "text-nimo-600")}>
           {tc.name}
         </span>
         {tc.status === "running" ? (
-          <span className="text-indigo-400 text-xs">执行中…</span>
+          <span className="text-nimo-400 text-xs">执行中…</span>
         ) : (
           <span className="text-gray-400 truncate flex-1 text-left ml-1">
             {JSON.stringify(tc.input).slice(0, 60)}
@@ -78,15 +204,21 @@ function ToolCallCard({ tc }: { tc: ToolCallEntry }) {
           </div>
           {tc.output && (
             <div>
-              <p className={clsx("mb-1 font-medium", hasError ? "text-red-500" : "text-gray-500")}>
-                {hasError ? "错误" : "输出结果"}
-              </p>
-              <pre className={clsx(
-                "rounded p-2 border overflow-x-auto max-h-48 whitespace-pre-wrap text-xs",
-                hasError ? "bg-red-50 border-red-100 text-red-600" : "bg-white text-gray-700",
-              )}>
-                {tc.output}
-              </pre>
+              {tc.name === "execute_shell_command" ? (
+                <ShellOutput command={tc.input.command as string} raw={tc.output} />
+              ) : (
+                <>
+                  <p className={clsx("mb-1 font-medium", hasError ? "text-red-500" : "text-gray-500")}>
+                    {hasError ? "错误" : "输出结果"}
+                  </p>
+                  <pre className={clsx(
+                    "rounded p-2 border overflow-x-auto max-h-48 whitespace-pre-wrap text-xs",
+                    hasError ? "bg-red-50 border-red-100 text-red-600" : "bg-white text-gray-700",
+                  )}>
+                    {tc.output}
+                  </pre>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -98,19 +230,57 @@ function ToolCallCard({ tc }: { tc: ToolCallEntry }) {
 // ── Main Page ──────────────────────────────────────────────
 
 export default function ChatPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const sessionIdParam = searchParams.get("session");
+  const [sessionId, setSessionId] = useState<string | null>(sessionIdParam);
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const queryClient = useQueryClient();
+
+  // 初始化：无 session 参数时自动创建
+  useEffect(() => {
+    if (!sessionId) {
+      createSession().then(({ id }) => {
+        setSessionId(id);
+        setSearchParams({ session: id }, { replace: true });
+      });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // 切换到历史 session
+  const handleSelectSession = async (id: string) => {
+    abortRef.current?.abort();
+    setIsStreaming(false);
+    setSessionId(id);
+    setSearchParams({ session: id });
+    const history = await getSessionMessages(id);
+    setMessages(
+      history.map((m) => ({ role: m.role as "user" | "assistant", content: m.content }))
+    );
+  };
+
+  // 新建对话回调
+  const handleNewSession = (id: string) => {
+    abortRef.current?.abort();
+    setIsStreaming(false);
+    setSessionId(id);
+    setMessages([]);
+    setSearchParams({ session: id });
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  };
+
   const sendMessage = async (text: string) => {
-    if (!text.trim() || isStreaming) return;
+    if (!text.trim() || isStreaming || !sessionId) return;
     setInput("");
     setIsStreaming(true);
 
@@ -127,7 +297,7 @@ export default function ChatPage() {
       const resp = await fetch("/api/v1/agent/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: SESSION_ID, message: text, channel: "web" }),
+        body: JSON.stringify({ session_id: sessionId, message: text, channel: "web" }),
         signal: abortRef.current.signal,
       });
 
@@ -153,7 +323,13 @@ export default function ChatPage() {
           if (!line.startsWith("data: ")) continue;
           const ev = JSON.parse(line.slice(6)) as Record<string, unknown>;
 
-          if (ev.type === "tool_start") {
+          if (ev.type === "thinking_delta") {
+            updateLast((m) => ({
+              ...m,
+              thinking: (m.thinking ?? "") + (ev.delta as string),
+              streamingThinking: true,
+            }));
+          } else if (ev.type === "tool_start") {
             updateLast((m) => ({
               ...m,
               toolCalls: [
@@ -182,13 +358,27 @@ export default function ChatPage() {
               ),
             }));
           } else if (ev.type === "text_delta") {
-            updateLast((m) => ({ ...m, content: m.content + (ev.delta as string) }));
+            updateLast((m) => ({
+              ...m,
+              content: m.content + (ev.delta as string),
+              streamingThinking: false,
+            }));
+          } else if (ev.type === "file") {
+            updateLast((m) => ({
+              ...m,
+              files: [
+                ...(m.files ?? []),
+                { url: ev.url as string, name: ev.name as string, mime: ev.mime as string },
+              ],
+            }));
           } else if (ev.type === "done") {
             updateLast((m) => ({ ...m, streaming: false }));
+            // 刷新会话列表（更新 title 和 message_count）
+            queryClient.invalidateQueries({ queryKey: ["sessions"] });
           } else if (ev.type === "error") {
             updateLast((m) => ({
               ...m,
-              content: `⚠️ ${ev.message as string}`,
+              content: `\u26a0\ufe0f ${ev.message as string}`,
               streaming: false,
             }));
           }
@@ -199,7 +389,7 @@ export default function ChatPage() {
         setMessages((prev) =>
           prev.map((m, i) =>
             i === prev.length - 1
-              ? { ...m, content: "⚠️ 请求失败，请检查网络或稍后重试", streaming: false }
+              ? { ...m, content: "\u26a0\ufe0f 请求失败，请检查网络或稍后重试", streaming: false }
               : m,
           ),
         );
@@ -218,7 +408,6 @@ export default function ChatPage() {
     const file = e.target.files?.[0];
     if (!file || !file.name.endsWith(".zip")) return;
 
-    // Add a user message about the upload
     setMessages((prev) => [
       ...prev,
       { role: "user", content: `📦 上传技能包: ${file.name}` },
@@ -270,100 +459,147 @@ export default function ChatPage() {
     }
   };
 
+  // 清空当前对话并创建新 session
   const handleClear = async () => {
     abortRef.current?.abort();
-    await clearMemory(SESSION_ID);
+    if (sessionId) await clearMemory(sessionId);
+    const { id } = await createSession();
+    setSessionId(id);
     setMessages([]);
+    setSearchParams({ session: id });
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
   };
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-6 py-3 bg-white border-b">
-        <h1 className="font-semibold text-gray-800">AgentPal 助手</h1>
-        <button
-          onClick={handleClear}
-          className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-          title="清空对话"
-        >
-          <Trash2 size={18} />
-        </button>
-      </div>
+    <div className="flex h-full">
+      {/* Session Panel */}
+      <SessionPanel
+        currentSessionId={sessionId}
+        onSelectSession={handleSelectSession}
+        onNewSession={handleNewSession}
+        collapsed={panelCollapsed}
+        onToggleCollapse={() => setPanelCollapsed((v) => !v)}
+      />
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-        {messages.length === 0 && (
-          <div className="flex items-center justify-center h-full text-gray-400">
-            <p>你好！有什么我可以帮你的？</p>
-          </div>
-        )}
-
-        {messages.map((msg, i) => (
-          <div
-            key={i}
-            className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+      {/* Chat Area */}
+      <div className="flex flex-col flex-1 min-w-0">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-3 bg-white border-b">
+          <h1 className="font-semibold text-gray-800 flex items-center gap-2">
+            <NimoIcon size={20} />
+            <span>nimo</span>
+          </h1>
+          <button
+            onClick={handleClear}
+            className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+            title="清空对话"
           >
-            {msg.role === "assistant" ? (
-              <div className="max-w-[75%] space-y-1.5 min-w-0">
-                {/* Tool call cards */}
-                {(msg.toolCalls ?? []).map((tc) => (
-                  <ToolCallCard key={tc.id} tc={tc} />
-                ))}
-                {/* Text bubble — show if has content OR still streaming */}
-                {(msg.content || msg.streaming) && (
-                  <div className="bg-white border rounded-2xl px-4 py-2.5 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
-                    {msg.content || (
-                      <span className="text-gray-400 animate-pulse">思考中…</span>
-                    )}
-                    {/* Blinking cursor */}
-                    {msg.streaming && msg.content && (
-                      <span className="inline-block w-0.5 h-[1em] bg-indigo-500 ml-0.5 align-middle animate-pulse" />
-                    )}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="max-w-[70%] bg-indigo-600 text-white rounded-2xl px-4 py-2.5 text-sm leading-relaxed">
-                {msg.content}
-              </div>
-            )}
-          </div>
-        ))}
+            <Trash2 size={18} />
+          </button>
+        </div>
 
-        <div ref={bottomRef} />
-      </div>
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+          {messages.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-4">
+              <NimoIcon size={64} />
+              <p className="text-lg text-gray-500">嗨！我是 nimo，你的智能助手 🐠</p>
+            </div>
+          )}
 
-      {/* Input */}
-      <form onSubmit={handleSubmit} className="px-6 py-4 bg-white border-t flex gap-3">
-        <label
-          className="w-10 h-10 rounded-xl border border-gray-200 text-gray-400 hover:text-indigo-500 hover:border-indigo-300 flex items-center justify-center cursor-pointer transition-colors shrink-0"
-          title="上传技能包 (.zip)"
-        >
-          <Paperclip size={18} />
+          {messages.map((msg, i) => (
+            <div
+              key={i}
+              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+            >
+              {msg.role === "assistant" ? (
+                <div className="max-w-[75%] space-y-1.5 min-w-0">
+                  {/* Thinking bubble */}
+                  {msg.thinking && (
+                    <ThinkingBubble content={msg.thinking} streaming={msg.streamingThinking} />
+                  )}
+                  {/* Tool call cards */}
+                  {(msg.toolCalls ?? []).map((tc) => (
+                    <ToolCallCard key={tc.id} tc={tc} />
+                  ))}
+                  {/* 文件附件 */}
+                  {(msg.files ?? []).map((f, fi) =>
+                    f.mime.startsWith("image/") ? (
+                      <img
+                        key={fi}
+                        src={f.url}
+                        alt={f.name}
+                        className="max-w-full rounded-xl border shadow-sm max-h-80 object-contain"
+                      />
+                    ) : (
+                      <a
+                        key={fi}
+                        href={f.url}
+                        download={f.name}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-center gap-2 px-3 py-2 rounded-lg border bg-white text-sm text-nimo-600 hover:bg-nimo-50 transition-colors"
+                      >
+                        <Paperclip size={14} /> {f.name}
+                      </a>
+                    )
+                  )}
+                  {/* Text bubble — show if has content OR still streaming */}
+                  {(msg.content || msg.streaming) && (
+                    <div className="bg-white border rounded-2xl px-4 py-2.5 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
+                      {msg.content || (
+                        <span className="text-gray-400 animate-pulse">思考中…</span>
+                      )}
+                      {/* Blinking cursor */}
+                      {msg.streaming && msg.content && (
+                        <span className="inline-block w-0.5 h-[1em] bg-nimo-500 ml-0.5 align-middle animate-pulse" />
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="max-w-[70%] bg-nimo-500 text-white rounded-2xl px-4 py-2.5 text-sm leading-relaxed">
+                  {msg.content}
+                </div>
+              )}
+            </div>
+          ))}
+
+          <div ref={bottomRef} />
+        </div>
+
+        {/* Input */}
+        <form onSubmit={handleSubmit} className="px-6 py-4 bg-white border-t flex gap-3">
+          <label
+            className="w-10 h-10 rounded-xl border border-gray-200 text-gray-400 hover:text-nimo-500 hover:border-nimo-300 flex items-center justify-center cursor-pointer transition-colors shrink-0"
+            title="上传技能包 (.zip)"
+          >
+            <Paperclip size={18} />
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".zip"
+              className="hidden"
+              onChange={handleFileUpload}
+              disabled={isStreaming}
+            />
+          </label>
           <input
-            ref={fileInputRef}
-            type="file"
-            accept=".zip"
-            className="hidden"
-            onChange={handleFileUpload}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="输入消息...（支持拖入 .zip 技能包）"
+            className="flex-1 rounded-xl border border-gray-200 px-4 py-2 text-sm outline-none focus:border-nimo-400 transition-colors"
             disabled={isStreaming}
           />
-        </label>
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="输入消息...（支持拖入 .zip 技能包）"
-          className="flex-1 rounded-xl border border-gray-200 px-4 py-2 text-sm outline-none focus:border-indigo-400 transition-colors"
-          disabled={isStreaming}
-        />
-        <button
-          type="submit"
-          disabled={isStreaming || !input.trim()}
-          className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center hover:bg-indigo-700 disabled:opacity-40 transition-colors"
-        >
-          <Send size={18} />
-        </button>
-      </form>
+          <button
+            type="submit"
+            disabled={isStreaming || !input.trim()}
+            className="w-10 h-10 rounded-xl bg-nimo-500 text-white flex items-center justify-center hover:bg-nimo-600 disabled:opacity-40 transition-colors"
+          >
+            <Send size={18} />
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

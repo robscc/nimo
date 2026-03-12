@@ -7,8 +7,7 @@ help:
 	@echo "开发:"
 	@echo "  make install       安装所有依赖"
 	@echo "  make dev           启动完整开发环境"
-	@echo "  make backend       仅启动后端服务"
-	@echo "  make frontend      仅启动前端服务"
+	@echo "  make backend       仅启动后端服务"	@echo "  make frontend      仅启动前端服务"
 	@echo ""
 	@echo "测试:"
 	@echo "  make test          运行全部测试"
@@ -43,8 +42,10 @@ dev:
 	make -j2 backend frontend
 
 backend:
-	@echo ">> 启动后端服务 (http://localhost:8088)..."
-	cd backend && uvicorn agentpal.main:app --reload --host 0.0.0.0 --port 8088
+	@echo ">> 启动后端服务 (http://localhost:8099)..."
+	cd backend && .venv/bin/python -m uvicorn agentpal.main:app \
+		--reload --reload-dir agentpal \
+		--host 0.0.0.0 --port 8099
 
 frontend:
 	@echo ">> 启动前端服务 (http://localhost:3000)..."

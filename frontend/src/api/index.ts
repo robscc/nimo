@@ -26,6 +26,20 @@ export interface TaskStatusResponse {
   error: string | null;
 }
 
+export interface SessionSummary {
+  id: string;
+  title: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HistoryMessage {
+  role: string;
+  content: string;
+  created_at: string;
+}
+
 // ── API 方法 ──────────────────────────────────────────────
 
 export async function chat(req: ChatRequest): Promise<ChatResponse> {
@@ -40,6 +54,91 @@ export async function getTaskStatus(taskId: string): Promise<TaskStatusResponse>
 
 export async function clearMemory(sessionId: string): Promise<void> {
   await api.delete(`/sessions/${sessionId}/memory`);
+}
+
+export async function getSessions(channel = "web"): Promise<SessionSummary[]> {
+  const { data } = await api.get<SessionSummary[]>("/sessions", { params: { channel } });
+  return data;
+}
+
+export async function createSession(channel = "web"): Promise<{ id: string }> {
+  const { data } = await api.post<{ id: string }>("/sessions", null, { params: { channel } });
+  return data;
+}
+
+export async function getSessionMessages(sessionId: string): Promise<HistoryMessage[]> {
+  const { data } = await api.get<HistoryMessage[]>(`/sessions/${sessionId}/messages`);
+  return data;
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  await api.delete(`/sessions/${sessionId}`);
+}
+
+// ── Workspace API ─────────────────────────────────────────
+
+export interface WorkspaceFileContent {
+  name: string;
+  content: string;
+}
+
+export interface WorkspaceInfo {
+  workspace_dir: string;
+  exists: boolean;
+  bootstrapped: boolean;
+  files: Record<string, boolean>;
+}
+
+export interface CanvasFileMeta {
+  name: string;
+  size: number;
+  modified_at: string;
+}
+
+export async function getWorkspaceInfo(): Promise<WorkspaceInfo> {
+  const { data } = await api.get<WorkspaceInfo>("/workspace/info");
+  return data;
+}
+
+export async function getWorkspaceFiles(): Promise<string[]> {
+  const { data } = await api.get<string[]>("/workspace/files");
+  return data;
+}
+
+export async function getWorkspaceFile(name: string): Promise<WorkspaceFileContent> {
+  const { data } = await api.get<WorkspaceFileContent>(`/workspace/files/${name}`);
+  return data;
+}
+
+export async function updateWorkspaceFile(name: string, content: string): Promise<WorkspaceFileContent> {
+  const { data } = await api.put<WorkspaceFileContent>(`/workspace/files/${name}`, { content });
+  return data;
+}
+
+export async function appendWorkspaceMemory(text: string): Promise<void> {
+  await api.post("/workspace/memory", { text });
+}
+
+export async function getDailyLog(date?: string): Promise<WorkspaceFileContent> {
+  const { data } = await api.get<WorkspaceFileContent>("/workspace/memory/daily", {
+    params: date ? { date } : {},
+  });
+  return data;
+}
+
+export async function listDailyLogs(): Promise<string[]> {
+  const { data } = await api.get<string[]>("/workspace/memory/daily/list");
+  return data;
+}
+
+export async function listCanvas(): Promise<CanvasFileMeta[]> {
+  const { data } = await api.get<CanvasFileMeta[]>("/workspace/canvas");
+  return data;
+}
+
+export async function getCanvasFile(filename: string): Promise<WorkspaceFileContent> {
+  const { data } = await api.get<WorkspaceFileContent>(`/workspace/canvas/${filename}`);
+  return data;
 }
 
 export default api;

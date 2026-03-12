@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from agentpal.api.v1.router import router as v1_router
@@ -47,6 +49,11 @@ def create_app() -> FastAPI:
 
     # ── 路由 ──────────────────────────────────────────────
     app.include_router(v1_router, prefix="/api/v1")
+
+    # ── 静态文件（/uploads）────────────────────────────────
+    _uploads_dir = Path("uploads")
+    _uploads_dir.mkdir(exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory=str(_uploads_dir)), name="uploads")
 
     @app.get("/health", tags=["system"])
     async def health():

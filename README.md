@@ -1,11 +1,15 @@
-# AgentPal 🤖
+<div align="center">
+  <img src="frontend/public/nimo-logo.svg" width="200" alt="nimo logo" />
+  <h1>nimo</h1>
+  <p>🐠 基于 <a href="https://github.com/modelscope/agentscope">AgentScope</a> 构建的开源个人智能助手平台</p>
 
-> 基于 [AgentScope](https://github.com/modelscope/agentscope) 构建的开源个人智能助手平台
+  [![CI](https://github.com/robscc/nimo/actions/workflows/ci.yml/badge.svg)](https://github.com/robscc/nimo/actions/workflows/ci.yml)
+  [![codecov](https://codecov.io/gh/robscc/nimo/branch/main/graph/badge.svg)](https://codecov.io/gh/robscc/nimo)
+  [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+</div>
 
-[![CI](https://github.com/robscc/nimo/actions/workflows/ci.yml/badge.svg)](https://github.com/robscc/nimo/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/robscc/nimo/branch/main/graph/badge.svg)](https://codecov.io/gh/robscc/nimo)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+---
 
 ## ✨ 特性
 
@@ -151,7 +155,7 @@ make coverage
 ## 📁 项目结构
 
 ```
-agentpal/
+nimo/
 ├── .github/              # GitHub Actions & 模板
 ├── backend/              # FastAPI 后端
 │   ├── agentpal/        # 核心包

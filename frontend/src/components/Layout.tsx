@@ -1,22 +1,24 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { MessageCircle, ListTodo, Wrench, Puzzle } from "lucide-react";
+import { MessageCircle, ListTodo, Wrench, Puzzle, FolderClosed } from "lucide-react";
 import clsx from "clsx";
+import NimoIcon from "./NimoIcon";
 
 export default function Layout() {
   const { pathname } = useLocation();
   const nav = [
-    { to: "/chat", icon: MessageCircle, label: "对话" },
-    { to: "/tools", icon: Wrench, label: "工具" },
-    { to: "/skills", icon: Puzzle, label: "技能" },
-    { to: "/tasks", icon: ListTodo, label: "任务" },
+    { to: "/chat",      icon: MessageCircle, label: "对话" },
+    { to: "/tools",     icon: Wrench,        label: "工具" },
+    { to: "/skills",    icon: Puzzle,        label: "技能" },
+    { to: "/tasks",     icon: ListTodo,      label: "任务" },
+    { to: "/workspace", icon: FolderClosed,  label: "工作空间" },
   ];
 
   return (
     <div className="flex h-screen bg-gray-50">
       {/* Sidebar */}
       <aside className="w-16 bg-white border-r flex flex-col items-center py-4 gap-4">
-        <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center">
-          <span className="text-white font-bold text-lg">A</span>
+        <div className="w-10 h-10 rounded-xl bg-nimo-500 flex items-center justify-center">
+          <NimoIcon size={28} />
         </div>
         {nav.map(({ to, icon: Icon, label }) => (
           <Link
@@ -26,7 +28,7 @@ export default function Layout() {
             className={clsx(
               "w-10 h-10 rounded-lg flex items-center justify-center transition-colors",
               pathname.startsWith(to)
-                ? "bg-indigo-100 text-indigo-700"
+                ? "bg-nimo-100 text-nimo-600"
                 : "text-gray-400 hover:bg-gray-100"
             )}
           >

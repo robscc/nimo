@@ -24,7 +24,7 @@ function Toggle({ enabled, onChange, disabled }: {
       disabled={disabled}
       className={clsx(
         "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none",
-        enabled ? "bg-indigo-600" : "bg-gray-200",
+        enabled ? "bg-nimo-500" : "bg-gray-200",
         disabled && "opacity-50 cursor-not-allowed"
       )}
     >
@@ -54,11 +54,11 @@ function LogRow({ log }: { log: ToolLog }) {
           ? <XCircle size={14} className="text-red-400 shrink-0" />
           : <CheckCircle2 size={14} className="text-green-400 shrink-0" />}
 
-        <span className="text-xs font-mono text-indigo-600 w-36 shrink-0">{log.tool_name}</span>
+        <span className="text-xs font-mono text-nimo-500 w-36 shrink-0">{log.tool_name}</span>
         <span className="text-xs text-gray-500 truncate flex-1">
           {JSON.stringify(log.input).slice(0, 80)}
         </span>
-        <span className="text-xs text-gray-400 shrink-0">{log.duration_ms ?? "—"}ms</span>
+        <span className="text-xs text-gray-400 shrink-0">{log.duration_ms ?? "\u2014"}ms</span>
         <span className="text-xs text-gray-400 w-20 text-right shrink-0">{time}</span>
         {open ? <ChevronDown size={14} className="text-gray-400 shrink-0" />
                : <ChevronRight size={14} className="text-gray-400 shrink-0" />}
@@ -110,10 +110,10 @@ export default function ToolsPage() {
         <div className="px-5 py-4 border-b">
           <div className="flex items-center justify-between">
             <h1 className="font-semibold text-gray-800 flex items-center gap-2">
-              <Zap size={18} className="text-indigo-500" />
+              <Zap size={18} className="text-nimo-500" />
               工具管理
             </h1>
-            <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-medium">
+            <span className="text-xs bg-nimo-100 text-nimo-600 px-2 py-0.5 rounded-full font-medium">
               {enabledCount}/{tools.length} 已启用
             </span>
           </div>
@@ -137,7 +137,7 @@ export default function ToolsPage() {
                   className={clsx(
                     "mx-2 mb-1 rounded-xl p-3 cursor-pointer transition-colors",
                     isSelected
-                      ? "bg-indigo-50 ring-1 ring-indigo-200"
+                      ? "bg-nimo-50 ring-1 ring-nimo-200"
                       : "hover:bg-gray-50"
                   )}
                 >
@@ -145,7 +145,7 @@ export default function ToolsPage() {
                     {/* Icon */}
                     <div className={clsx(
                       "w-9 h-9 rounded-lg flex items-center justify-center shrink-0",
-                      tool.enabled ? "bg-indigo-100 text-indigo-600" : "bg-gray-100 text-gray-400"
+                      tool.enabled ? "bg-nimo-100 text-nimo-500" : "bg-gray-100 text-gray-400"
                     )}>
                       <Icon size={18} />
                     </div>
@@ -197,7 +197,7 @@ export default function ToolsPage() {
           <div>
             <h2 className="font-medium text-gray-800">
               {selectedTool ? (
-                <>调用日志 · <span className="text-indigo-600 font-mono text-sm">{selectedTool}</span></>
+                <>调用日志 · <span className="text-nimo-500 font-mono text-sm">{selectedTool}</span></>
               ) : (
                 "所有工具调用日志"
               )}

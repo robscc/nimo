@@ -94,3 +94,7 @@ Thumbs.db
 *.pem
 *.key
 secrets/
+
+# Claude Code 记忆文件（本地个人数据，不提交）
+long_term_memory.md
+user_profile.md
