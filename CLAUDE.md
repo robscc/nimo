@@ -161,7 +161,42 @@ CI 矩阵：Python 3.10 / 3.11 / 3.12，覆盖率要求 ≥ 75%。
 
 ---
 
-## Git 提交风格
+## Git 工作流
+
+**必须走 Feature Branch → PR，禁止直接提交 main。**
+
+### 分支命名
+
+```
+feat/<描述>        新功能        feat/streaming-chat
+fix/<描述>         修复          fix/tool-call-format
+chore/<描述>       构建/配置     chore/update-deps
+refactor/<描述>    重构          refactor/memory-module
+test/<描述>        测试          test/add-tool-coverage
+docs/<描述>        文档          docs/api-reference
+```
+
+### 标准流程
+
+```bash
+# 1. 从最新 main 拉分支
+git checkout main && git pull origin main
+git checkout -b feat/your-feature
+
+# 2. 开发、提交（可多次）
+git add <files>
+git commit -m "feat: ..."
+
+# 3. 推送并开 PR
+git push -u origin feat/your-feature
+gh pr create --title "feat: ..." --body "..."
+
+# 4. PR 合并后清理
+git checkout main && git pull origin main
+git branch -d feat/your-feature
+```
+
+### Commit 消息格式
 
 ```
 feat: 新功能
@@ -171,5 +206,3 @@ refactor: 重构
 test: 测试
 docs: 文档
 ```
-
-分支：直接提 `main`（个人项目）。
