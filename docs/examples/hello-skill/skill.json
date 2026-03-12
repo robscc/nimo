@@ -1,0 +1,18 @@
+{
+  "name": "hello-world",
+  "version": "1.0.0",
+  "description": "示例技能 — 提供打招呼和随机笑话功能",
+  "author": "AgentPal Team",
+  "tools": [
+    {
+      "name": "say_hello",
+      "function": "say_hello",
+      "description": "向指定用户打招呼"
+    },
+    {
+      "name": "tell_joke",
+      "function": "tell_joke",
+      "description": "讲一个随机笑话"
+    }
+  ]
+}

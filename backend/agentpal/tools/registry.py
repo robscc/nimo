@@ -85,19 +85,28 @@ async def list_tool_configs(db: AsyncSession) -> list[dict]:
 # ── Toolkit 构建 ──────────────────────────────────────────
 
 
-def build_toolkit(enabled_names: list[str]) -> Toolkit | None:
+def build_toolkit(
+    enabled_names: list[str],
+    extra_tools: list[dict] | None = None,
+) -> Toolkit | None:
     """根据已启用工具集构建 agentscope Toolkit。
 
     Args:
-        enabled_names: 已启用工具名列表
+        enabled_names: 已启用的内置工具名列表
+        extra_tools: 额外工具（如 Skill 工具），每项含 name/func/description
 
     Returns:
-        Toolkit 实例（无启用工具时返回 None）
+        Toolkit 实例（无工具时返回 None）
     """
-    if not enabled_names:
+    has_builtin = bool(enabled_names)
+    has_extra = bool(extra_tools)
+
+    if not has_builtin and not has_extra:
         return None
 
     toolkit = Toolkit()
+
+    # 注册内置工具
     for name in enabled_names:
         meta = TOOL_CATALOG.get(name)
         if meta:
@@ -106,6 +115,20 @@ def build_toolkit(enabled_names: list[str]) -> Toolkit | None:
                 func_name=name,
                 func_description=meta["description"],
             )
+
+    # 注册 Skill 工具
+    if extra_tools:
+        for tool in extra_tools:
+            try:
+                toolkit.register_tool_function(
+                    tool["func"],
+                    func_name=tool["name"],
+                    func_description=tool.get("description", ""),
+                )
+            except Exception as exc:
+                from loguru import logger
+                logger.warning(f"注册 Skill 工具 {tool.get('name')} 失败: {exc}")
+
     return toolkit
 
 

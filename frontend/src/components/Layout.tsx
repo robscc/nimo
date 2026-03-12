@@ -1,5 +1,5 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { MessageCircle, ListTodo, Wrench } from "lucide-react";
+import { MessageCircle, ListTodo, Wrench, Puzzle } from "lucide-react";
 import clsx from "clsx";
 
 export default function Layout() {
@@ -7,6 +7,7 @@ export default function Layout() {
   const nav = [
     { to: "/chat", icon: MessageCircle, label: "对话" },
     { to: "/tools", icon: Wrench, label: "工具" },
+    { to: "/skills", icon: Puzzle, label: "技能" },
     { to: "/tasks", icon: ListTodo, label: "任务" },
   ];
 

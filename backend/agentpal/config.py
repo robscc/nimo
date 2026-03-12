@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     memory_buffer_size: int = 30      # BufferMemory 最大条数
     memory_sqlite_limit: int = 200    # SQLite 每次查询上限
 
+    # ── Skill 系统 ──────────────────────────────────────
+    skills_dir: str = "./skills_data"   # 技能安装目录
+
     # ── 渠道 ──────────────────────────────────────────────
     dingtalk_enabled: bool = False
     dingtalk_app_key: str = ""

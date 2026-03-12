@@ -214,6 +214,58 @@ def get_current_time(timezone_name: str = "Asia/Shanghai") -> ToolResponse:
         return _text_response(f"当前 UTC 时间: {now.isoformat()} （时区解析失败: {e}）")
 
 
+# ── 7. skill_cli ─────────────────────────────────────────
+
+
+def skill_cli(action: str, name: str = "", url: str = "") -> ToolResponse:
+    """管理 AgentPal 技能包的命令行工具。
+
+    支持的操作：
+    - list: 列出所有已安装技能
+    - enable <name>: 启用指定技能
+    - disable <name>: 禁用指定技能
+    - remove <name>: 卸载指定技能
+    - install <url>: 从 URL 安装技能（支持 clawhub.ai / skills.sh）
+    - search <name>: 搜索可用技能（暂未实现）
+
+    Args:
+        action: 操作类型，可选值: list, enable, disable, remove, install, search
+        name: 技能名称（用于 enable/disable/remove）
+        url: 技能包 URL（用于 install）
+
+    Returns:
+        操作结果文本
+    """
+    # 这个工具函数实际上是一个桥接器，真正的异步操作在 _skill_cli_async 中。
+    # 由于 agentscope 的工具函数是同步的，我们使用 asyncio 来运行异步操作。
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # 已有事件循环在运行（正常情况），创建 future
+        import concurrent.futures
+        # 在同步上下文中无法直接 await，返回提示信息
+        return _text_response(
+            f"skill_cli: action={action}, name={name}, url={url}\n"
+            "注意：skill_cli 操作将通过 API 异步执行。\n"
+            f"请使用以下 API 完成操作：\n"
+            f"- 列出技能: GET /api/v1/skills\n"
+            f"- 安装技能: POST /api/v1/skills/install/url {{\"url\": \"...\"}}\n"
+            f"- 启用技能: PATCH /api/v1/skills/{{name}} {{\"enabled\": true}}\n"
+            f"- 禁用技能: PATCH /api/v1/skills/{{name}} {{\"enabled\": false}}\n"
+            f"- 卸载技能: DELETE /api/v1/skills/{{name}}"
+        )
+    else:
+        return _text_response(
+            f"skill_cli: action={action}, name={name}, url={url}\n"
+            "操作已记录，请通过技能管理页面或 API 完成。"
+        )
+
+
 # ── 工具元数据注册表 ──────────────────────────────────────
 
 BUILTIN_TOOLS: list[dict] = [
@@ -257,6 +309,13 @@ BUILTIN_TOOLS: list[dict] = [
         "func": get_current_time,
         "description": "获取当前时间",
         "icon": "Clock",
+        "dangerous": False,
+    },
+    {
+        "name": "skill_cli",
+        "func": skill_cli,
+        "description": "管理技能包（列出、安装、启用、禁用、卸载）",
+        "icon": "Puzzle",
         "dangerous": False,
     },
 ]

@@ -302,13 +302,23 @@ class PersonalAssistant(BaseAgent):
         return {"role": "tool", "tool_call_id": tool_id, "content": output_text}
 
     async def _build_active_toolkit(self) -> Any:
-        """从 DB 读取已启用工具，构建 agentscope Toolkit。"""
+        """从 DB 读取已启用工具 + 已启用 Skill 工具，构建 agentscope Toolkit。"""
         if self._db is None:
             return None
         from agentpal.tools.registry import build_toolkit, ensure_tool_configs, get_enabled_tools
         await ensure_tool_configs(self._db)
         enabled = await get_enabled_tools(self._db)
-        return build_toolkit(enabled) if enabled else None
+
+        # 加载已启用 Skill 的工具
+        skill_tools: list[dict] = []
+        try:
+            from agentpal.skills.manager import SkillManager
+            mgr = SkillManager(self._db)
+            skill_tools = await mgr.get_all_skill_tools()
+        except Exception:
+            pass  # Skill 系统不可用时不影响内置工具
+
+        return build_toolkit(enabled, extra_tools=skill_tools or None)
 
 
 # ── 辅助函数 ──────────────────────────────────────────────
