@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  Terminal, FileText, FilePlus, FileEdit, Globe, Clock,
+  Terminal, FileText, FilePlus, FileEdit, Globe, Clock, Puzzle,
   AlertTriangle, CheckCircle2, XCircle, ChevronDown, ChevronRight,
   Loader2, RefreshCw, Zap,
 } from "lucide-react";
@@ -9,7 +9,7 @@ import { useTools, useToggleTool, useToolLogs, type ToolLog } from "../hooks/use
 
 // ── 图标映射 ──────────────────────────────────────────────
 const ICON_MAP: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
-  Terminal, FileText, FilePlus, FileEdit, Globe, Clock,
+  Terminal, FileText, FilePlus, FileEdit, Globe, Clock, Puzzle,
 };
 
 // ── Toggle Switch ─────────────────────────────────────────

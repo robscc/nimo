@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import {
   Send, Trash2, Wrench, ChevronDown, ChevronRight,
-  CheckCircle2, Loader2, XCircle,
+  CheckCircle2, Loader2, XCircle, Paperclip,
 } from "lucide-react";
 import clsx from "clsx";
 import { clearMemory } from "../api";
@@ -103,6 +103,7 @@ export default function ChatPage() {
   const [isStreaming, setIsStreaming] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -213,6 +214,62 @@ export default function ChatPage() {
     sendMessage(input.trim());
   };
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !file.name.endsWith(".zip")) return;
+
+    // Add a user message about the upload
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", content: `📦 上传技能包: ${file.name}` },
+      { role: "assistant", content: "", toolCalls: [], streaming: true },
+    ]);
+    setIsStreaming(true);
+
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const resp = await fetch("/api/v1/skills/install/zip", {
+        method: "POST",
+        body: form,
+      });
+      const data = await resp.json();
+
+      if (resp.ok) {
+        setMessages((prev) =>
+          prev.map((m, i) =>
+            i === prev.length - 1
+              ? {
+                  ...m,
+                  content: `✅ 技能 **${data.name}** v${data.version} 安装成功！\n\n包含 ${data.tools.length} 个工具: ${data.tools.join(", ")}`,
+                  streaming: false,
+                }
+              : m,
+          ),
+        );
+      } else {
+        setMessages((prev) =>
+          prev.map((m, i) =>
+            i === prev.length - 1
+              ? { ...m, content: `⚠️ 安装失败: ${data.detail || "未知错误"}`, streaming: false }
+              : m,
+          ),
+        );
+      }
+    } catch {
+      setMessages((prev) =>
+        prev.map((m, i) =>
+          i === prev.length - 1
+            ? { ...m, content: "⚠️ 上传失败，请检查网络", streaming: false }
+            : m,
+        ),
+      );
+    } finally {
+      setIsStreaming(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   const handleClear = async () => {
     abortRef.current?.abort();
     await clearMemory(SESSION_ID);
@@ -278,10 +335,24 @@ export default function ChatPage() {
 
       {/* Input */}
       <form onSubmit={handleSubmit} className="px-6 py-4 bg-white border-t flex gap-3">
+        <label
+          className="w-10 h-10 rounded-xl border border-gray-200 text-gray-400 hover:text-indigo-500 hover:border-indigo-300 flex items-center justify-center cursor-pointer transition-colors shrink-0"
+          title="上传技能包 (.zip)"
+        >
+          <Paperclip size={18} />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".zip"
+            className="hidden"
+            onChange={handleFileUpload}
+            disabled={isStreaming}
+          />
+        </label>
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="输入消息..."
+          placeholder="输入消息...（支持拖入 .zip 技能包）"
           className="flex-1 rounded-xl border border-gray-200 px-4 py-2 text-sm outline-none focus:border-indigo-400 transition-colors"
           disabled={isStreaming}
         />

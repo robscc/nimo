@@ -30,6 +30,7 @@ dependencies = [
     "alembic>=1.13.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
+    "python-multipart>=0.0.7",
     "loguru>=0.7.0",
     # 渠道集成
     "dingtalk-sdk>=1.2.0",
