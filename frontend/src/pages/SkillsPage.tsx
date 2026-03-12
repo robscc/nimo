@@ -101,6 +101,11 @@ function SkillCard({
             </span>
             <span className="text-xs text-gray-400">v{skill.version}</span>
             <SourceBadge source={skill.source} />
+            {skill.skill_type === "prompt" && (
+              <span className="text-xs bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded font-medium">
+                prompt
+              </span>
+            )}
           </div>
           <p className="text-xs text-gray-400 mt-0.5">{skill.description || "暂无描述"}</p>
           {skill.tools.length > 0 && (
@@ -111,6 +116,11 @@ function SkillCard({
                 </span>
               ))}
             </div>
+          )}
+          {skill.skill_type === "prompt" && skill.tools.length === 0 && (
+            <p className="text-xs text-indigo-400 mt-1">
+              Prompt 型技能 — 注入 system prompt 增强 Agent 知识
+            </p>
           )}
         </div>
 
@@ -210,7 +220,8 @@ export default function SkillsPage() {
     setInstallMsg(null);
     try {
       const result = await installUrl.mutateAsync(urlInput.trim());
-      setInstallMsg({ ok: true, text: `已安装 ${result.name} v${result.version}（${result.tools.length} 个工具）` });
+      const typeLabel = result.skill_type === "prompt" ? "prompt 型技能" : `${result.tools.length} 个工具`;
+      setInstallMsg({ ok: true, text: `已安装 ${result.name} v${result.version}（${typeLabel}）` });
       setUrlInput("");
       setShowUrlForm(false);
     } catch (err) {

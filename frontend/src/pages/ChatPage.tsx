@@ -4,11 +4,15 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   Send, Trash2, Wrench, ChevronDown, ChevronRight,
   CheckCircle2, Loader2, XCircle, Paperclip, Brain,
+  Info, Settings, Cpu, Puzzle, X,
 } from "lucide-react";
 import clsx from "clsx";
 import { clearMemory, createSession, getSessionMessages } from "../api";
 import NimoIcon from "../components/NimoIcon";
 import SessionPanel from "../components/SessionPanel";
+import { useSessionMeta, useUpdateSessionConfig } from "../hooks/useSessionMeta";
+import { useTools } from "../hooks/useTools";
+import { useSkills } from "../hooks/useSkills";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -227,6 +231,196 @@ function ToolCallCard({ tc }: { tc: ToolCallEntry }) {
   );
 }
 
+// ── Session Meta Panel ───────────────────────────────────────
+
+function SessionMetaPanel({
+  sessionId,
+  onClose,
+}: {
+  sessionId: string;
+  onClose: () => void;
+}) {
+  const { data: meta, isLoading } = useSessionMeta(sessionId);
+  const { data: allTools = [] } = useTools();
+  const { data: allSkills = [] } = useSkills();
+  const updateConfig = useUpdateSessionConfig();
+
+  const globalEnabledTools = allTools.filter((t) => t.enabled).map((t) => t.name);
+  const globalEnabledSkills = allSkills.filter((s) => s.enabled).map((s) => s.name);
+
+  // session 配置的工具，null = 跟随全局
+  const sessionTools = meta?.enabled_tools;
+  const sessionSkills = meta?.enabled_skills;
+  const effectiveTools = sessionTools ?? globalEnabledTools;
+  const effectiveSkills = sessionSkills ?? globalEnabledSkills;
+
+  const toggleTool = (toolName: string) => {
+    const current = sessionTools ?? [...globalEnabledTools];
+    const next = current.includes(toolName)
+      ? current.filter((t) => t !== toolName)
+      : [...current, toolName];
+    updateConfig.mutate({ sessionId, config: { enabled_tools: next } });
+  };
+
+  const toggleSkill = (skillName: string) => {
+    const current = sessionSkills ?? [...globalEnabledSkills];
+    const next = current.includes(skillName)
+      ? current.filter((s) => s !== skillName)
+      : [...current, skillName];
+    updateConfig.mutate({ sessionId, config: { enabled_skills: next } });
+  };
+
+  const resetToGlobal = () => {
+    updateConfig.mutate({
+      sessionId,
+      config: { enabled_tools: null, enabled_skills: null },
+    });
+  };
+
+  if (isLoading) {
+    return (
+      <div className="w-72 border-l bg-white flex items-center justify-center">
+        <Loader2 size={20} className="animate-spin text-gray-300" />
+      </div>
+    );
+  }
+
+  return (
+    <div data-testid="session-meta-panel" className="w-72 border-l bg-white flex flex-col shrink-0 overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b">
+        <span className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
+          <Info size={14} className="text-nimo-500" />
+          会话信息
+        </span>
+        <button
+          onClick={onClose}
+          className="w-6 h-6 flex items-center justify-center rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+        >
+          <X size={14} />
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* Model info */}
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-gray-500 flex items-center gap-1">
+            <Cpu size={12} /> 模型
+          </p>
+          <p className="text-sm text-gray-800 font-mono bg-gray-50 px-2 py-1 rounded">
+            {meta?.model_name || "默认"}
+          </p>
+        </div>
+
+        {/* Context info */}
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-gray-500">上下文</p>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="bg-gray-50 px-2 py-1.5 rounded">
+              <span className="text-gray-400">消息数</span>
+              <p className="text-gray-800 font-medium">{meta?.message_count ?? 0}</p>
+            </div>
+            <div className="bg-gray-50 px-2 py-1.5 rounded">
+              <span className="text-gray-400">Token 估算</span>
+              <p className="text-gray-800 font-medium">{meta?.context_tokens ?? "—"}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Tools toggle */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-medium text-gray-500 flex items-center gap-1">
+              <Wrench size={12} /> 工具
+              <span className="text-gray-400">
+                ({effectiveTools.length}/{allTools.length})
+              </span>
+            </p>
+            {sessionTools !== null && (
+              <button
+                onClick={resetToGlobal}
+                className="text-[10px] text-nimo-500 hover:text-nimo-700"
+              >
+                重置为全局
+              </button>
+            )}
+          </div>
+          <div className="space-y-1">
+            {allTools.map((tool) => {
+              const enabled = effectiveTools.includes(tool.name);
+              const globalEnabled = globalEnabledTools.includes(tool.name);
+              return (
+                <label
+                  key={tool.name}
+                  className={clsx(
+                    "flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer transition-colors",
+                    enabled ? "bg-nimo-50 text-gray-700" : "text-gray-400 hover:bg-gray-50"
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    onChange={() => toggleTool(tool.name)}
+                    disabled={!globalEnabled}
+                    className="w-3.5 h-3.5 rounded accent-nimo-500"
+                  />
+                  <span className={clsx("font-mono truncate", !globalEnabled && "line-through")}>
+                    {tool.name}
+                  </span>
+                  {!globalEnabled && (
+                    <span className="text-[10px] text-gray-300 ml-auto">(全局禁用)</span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Skills toggle */}
+        {allSkills.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-xs font-medium text-gray-500 flex items-center gap-1">
+              <Puzzle size={12} /> 技能
+              <span className="text-gray-400">
+                ({effectiveSkills.length}/{allSkills.length})
+              </span>
+            </p>
+            <div className="space-y-1">
+              {allSkills.map((skill) => {
+                const enabled = effectiveSkills.includes(skill.name);
+                const globalEnabled = globalEnabledSkills.includes(skill.name);
+                return (
+                  <label
+                    key={skill.name}
+                    className={clsx(
+                      "flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer transition-colors",
+                      enabled ? "bg-nimo-50 text-gray-700" : "text-gray-400 hover:bg-gray-50"
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      onChange={() => toggleSkill(skill.name)}
+                      disabled={!globalEnabled}
+                      className="w-3.5 h-3.5 rounded accent-nimo-500"
+                    />
+                    <span className={clsx("truncate", !globalEnabled && "line-through")}>
+                      {skill.name}
+                    </span>
+                    {!globalEnabled && (
+                      <span className="text-[10px] text-gray-300 ml-auto">(全局禁用)</span>
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ──────────────────────────────────────────────
 
 export default function ChatPage() {
@@ -234,6 +428,7 @@ export default function ChatPage() {
   const sessionIdParam = searchParams.get("session");
   const [sessionId, setSessionId] = useState<string | null>(sessionIdParam);
   const [panelCollapsed, setPanelCollapsed] = useState(false);
+  const [showMeta, setShowMeta] = useState(false);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -489,6 +684,7 @@ export default function ChatPage() {
             <NimoIcon size={20} />
             <span>nimo</span>
           </h1>
+          <div className="flex items-center gap-1">
           <button
             onClick={handleClear}
             className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
@@ -496,6 +692,19 @@ export default function ChatPage() {
           >
             <Trash2 size={18} />
           </button>
+          <button
+            onClick={() => setShowMeta((v) => !v)}
+            className={clsx(
+              "p-2 rounded-lg transition-colors",
+              showMeta
+                ? "text-nimo-500 bg-nimo-50"
+                : "text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+            )}
+            title="会话信息"
+          >
+            <Settings size={18} />
+          </button>
+          </div>
         </div>
 
         {/* Messages */}
@@ -600,6 +809,14 @@ export default function ChatPage() {
           </button>
         </form>
       </div>
+
+      {/* Session Meta Panel */}
+      {showMeta && sessionId && (
+        <SessionMetaPanel
+          sessionId={sessionId}
+          onClose={() => setShowMeta(false)}
+        />
+      )}
     </div>
   );
 }

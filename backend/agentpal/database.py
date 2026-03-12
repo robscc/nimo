@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -18,8 +19,17 @@ settings = get_settings()
 engine = create_async_engine(
     settings.database_url,
     echo=settings.is_dev,
-    connect_args={"check_same_thread": False},  # SQLite 专用
+    connect_args={"check_same_thread": False, "timeout": 30},  # SQLite 专用
 )
+
+
+# 启用 WAL 模式，允许并发读写（解决 skill_cli 工具调用时 database locked 问题）
+@event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.close()
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,

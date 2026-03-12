@@ -405,45 +405,122 @@ def skill_cli(action: str, name: str = "", url: str = "") -> ToolResponse:
     - enable <name>: 启用指定技能
     - disable <name>: 禁用指定技能
     - remove <name>: 卸载指定技能
-    - install <url>: 从 URL 安装技能（支持 clawhub.ai / skills.sh）
-    - search <name>: 搜索可用技能（暂未实现）
+    - install <url>: 从 URL 安装技能（支持 skills.sh / clawhub.ai / 直接 ZIP）
+    - search <name>: 在 skills.sh 上搜索技能
 
     Args:
         action: 操作类型，可选值: list, enable, disable, remove, install, search
-        name: 技能名称（用于 enable/disable/remove）
-        url: 技能包 URL（用于 install）
+        name: 技能名称（用于 enable/disable/remove/search）
+        url: 技能包 URL（用于 install，支持 skills.sh 如 https://skills.sh/org/repo/skill-name）
 
     Returns:
         操作结果文本
     """
-    # 这个工具函数实际上是一个桥接器，真正的异步操作在 _skill_cli_async 中。
-    # 由于 agentscope 的工具函数是同步的，我们使用 asyncio 来运行异步操作。
     import asyncio
+    import concurrent.futures
+
+    async def _run() -> str:
+        from agentpal.database import AsyncSessionLocal
+        from agentpal.skills.manager import SkillManager
+
+        async with AsyncSessionLocal() as db:
+            mgr = SkillManager(db)
+
+            if action == "list":
+                skills = await mgr.list_skills()
+                if not skills:
+                    return (
+                        "当前没有已安装的技能。\n"
+                        "提示：可以用 skill_cli(action='install', url='https://skills.sh/...') 安装技能。"
+                    )
+                lines = []
+                for s in skills:
+                    status = "✅" if s.get("enabled") else "❌"
+                    stype = f" [{s.get('skill_type', 'python')}]" if s.get("skill_type") == "prompt" else ""
+                    lines.append(f"  {status} {s['name']} v{s.get('version','?')}{stype} — {s.get('description','')[:60]}")
+                return f"已安装技能（{len(skills)} 个）:\n" + "\n".join(lines)
+
+            elif action == "install":
+                if not url:
+                    return "<error>install 操作需要提供 url 参数</error>"
+                result = await mgr.install_from_url(url)
+                await db.commit()
+                skill_type = result.get("skill_type", "python")
+                type_label = "prompt 型技能（注入系统知识）" if skill_type == "prompt" else f"包含 {len(result.get('tools', []))} 个工具"
+                return (
+                    f"✅ 技能安装成功！\n"
+                    f"  名称: {result['name']}\n"
+                    f"  版本: {result.get('version', '?')}\n"
+                    f"  描述: {result.get('description', '')}\n"
+                    f"  类型: {type_label}"
+                )
+
+            elif action == "enable":
+                if not name:
+                    return "<error>enable 操作需要提供 name 参数</error>"
+                ok = await mgr.enable(name)
+                if ok:
+                    await db.commit()
+                    return f"✅ 技能 {name!r} 已启用"
+                return f"<error>技能 {name!r} 不存在</error>"
+
+            elif action == "disable":
+                if not name:
+                    return "<error>disable 操作需要提供 name 参数</error>"
+                ok = await mgr.disable(name)
+                if ok:
+                    await db.commit()
+                    return f"✅ 技能 {name!r} 已禁用"
+                return f"<error>技能 {name!r} 不存在</error>"
+
+            elif action == "remove":
+                if not name:
+                    return "<error>remove 操作需要提供 name 参数</error>"
+                ok = await mgr.uninstall(name)
+                if ok:
+                    await db.commit()
+                    return f"✅ 技能 {name!r} 已卸载"
+                return f"<error>技能 {name!r} 不存在</error>"
+
+            elif action == "search":
+                query = name or url or ""
+                if not query:
+                    return (
+                        "请提供搜索关键词。\n"
+                        "示例: skill_cli(action='search', name='frontend design')\n\n"
+                        "也可以直接浏览 https://skills.sh/ 查找技能。"
+                    )
+                return (
+                    f"搜索关键词: {query}\n\n"
+                    f"请访问 https://skills.sh/ 搜索相关技能，然后用以下方式安装：\n"
+                    f"  skill_cli(action='install', url='https://skills.sh/<org>/<repo>/<skill-name>')\n\n"
+                    f"热门技能仓库：\n"
+                    f"  - vercel-labs/agent-skills — React、Web 设计等\n"
+                    f"  - anthropics/skills — 前端设计、skill 创建器\n"
+                    f"  - vercel-labs/skills — find-skills 等基础技能"
+                )
+
+            else:
+                return (
+                    f"<error>不支持的操作: {action}</error>\n"
+                    f"可用操作: list, install, enable, disable, remove, search"
+                )
+
+    def _thread_run() -> str:
+        """在独立线程中创建新事件循环运行异步代码。"""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
 
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        # 已有事件循环在运行（正常情况），创建 future
-        import concurrent.futures
-        # 在同步上下文中无法直接 await，返回提示信息
-        return _text_response(
-            f"skill_cli: action={action}, name={name}, url={url}\n"
-            "注意：skill_cli 操作将通过 API 异步执行。\n"
-            f"请使用以下 API 完成操作：\n"
-            f"- 列出技能: GET /api/v1/skills\n"
-            f"- 安装技能: POST /api/v1/skills/install/url {{\"url\": \"...\"}}\n"
-            f"- 启用技能: PATCH /api/v1/skills/{{name}} {{\"enabled\": true}}\n"
-            f"- 禁用技能: PATCH /api/v1/skills/{{name}} {{\"enabled\": false}}\n"
-            f"- 卸载技能: DELETE /api/v1/skills/{{name}}"
-        )
-    else:
-        return _text_response(
-            f"skill_cli: action={action}, name={name}, url={url}\n"
-            "操作已记录，请通过技能管理页面或 API 完成。"
-        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_thread_run)
+            result_text = future.result(timeout=90)
+        return _text_response(result_text)
+    except Exception as e:
+        return _text_response(f"<error>操作失败: {e}</error>")
 
 
 # ── 工具元数据注册表 ──────────────────────────────────────

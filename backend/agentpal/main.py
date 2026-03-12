@@ -22,6 +22,16 @@ async def lifespan(app: FastAPI):
     logger.info(f"AgentPal 启动中 (env={settings.app_env})")
     await init_db()
     logger.info("数据库初始化完成 ✅")
+
+    # 初始化 ~/.nimo/config.yaml（幂等）
+    from agentpal.services.config_file import ConfigFileManager
+
+    cfg_mgr = ConfigFileManager(settings.workspace_dir)
+    if cfg_mgr.save_defaults():
+        logger.info(f"已创建默认配置文件: {cfg_mgr.config_path}")
+    else:
+        logger.info(f"配置文件已存在: {cfg_mgr.config_path}")
+
     yield
     logger.info("AgentPal 已关闭")
 

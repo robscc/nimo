@@ -10,6 +10,7 @@ export interface SkillInfo {
   source_url: string | null;
   enabled: boolean;
   tools: string[];
+  skill_type: string | null;
   created_at: string | null;
   updated_at: string | null;
 }
@@ -20,6 +21,7 @@ export interface InstallResult {
   description: string;
   tools: string[];
   install_path: string;
+  skill_type: string | null;
 }
 
 export function useSkills() {

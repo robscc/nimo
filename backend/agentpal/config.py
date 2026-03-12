@@ -1,12 +1,45 @@
-"""应用全局配置，通过环境变量 / .env 文件加载。"""
+"""应用全局配置。
+
+优先级（从高到低）：
+1. 环境变量
+2. ~/.nimo/config.yaml
+3. .env 文件
+4. 代码默认值
+"""
 
 from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Tuple, Type
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _load_yaml_settings() -> dict[str, Any]:
+    """从 ~/.nimo/config.yaml 加载配置（如果存在）。"""
+    try:
+        from agentpal.services.config_file import ConfigFileManager
+
+        mgr = ConfigFileManager()
+        if mgr.config_path.exists():
+            return mgr.to_settings_dict()
+    except Exception:
+        pass
+    return {}
+
+
+class _YamlSettingsSource:
+    """Pydantic settings source that reads from ~/.nimo/config.yaml."""
+
+    def __init__(self, settings_cls: type) -> None:
+        self._data = _load_yaml_settings()
+
+    def __call__(self) -> dict[str, Any]:
+        return self._data
+
+    def __repr__(self) -> str:
+        return "YamlSettingsSource(~/.nimo/config.yaml)"
 
 
 class Settings(BaseSettings):
@@ -16,6 +49,23 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: Type[BaseSettings],
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> Tuple[Any, ...]:
+        """自定义配置源优先级：init > env > yaml > .env > defaults。"""
+        return (
+            init_settings,
+            env_settings,
+            _YamlSettingsSource(settings_cls),
+            dotenv_settings,
+        )
 
     # ── 应用 ──────────────────────────────────────────────
     app_env: Literal["development", "production", "test"] = "development"
