@@ -31,6 +31,12 @@ class SessionRecord(Base):
 
     一个 session 对应一个独立的对话上下文，
     PersonalAssistant 和每个 SubAgent 各自维护独立的 session_id。
+
+    新增字段：
+    - model_name:      该 session 使用的 LLM 模型
+    - enabled_tools:   该 session 启用的工具列表（null 表示跟随全局）
+    - enabled_skills:  该 session 启用的技能列表（null 表示跟随全局）
+    - context_tokens:  当前上下文总 token 估算
     """
 
     __tablename__ = "sessions"
@@ -48,6 +54,12 @@ class SessionRecord(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
     extra: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    # ── Session 级配置（Todo 3）─────────────────────────
+    model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    enabled_tools: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    enabled_skills: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    context_tokens: Mapped[int | None] = mapped_column(nullable=True)
 
     __table_args__ = (
         Index("ix_session_channel_user", "channel", "user_id"),

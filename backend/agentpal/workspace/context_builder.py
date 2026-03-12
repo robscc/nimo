@@ -1,12 +1,14 @@
 """ContextBuilder — 每轮对话前动态构建 system prompt。
 
 从 WorkspaceFiles 中读取各模块内容，按优先级截断后组装成结构化的 system prompt。
+支持注入 prompt 型技能（SKILL.md）的内容。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 
 @dataclass
@@ -29,23 +31,27 @@ class ContextBuilder:
     - TODAY_LOG: 最多 1500 字符（保留最近日志）
     - CONTEXT:   最多 2000 字符
     - AGENTS:    最多 2000 字符
+    - SKILL_PROMPT: 每个技能最多 4000 字符
     """
 
     MAX_MEMORY_CHARS = 3000
     MAX_DAILY_LOG_CHARS = 1500
     MAX_CONTEXT_CHARS = 2000
     MAX_AGENTS_CHARS = 2000
+    MAX_SKILL_PROMPT_CHARS = 4000
 
     def build_system_prompt(
         self,
         ws: WorkspaceFiles,
         enabled_tools: list[str] | None = None,
+        skill_prompts: list[dict[str, Any]] | None = None,
     ) -> str:
         """构建完整 system prompt。
 
         Args:
             ws:            工作空间文件内容
             enabled_tools: 当前已启用工具名称列表（可选，用于提示）
+            skill_prompts: prompt 型技能列表（可选），每项包含 name, content
 
         Returns:
             拼接好的 system prompt 字符串
@@ -103,5 +109,18 @@ class ContextBuilder:
         if enabled_tools:
             tools_line = ", ".join(f"`{t}`" for t in enabled_tools)
             sections.append(f"# Available Tools\n\n{tools_line}")
+
+        # 10. 已安装的 prompt 型技能
+        if skill_prompts:
+            skill_parts: list[str] = []
+            for sp in skill_prompts:
+                name = sp.get("name", "unknown")
+                content = sp.get("content", "")
+                if len(content) > self.MAX_SKILL_PROMPT_CHARS:
+                    content = content[: self.MAX_SKILL_PROMPT_CHARS] + "\n\n[...已截断...]"
+                skill_parts.append(f"## Skill: {name}\n\n{content}")
+            sections.append(
+                "# Installed Skills\n\n" + "\n\n---\n\n".join(skill_parts)
+            )
 
         return "\n\n---\n\n".join(sections)

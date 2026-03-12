@@ -50,10 +50,16 @@ class PersonalAssistant(BaseAgent):
 
     # ── System Prompt 动态构建 ────────────────────────────
 
-    async def _build_system_prompt(self, enabled_tool_names: list[str] | None = None) -> str:
+    async def _build_system_prompt(
+        self,
+        enabled_tool_names: list[str] | None = None,
+        skill_prompts: list[dict] | None = None,
+    ) -> str:
         """从 workspace 读取文件，动态组装 system prompt。"""
         ws = await self._ws_manager.load()
-        return self._context_builder.build_system_prompt(ws, enabled_tool_names)
+        return self._context_builder.build_system_prompt(
+            ws, enabled_tool_names, skill_prompts=skill_prompts,
+        )
 
     # ── 核心对话（含工具调用循环）────────────────────────
 
@@ -64,7 +70,10 @@ class PersonalAssistant(BaseAgent):
         toolkit = await self._build_active_toolkit()
 
         enabled_tool_names = [t.get("name") for t in (toolkit._tools if toolkit else [])] if toolkit else []
-        system_prompt = await self._build_system_prompt(enabled_tool_names or None)
+        skill_prompts = await self._load_prompt_skills()
+        system_prompt = await self._build_system_prompt(
+            enabled_tool_names or None, skill_prompts=skill_prompts or None,
+        )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         messages.extend(history[:-1])
@@ -140,7 +149,10 @@ class PersonalAssistant(BaseAgent):
             toolkit = await self._build_active_toolkit()
 
             enabled_tool_names = _get_tool_names(toolkit)
-            system_prompt = await self._build_system_prompt(enabled_tool_names or None)
+            skill_prompts = await self._load_prompt_skills()
+            system_prompt = await self._build_system_prompt(
+                enabled_tool_names or None, skill_prompts=skill_prompts or None,
+            )
 
             messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
             messages.extend(history[:-1])
@@ -307,6 +319,14 @@ class PersonalAssistant(BaseAgent):
         output_text = ""
         error_text: str | None = None
 
+        # 释放 SQLite 写锁：先提交已有的事务（memory writes 等），
+        # 这样 skill_cli 等工具创建新 session 写入时不会被 "database is locked" 阻塞。
+        if self._db is not None:
+            try:
+                await self._db.commit()
+            except Exception:
+                pass
+
         try:
             tool_response = None
             async for chunk in await toolkit.call_tool_function(tool_call):
@@ -348,19 +368,89 @@ class PersonalAssistant(BaseAgent):
         output_text, _, _ = await self._run_tool(toolkit, tool_call)
         return {"role": "tool", "tool_call_id": tool_id, "content": output_text}
 
+    async def _load_prompt_skills(self) -> list[dict[str, Any]]:
+        """加载已启用的 prompt 型技能内容，用于注入 system prompt。"""
+        if self._db is None:
+            return []
+        try:
+            from agentpal.skills.manager import SkillManager
+            from agentpal.models.session import SessionRecord
+            from sqlalchemy import select
+
+            # 查询 session 级 skill 配置
+            session_skill_names: list[str] | None = None
+            result = await self._db.execute(
+                select(SessionRecord).where(SessionRecord.id == self.session_id)
+            )
+            session_record = result.scalar_one_or_none()
+            if session_record and session_record.enabled_skills is not None:
+                session_skill_names = session_record.enabled_skills
+
+            mgr = SkillManager(self._db)
+            return await mgr.get_prompt_skills(session_skill_names)
+        except Exception:
+            return []
+
     async def _build_active_toolkit(self) -> Any:
-        """从 DB 读取已启用工具 + 已启用 Skill 工具，构建 agentscope Toolkit。"""
+        """从 DB 读取已启用工具 + 已启用 Skill 工具，构建 agentscope Toolkit。
+
+        支持 session 级别的工具/技能覆盖：
+        - session.enabled_tools 非 null → 使用 session 配置与全局启用工具的交集
+        - session.enabled_skills 非 null → 使用 session 配置与全局启用技能的交集
+        - 如果 session 配置了全局未启用的工具/技能，待全局启用后自动生效
+        """
         if self._db is None:
             return None
-        from agentpal.tools.registry import build_toolkit, ensure_tool_configs, get_enabled_tools
-        await ensure_tool_configs(self._db)
-        enabled = await get_enabled_tools(self._db)
+        from sqlalchemy import select
 
+        from agentpal.models.session import SessionRecord
+        from agentpal.tools.registry import build_toolkit, ensure_tool_configs, get_enabled_tools
+
+        await ensure_tool_configs(self._db)
+        global_enabled = await get_enabled_tools(self._db)
+
+        # 查询 session 级配置
+        session_tools: list[str] | None = None
+        session_skills: list[str] | None = None
+        result = await self._db.execute(
+            select(SessionRecord).where(SessionRecord.id == self.session_id)
+        )
+        session_record = result.scalar_one_or_none()
+        if session_record:
+            session_tools = session_record.enabled_tools
+            session_skills = session_record.enabled_skills
+
+        # 计算最终启用的内置工具
+        if session_tools is not None:
+            # session 级配置：取 session 配置与全局启用的交集
+            enabled = [t for t in session_tools if t in global_enabled]
+        else:
+            enabled = global_enabled
+
+        # 加载 skill 工具
         skill_tools: list[dict] = []
         try:
             from agentpal.skills.manager import SkillManager
+
             mgr = SkillManager(self._db)
-            skill_tools = await mgr.get_all_skill_tools()
+            all_skill_tools = await mgr.get_all_skill_tools()
+
+            if session_skills is not None:
+                # session 级 skill 过滤
+                enabled_skill_names = set(session_skills)
+                # 获取全局启用的技能名
+                all_skills = await mgr.list_skills()
+                global_enabled_skill_names = {
+                    s["name"] for s in all_skills if s["enabled"]
+                }
+                # 交集：session 配置 ∩ 全局启用
+                active_skill_names = enabled_skill_names & global_enabled_skill_names
+                skill_tools = [
+                    t for t in all_skill_tools
+                    if t.get("skill_name", "") in active_skill_names
+                ]
+            else:
+                skill_tools = all_skill_tools
         except Exception:
             pass
 

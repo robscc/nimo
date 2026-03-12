@@ -28,6 +28,7 @@ class SkillInfo(BaseModel):
     source_url: str | None = None
     enabled: bool
     tools: list[str]
+    skill_type: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -46,6 +47,7 @@ class InstallResult(BaseModel):
     description: str
     tools: list[str]
     install_path: str
+    skill_type: str | None = None
 
 
 # ── 路由 ─────────────────────────────────────────────────

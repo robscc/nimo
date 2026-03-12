@@ -141,4 +141,54 @@ export async function getCanvasFile(filename: string): Promise<WorkspaceFileCont
   return data;
 }
 
+// ── Session Meta & Config API ─────────────────────────────
+
+export interface SessionMeta {
+  id: string;
+  channel: string;
+  model_name: string | null;
+  context_tokens: number | null;
+  enabled_tools: string[] | null;
+  enabled_skills: string[] | null;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionConfigUpdate {
+  enabled_tools?: string[] | null;
+  enabled_skills?: string[] | null;
+  model_name?: string | null;
+}
+
+export interface ServiceConfig {
+  config: Record<string, unknown>;
+  path: string;
+}
+
+export async function getSessionMeta(sessionId: string): Promise<SessionMeta> {
+  const { data } = await api.get<SessionMeta>(`/sessions/${sessionId}/meta`);
+  return data;
+}
+
+export async function updateSessionConfig(
+  sessionId: string,
+  config: SessionConfigUpdate
+): Promise<SessionMeta> {
+  const { data } = await api.patch<SessionMeta>(`/sessions/${sessionId}/config`, config);
+  return data;
+}
+
+export async function getServiceConfig(): Promise<ServiceConfig> {
+  const { data } = await api.get<ServiceConfig>("/config");
+  return data;
+}
+
+export async function updateServiceConfig(
+  config: Record<string, unknown>
+): Promise<ServiceConfig> {
+  const { data } = await api.put<ServiceConfig>("/config", { config });
+  return data;
+}
+
 export default api;

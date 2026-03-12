@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -35,6 +36,26 @@ class SessionSummary(BaseModel):
     message_count: int
     created_at: str
     updated_at: str
+
+
+class SessionMeta(BaseModel):
+    """Session 元信息，包含模型、上下文大小、工具/技能列表。"""
+    id: str
+    channel: str
+    model_name: str | None
+    context_tokens: int | None
+    enabled_tools: list[str] | None  # null = 跟随全局
+    enabled_skills: list[str] | None  # null = 跟随全局
+    message_count: int
+    created_at: str
+    updated_at: str
+
+
+class SessionConfigUpdate(BaseModel):
+    """Session 级工具/技能配置更新请求。"""
+    enabled_tools: list[str] | None = None  # null = 跟随全局
+    enabled_skills: list[str] | None = None  # null = 跟随全局
+    model_name: str | None = None
 
 
 class MessageOut(BaseModel):
@@ -113,12 +134,14 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
 ):
     """创建新 session，返回 id。"""
+    settings = get_settings()
     session_id = f"{channel}:{uuid.uuid4()}"
     now = datetime.now(timezone.utc)
     session = SessionRecord(
         id=session_id,
         channel=channel,
         status=SessionStatus.ACTIVE,
+        model_name=settings.llm_model,
         created_at=now,
         updated_at=now,
     )
@@ -138,6 +161,80 @@ async def get_session(session_id: str, db: AsyncSession = Depends(get_db)):
         channel=session.channel,
         user_id=session.user_id,
         status=session.status,
+    )
+
+
+@router.get("/{session_id}/meta", response_model=SessionMeta)
+async def get_session_meta(session_id: str, db: AsyncSession = Depends(get_db)):
+    """获取 session 元信息（模型、上下文大小、工具/技能列表）。"""
+    result = await db.execute(select(SessionRecord).where(SessionRecord.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # 统计消息数
+    count_result = await db.execute(
+        select(func.count()).where(MemoryRecord.session_id == session_id)
+    )
+    message_count = count_result.scalar() or 0
+
+    return SessionMeta(
+        id=session.id,
+        channel=session.channel,
+        model_name=session.model_name,
+        context_tokens=session.context_tokens,
+        enabled_tools=session.enabled_tools,
+        enabled_skills=session.enabled_skills,
+        message_count=message_count,
+        created_at=session.created_at.isoformat(),
+        updated_at=session.updated_at.isoformat(),
+    )
+
+
+@router.patch("/{session_id}/config", response_model=SessionMeta)
+async def update_session_config(
+    session_id: str,
+    req: SessionConfigUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """更新 session 级工具/技能配置。
+
+    规则：
+    - enabled_tools/enabled_skills 为 null → 跟随全局配置
+    - 为非空列表 → session 使用指定工具，但范围不能超过全局已启用工具
+    - 如果 session 配置了全局没有启用的工具/技能，当全局启用后会自动在 session 生效
+    """
+    result = await db.execute(select(SessionRecord).where(SessionRecord.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if req.enabled_tools is not None:
+        session.enabled_tools = req.enabled_tools
+    if req.enabled_skills is not None:
+        session.enabled_skills = req.enabled_skills
+    if req.model_name is not None:
+        session.model_name = req.model_name
+
+    session.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+
+    # 返回更新后的 meta
+    count_result = await db.execute(
+        select(func.count()).where(MemoryRecord.session_id == session_id)
+    )
+    message_count = count_result.scalar() or 0
+
+    return SessionMeta(
+        id=session.id,
+        channel=session.channel,
+        model_name=session.model_name,
+        context_tokens=session.context_tokens,
+        enabled_tools=session.enabled_tools,
+        enabled_skills=session.enabled_skills,
+        message_count=message_count,
+        created_at=session.created_at.isoformat(),
+        updated_at=session.updated_at.isoformat(),
     )
 
 
