@@ -5,6 +5,7 @@ import ToolsPage from "./pages/ToolsPage";
 import SkillsPage from "./pages/SkillsPage";
 import WorkspacePage from "./pages/WorkspacePage";
 import SessionsPage from "./pages/SessionsPage";
+import DashboardPage from "./pages/DashboardPage";
 import Layout from "./components/Layout";
 
 export default function App() {
@@ -19,6 +20,7 @@ export default function App() {
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/workspace" element={<WorkspacePage />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
         </Route>
       </Routes>
     </BrowserRouter>
