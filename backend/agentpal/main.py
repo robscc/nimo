@@ -48,7 +48,15 @@ async def lifespan(app: FastAPI):
     await cron_scheduler.start()
     logger.info("Cron 调度器已启动 ✅")
 
+    # 启动 DingTalk Stream 客户端（dingtalk_enabled=True 时才真正启动）
+    from agentpal.channels.dingtalk_stream_worker import dingtalk_stream_worker
+
+    await dingtalk_stream_worker.start()
+
     yield
+
+    # 停止 DingTalk Stream 客户端
+    await dingtalk_stream_worker.stop()
 
     # 停止 Cron 调度器
     await cron_scheduler.stop()

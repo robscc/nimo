@@ -19,7 +19,7 @@ from agentpal.workspace.context_builder import ContextBuilder
 from agentpal.workspace.manager import WorkspaceManager
 from agentpal.workspace.memory_writer import MemoryWriter
 
-MAX_TOOL_ROUNDS = 8  # 最大工具调用轮次，防止死循环
+MAX_TOOL_ROUNDS = 32  # 最大工具调用轮次，防止死循环
 
 
 class PersonalAssistant(BaseAgent):
@@ -69,7 +69,7 @@ class PersonalAssistant(BaseAgent):
         history = await self._get_history(limit=20)
         toolkit = await self._build_active_toolkit()
 
-        enabled_tool_names = [t.get("name") for t in (toolkit._tools if toolkit else [])] if toolkit else []
+        enabled_tool_names = _get_tool_names(toolkit)
         skill_prompts = await self._load_prompt_skills()
         system_prompt = await self._build_system_prompt(
             enabled_tool_names or None, skill_prompts=skill_prompts or None,
@@ -542,7 +542,10 @@ def _get_tool_names(toolkit: Any) -> list[str]:
     if toolkit is None:
         return []
     try:
-        return [t.get("name", "") for t in (getattr(toolkit, "_tools", []) or [])]
+        tools = getattr(toolkit, "tools", None)
+        if isinstance(tools, dict):
+            return list(tools.keys())
+        return []
     except Exception:
         return []
 

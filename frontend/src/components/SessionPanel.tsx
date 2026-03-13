@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ChevronLeft, ChevronRight, MessageSquarePlus, Trash2 } from "lucide-react";
 import clsx from "clsx";
 import { deleteSession } from "../api";
-import { useSessions, useCreateSession } from "../hooks/useSessions";
+import { useAllSessions, useCreateSession } from "../hooks/useSessions";
 import { useQueryClient } from "@tanstack/react-query";
 import type { SessionSummary } from "../api";
 
@@ -17,11 +17,12 @@ interface SessionPanelProps {
 interface SessionItemProps {
   session: SessionSummary;
   isActive: boolean;
+  isDingtalk: boolean;
   onSelect: () => void;
   onDelete: () => void;
 }
 
-function SessionItem({ session, isActive, onSelect, onDelete }: SessionItemProps) {
+function SessionItem({ session, isActive, isDingtalk, onSelect, onDelete }: SessionItemProps) {
   const [hovered, setHovered] = useState(false);
 
   return (
@@ -37,11 +38,18 @@ function SessionItem({ session, isActive, onSelect, onDelete }: SessionItemProps
       onClick={onSelect}
     >
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium truncate leading-tight">{session.title}</p>
+        <p className="text-sm font-medium truncate leading-tight">
+          {session.title}
+          {isDingtalk && (
+            <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-600">
+              钉钉
+            </span>
+          )}
+        </p>
         <p className="text-xs text-gray-400 mt-0.5">{session.message_count} 条消息</p>
       </div>
 
-      {hovered && (
+      {hovered && !isDingtalk && (
         <button
           className="shrink-0 p-1 rounded hover:bg-red-100 hover:text-red-500 text-gray-400 transition-colors"
           title="清空对话"
@@ -64,7 +72,7 @@ export default function SessionPanel({
   collapsed,
   onToggleCollapse,
 }: SessionPanelProps) {
-  const { data: sessions = [] } = useSessions();
+  const { data: sessions = [] } = useAllSessions();
   const createSession = useCreateSession();
   const qc = useQueryClient();
 
@@ -139,6 +147,7 @@ export default function SessionPanel({
               key={session.id}
               session={session}
               isActive={session.id === currentSessionId}
+              isDingtalk={session.channel === "dingtalk"}
               onSelect={() => onSelectSession(session.id)}
               onDelete={() => handleDelete(session.id)}
             />
