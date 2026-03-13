@@ -69,7 +69,7 @@ class PersonalAssistant(BaseAgent):
         history = await self._get_history(limit=20)
         toolkit = await self._build_active_toolkit()
 
-        enabled_tool_names = [t.get("name") for t in (toolkit._tools if toolkit else [])] if toolkit else []
+        enabled_tool_names = _get_tool_names(toolkit)
         skill_prompts = await self._load_prompt_skills()
         system_prompt = await self._build_system_prompt(
             enabled_tool_names or None, skill_prompts=skill_prompts or None,

@@ -106,8 +106,22 @@ async def _run_stream_client(app_key: str, app_secret: str) -> None:
                 logger.exception(f"DingTalk Stream: 消息处理异常 — {exc}")
             return dingtalk_stream.AckMessage.STATUS_OK, "OK"
 
+    class _ConnectLogSystemHandler(dingtalk_stream.SystemHandler):
+        """系统消息处理器：首次收到系统消息时记录 WebSocket 连接成功日志。"""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._connected = False
+
+        async def process(self, message: Any) -> tuple[int, str]:
+            if not self._connected:
+                self._connected = True
+                logger.info("DingTalk Stream: WebSocket 连接成功 ✅，等待消息中…")
+            return dingtalk_stream.AckMessage.STATUS_OK, "OK"
+
     credential = dingtalk_stream.Credential(app_key, app_secret)
     client = dingtalk_stream.DingTalkStreamClient(credential)
+    client.system_handler = _ConnectLogSystemHandler()
     client.register_callback_handler(
         dingtalk_stream.ChatbotMessage.TOPIC,
         _SdkChatbotHandler(),
