@@ -32,7 +32,26 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"配置文件已存在: {cfg_mgr.config_path}")
 
+    # 初始化默认 SubAgent 定义
+    from agentpal.agents.registry import SubAgentRegistry
+    from agentpal.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        registry = SubAgentRegistry(db)
+        await registry.ensure_defaults()
+        await db.commit()
+    logger.info("SubAgent 默认角色初始化完成 ✅")
+
+    # 启动 Cron 调度器
+    from agentpal.services.cron_scheduler import cron_scheduler
+
+    await cron_scheduler.start()
+    logger.info("Cron 调度器已启动 ✅")
+
     yield
+
+    # 停止 Cron 调度器
+    await cron_scheduler.stop()
     logger.info("AgentPal 已关闭")
 
 

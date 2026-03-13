@@ -278,12 +278,47 @@ class PersonalAssistant(BaseAgent):
         task_prompt: str,
         db: Any,
         context: dict[str, Any] | None = None,
+        task_type: str | None = None,
+        agent_name: str | None = None,
     ) -> SubAgentTask:
-        """创建并异步启动一个 SubAgent 任务。"""
+        """创建并异步启动一个 SubAgent 任务。
+
+        支持角色路由：
+        - 如果指定 agent_name，直接使用该 SubAgent
+        - 如果指定 task_type，自动匹配合适的 SubAgent
+        - 都未指定，使用默认配置
+
+        Args:
+            task_prompt:  任务描述
+            db:           AsyncSession
+            context:      附加上下文
+            task_type:    任务类型（用于自动路由）
+            agent_name:   指定 SubAgent 名称
+        """
+        from agentpal.agents.registry import SubAgentRegistry
         from agentpal.agents.sub_agent import SubAgent
+        from agentpal.models.agent import SubAgentDefinition
 
         task_id = str(uuid.uuid4())
         sub_session_id = f"sub:{self.session_id}:{task_id}"
+
+        # 查找合适的 SubAgent 定义
+        registry = SubAgentRegistry(db)
+        agent_def: SubAgentDefinition | None = None
+        role_prompt = ""
+        model_config = self._model_config
+        max_tool_rounds = 8
+
+        if agent_name:
+            agent_def = await db.get(SubAgentDefinition, agent_name)
+        elif task_type:
+            agent_def = await registry.find_agent_for_task(task_type)
+
+        if agent_def:
+            agent_name = agent_def.name
+            role_prompt = agent_def.role_prompt or ""
+            model_config = agent_def.get_model_config(self._model_config)
+            max_tool_rounds = agent_def.max_tool_rounds
 
         task = SubAgentTask(
             id=task_id,
@@ -291,6 +326,9 @@ class PersonalAssistant(BaseAgent):
             sub_session_id=sub_session_id,
             task_prompt=task_prompt,
             status=TaskStatus.PENDING,
+            agent_name=agent_name,
+            task_type=task_type,
+            execution_log=[],
             meta=context or {},
         )
         db.add(task)
@@ -302,7 +340,10 @@ class PersonalAssistant(BaseAgent):
             memory=sub_memory,
             task=task,
             db=db,
-            model_config=self._model_config,
+            model_config=model_config,
+            role_prompt=role_prompt,
+            max_tool_rounds=max_tool_rounds,
+            parent_session_id=self.session_id,
         )
         asyncio.create_task(sub_agent.run(task_prompt))
         return task

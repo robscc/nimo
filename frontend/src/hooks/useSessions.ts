@@ -12,7 +12,7 @@ export function useSessions(channel = "web") {
 export function useCreateSession() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (channel = "web") => createSession(channel),
+    mutationFn: (channel?: string) => createSession(channel ?? "web"),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
   });
 }

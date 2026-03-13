@@ -233,6 +233,24 @@ function ToolCallCard({ tc }: { tc: ToolCallEntry }) {
 
 // ── Session Meta Panel ───────────────────────────────────────
 
+function MetaStatCard({ icon: Icon, label, value, sub }: {
+  icon: React.ComponentType<any>;
+  label: string;
+  value: string | number;
+  sub?: string;
+}) {
+  return (
+    <div className="bg-gradient-to-br from-gray-50 to-gray-100/50 rounded-lg px-3 py-2.5 border border-gray-100">
+      <div className="flex items-center gap-1.5 mb-1">
+        <Icon size={11} className="text-gray-400" />
+        <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">{label}</span>
+      </div>
+      <p className="text-sm font-semibold text-gray-800">{value}</p>
+      {sub && <p className="text-[10px] text-gray-400 mt-0.5">{sub}</p>}
+    </div>
+  );
+}
+
 function SessionMetaPanel({
   sessionId,
   onClose,
@@ -277,18 +295,25 @@ function SessionMetaPanel({
     });
   };
 
+  const createdTime = meta?.created_at
+    ? new Date(meta.created_at).toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "—";
+  const updatedTime = meta?.updated_at
+    ? new Date(meta.updated_at).toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "—";
+
   if (isLoading) {
     return (
-      <div className="w-72 border-l bg-white flex items-center justify-center">
+      <div className="w-80 border-l bg-white flex items-center justify-center">
         <Loader2 size={20} className="animate-spin text-gray-300" />
       </div>
     );
   }
 
   return (
-    <div data-testid="session-meta-panel" className="w-72 border-l bg-white flex flex-col shrink-0 overflow-hidden">
+    <div data-testid="session-meta-panel" className="w-80 border-l bg-white flex flex-col shrink-0 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b">
+      <div className="flex items-center justify-between px-4 py-3 border-b bg-gradient-to-r from-nimo-50/50 to-white">
         <span className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
           <Info size={14} className="text-nimo-500" />
           会话信息
@@ -301,76 +326,77 @@ function SessionMetaPanel({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {/* Model info */}
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-gray-500 flex items-center gap-1">
-            <Cpu size={12} /> 模型
-          </p>
-          <p className="text-sm text-gray-800 font-mono bg-gray-50 px-2 py-1 rounded">
-            {meta?.model_name || "默认"}
-          </p>
-        </div>
-
-        {/* Context info */}
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-gray-500">上下文</p>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <div className="bg-gray-50 px-2 py-1.5 rounded">
-              <span className="text-gray-400">消息数</span>
-              <p className="text-gray-800 font-medium">{meta?.message_count ?? 0}</p>
-            </div>
-            <div className="bg-gray-50 px-2 py-1.5 rounded">
-              <span className="text-gray-400">Token 估算</span>
-              <p className="text-gray-800 font-medium">{meta?.context_tokens ?? "—"}</p>
-            </div>
+      <div className="flex-1 overflow-y-auto p-4 space-y-5">
+        {/* Model badge */}
+        <div className="flex items-center gap-3 p-3 rounded-xl bg-gradient-to-r from-nimo-50 to-nimo-100/30 border border-nimo-100">
+          <div className="w-10 h-10 rounded-lg bg-white border border-nimo-200 flex items-center justify-center shadow-sm">
+            <Cpu size={18} className="text-nimo-500" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-[10px] font-medium text-nimo-400 uppercase tracking-wider">模型</p>
+            <p className="text-sm font-semibold text-gray-800 font-mono truncate">{meta?.model_name || "默认"}</p>
           </div>
         </div>
 
+        {/* Stats grid */}
+        <div className="grid grid-cols-2 gap-2">
+          <MetaStatCard icon={Brain} label="消息数" value={meta?.message_count ?? 0} />
+          <MetaStatCard icon={Settings} label="Tokens" value={meta?.context_tokens ?? "—"} />
+          <MetaStatCard icon={Info} label="创建" value={createdTime} />
+          <MetaStatCard icon={Info} label="活跃" value={updatedTime} />
+        </div>
+
+        {/* Session ID */}
+        <div className="px-3 py-2 rounded-lg bg-gray-50 border border-gray-100">
+          <p className="text-[10px] font-medium text-gray-400 uppercase tracking-wider mb-1">Session ID</p>
+          <p className="text-[11px] font-mono text-gray-500 break-all select-all leading-relaxed">{sessionId}</p>
+        </div>
+
+        {/* Divider */}
+        <div className="border-t border-gray-100" />
+
         {/* Tools toggle */}
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-xs font-medium text-gray-500 flex items-center gap-1">
-              <Wrench size={12} /> 工具
-              <span className="text-gray-400">
-                ({effectiveTools.length}/{allTools.length})
+            <p className="text-xs font-semibold text-gray-600 flex items-center gap-1.5">
+              <Wrench size={13} className="text-nimo-500" /> 工具
+              <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-nimo-100 text-nimo-600">
+                {effectiveTools.length}/{allTools.length}
               </span>
             </p>
             {sessionTools !== null && (
               <button
                 onClick={resetToGlobal}
-                className="text-[10px] text-nimo-500 hover:text-nimo-700"
+                className="text-[10px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200 transition-colors"
               >
-                重置为全局
+                重置全局
               </button>
             )}
           </div>
-          <div className="space-y-1">
+          <div className="flex flex-wrap gap-1.5">
             {allTools.map((tool) => {
               const enabled = effectiveTools.includes(tool.name);
               const globalEnabled = globalEnabledTools.includes(tool.name);
               return (
-                <label
+                <button
                   key={tool.name}
+                  onClick={() => globalEnabled && toggleTool(tool.name)}
+                  disabled={!globalEnabled}
                   className={clsx(
-                    "flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer transition-colors",
-                    enabled ? "bg-nimo-50 text-gray-700" : "text-gray-400 hover:bg-gray-50"
+                    "inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono transition-all border",
+                    !globalEnabled
+                      ? "border-gray-100 bg-gray-50 text-gray-300 cursor-not-allowed line-through"
+                      : enabled
+                        ? "border-nimo-200 bg-nimo-50 text-nimo-700 shadow-sm hover:shadow"
+                        : "border-gray-200 bg-white text-gray-400 hover:border-gray-300 hover:text-gray-600"
                   )}
                 >
-                  <input
-                    type="checkbox"
-                    checked={enabled}
-                    onChange={() => toggleTool(tool.name)}
-                    disabled={!globalEnabled}
-                    className="w-3.5 h-3.5 rounded accent-nimo-500"
-                  />
-                  <span className={clsx("font-mono truncate", !globalEnabled && "line-through")}>
-                    {tool.name}
-                  </span>
-                  {!globalEnabled && (
-                    <span className="text-[10px] text-gray-300 ml-auto">(全局禁用)</span>
-                  )}
-                </label>
+                  <span className={clsx(
+                    "w-1.5 h-1.5 rounded-full shrink-0",
+                    !globalEnabled ? "bg-gray-200" : enabled ? "bg-nimo-400" : "bg-gray-300"
+                  )} />
+                  {tool.name}
+                </button>
               );
             })}
           </div>
@@ -378,39 +404,37 @@ function SessionMetaPanel({
 
         {/* Skills toggle */}
         {allSkills.length > 0 && (
-          <div className="space-y-1.5">
-            <p className="text-xs font-medium text-gray-500 flex items-center gap-1">
-              <Puzzle size={12} /> 技能
-              <span className="text-gray-400">
-                ({effectiveSkills.length}/{allSkills.length})
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-gray-600 flex items-center gap-1.5">
+              <Puzzle size={13} className="text-nimo-500" /> 技能
+              <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-nimo-100 text-nimo-600">
+                {effectiveSkills.length}/{allSkills.length}
               </span>
             </p>
-            <div className="space-y-1">
+            <div className="flex flex-wrap gap-1.5">
               {allSkills.map((skill) => {
                 const enabled = effectiveSkills.includes(skill.name);
                 const globalEnabled = globalEnabledSkills.includes(skill.name);
                 return (
-                  <label
+                  <button
                     key={skill.name}
+                    onClick={() => globalEnabled && toggleSkill(skill.name)}
+                    disabled={!globalEnabled}
                     className={clsx(
-                      "flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer transition-colors",
-                      enabled ? "bg-nimo-50 text-gray-700" : "text-gray-400 hover:bg-gray-50"
+                      "inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] transition-all border",
+                      !globalEnabled
+                        ? "border-gray-100 bg-gray-50 text-gray-300 cursor-not-allowed line-through"
+                        : enabled
+                          ? "border-nimo-200 bg-nimo-50 text-nimo-700 shadow-sm hover:shadow"
+                          : "border-gray-200 bg-white text-gray-400 hover:border-gray-300 hover:text-gray-600"
                     )}
                   >
-                    <input
-                      type="checkbox"
-                      checked={enabled}
-                      onChange={() => toggleSkill(skill.name)}
-                      disabled={!globalEnabled}
-                      className="w-3.5 h-3.5 rounded accent-nimo-500"
-                    />
-                    <span className={clsx("truncate", !globalEnabled && "line-through")}>
-                      {skill.name}
-                    </span>
-                    {!globalEnabled && (
-                      <span className="text-[10px] text-gray-300 ml-auto">(全局禁用)</span>
-                    )}
-                  </label>
+                    <span className={clsx(
+                      "w-1.5 h-1.5 rounded-full shrink-0",
+                      !globalEnabled ? "bg-gray-200" : enabled ? "bg-nimo-400" : "bg-gray-300"
+                    )} />
+                    {skill.name}
+                  </button>
                 );
               })}
             </div>

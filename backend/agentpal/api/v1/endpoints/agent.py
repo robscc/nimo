@@ -55,6 +55,8 @@ class DispatchRequest(BaseModel):
     parent_session_id: str
     task_prompt: str
     context: dict[str, Any] | None = None
+    task_type: str | None = None
+    agent_name: str | None = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -62,6 +64,8 @@ class TaskStatusResponse(BaseModel):
     status: str
     result: str | None
     error: str | None
+    agent_name: str | None = None
+    task_type: str | None = None
 
 
 @router.post("/chat")
@@ -126,12 +130,16 @@ async def dispatch_sub_agent(req: DispatchRequest, db: AsyncSession = Depends(ge
         task_prompt=req.task_prompt,
         db=db,
         context=req.context,
+        task_type=req.task_type,
+        agent_name=req.agent_name,
     )
     return TaskStatusResponse(
         task_id=task.id,
         status=task.status,
         result=task.result,
         error=task.error,
+        agent_name=task.agent_name,
+        task_type=task.task_type,
     )
 
 
@@ -147,4 +155,6 @@ async def get_task_status(task_id: str, db: AsyncSession = Depends(get_db)):
         status=task.status,
         result=task.result,
         error=task.error,
+        agent_name=task.agent_name,
+        task_type=task.task_type,
     )

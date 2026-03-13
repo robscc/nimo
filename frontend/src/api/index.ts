@@ -29,6 +29,8 @@ export interface TaskStatusResponse {
 export interface SessionSummary {
   id: string;
   title: string;
+  channel: string;
+  model_name: string | null;
   message_count: number;
   created_at: string;
   updated_at: string;
@@ -58,6 +60,11 @@ export async function clearMemory(sessionId: string): Promise<void> {
 
 export async function getSessions(channel = "web"): Promise<SessionSummary[]> {
   const { data } = await api.get<SessionSummary[]>("/sessions", { params: { channel } });
+  return data;
+}
+
+export async function getAllSessions(limit = 100): Promise<SessionSummary[]> {
+  const { data } = await api.get<SessionSummary[]>("/sessions", { params: { channel: "web", limit } });
   return data;
 }
 
@@ -188,6 +195,166 @@ export async function updateServiceConfig(
   config: Record<string, unknown>
 ): Promise<ServiceConfig> {
   const { data } = await api.put<ServiceConfig>("/config", { config });
+  return data;
+}
+
+// ── SubAgent API ─────────────────────────────────────────
+
+export interface SubAgentInfo {
+  name: string;
+  display_name: string;
+  role_prompt: string;
+  accepted_task_types: string[];
+  model_name: string | null;
+  model_provider: string | null;
+  model_base_url: string | null;
+  has_custom_model: boolean;
+  max_tool_rounds: number;
+  timeout_seconds: number;
+  enabled: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface SubAgentCreate {
+  name: string;
+  display_name?: string;
+  role_prompt?: string;
+  accepted_task_types?: string[];
+  model_name?: string | null;
+  model_provider?: string | null;
+  model_api_key?: string | null;
+  model_base_url?: string | null;
+  max_tool_rounds?: number;
+  timeout_seconds?: number;
+  enabled?: boolean;
+}
+
+export interface SubAgentUpdate {
+  display_name?: string;
+  role_prompt?: string;
+  accepted_task_types?: string[];
+  model_name?: string | null;
+  model_provider?: string | null;
+  model_api_key?: string | null;
+  model_base_url?: string | null;
+  max_tool_rounds?: number;
+  timeout_seconds?: number;
+  enabled?: boolean;
+}
+
+export async function listSubAgents(): Promise<SubAgentInfo[]> {
+  const { data } = await api.get<SubAgentInfo[]>("/sub-agents");
+  return data;
+}
+
+export async function getSubAgent(name: string): Promise<SubAgentInfo> {
+  const { data } = await api.get<SubAgentInfo>(`/sub-agents/${name}`);
+  return data;
+}
+
+export async function createSubAgent(payload: SubAgentCreate): Promise<SubAgentInfo> {
+  const { data } = await api.post<SubAgentInfo>("/sub-agents", payload);
+  return data;
+}
+
+export async function updateSubAgent(name: string, payload: SubAgentUpdate): Promise<SubAgentInfo> {
+  const { data } = await api.patch<SubAgentInfo>(`/sub-agents/${name}`, payload);
+  return data;
+}
+
+export async function deleteSubAgent(name: string): Promise<void> {
+  await api.delete(`/sub-agents/${name}`);
+}
+
+// ── Cron API ─────────────────────────────────────────────
+
+export interface CronJobInfo {
+  id: string;
+  name: string;
+  schedule: string;
+  task_prompt: string;
+  agent_name: string | null;
+  enabled: boolean;
+  notify_main: boolean;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CronJobCreate {
+  name: string;
+  schedule: string;
+  task_prompt: string;
+  agent_name?: string | null;
+  enabled?: boolean;
+  notify_main?: boolean;
+}
+
+export interface CronJobUpdate {
+  name?: string;
+  schedule?: string;
+  task_prompt?: string;
+  agent_name?: string | null;
+  enabled?: boolean;
+  notify_main?: boolean;
+}
+
+export interface CronExecutionInfo {
+  id: string;
+  cron_job_id: string;
+  cron_job_name: string;
+  status: string;
+  agent_name: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  result: string | null;
+  error: string | null;
+}
+
+export interface CronExecutionDetail extends CronExecutionInfo {
+  execution_log: Array<Record<string, unknown>>;
+}
+
+export async function listCronJobs(): Promise<CronJobInfo[]> {
+  const { data } = await api.get<CronJobInfo[]>("/cron");
+  return data;
+}
+
+export async function getCronJob(jobId: string): Promise<CronJobInfo> {
+  const { data } = await api.get<CronJobInfo>(`/cron/${jobId}`);
+  return data;
+}
+
+export async function createCronJob(payload: CronJobCreate): Promise<CronJobInfo> {
+  const { data } = await api.post<CronJobInfo>("/cron", payload);
+  return data;
+}
+
+export async function updateCronJob(jobId: string, payload: CronJobUpdate): Promise<CronJobInfo> {
+  const { data } = await api.patch<CronJobInfo>(`/cron/${jobId}`, payload);
+  return data;
+}
+
+export async function deleteCronJob(jobId: string): Promise<void> {
+  await api.delete(`/cron/${jobId}`);
+}
+
+export async function toggleCronJob(jobId: string, enabled: boolean): Promise<CronJobInfo> {
+  const { data } = await api.patch<CronJobInfo>(`/cron/${jobId}/toggle`, { enabled });
+  return data;
+}
+
+export async function listCronExecutions(jobId: string, limit = 20): Promise<CronExecutionInfo[]> {
+  const { data } = await api.get<CronExecutionInfo[]>(`/cron/${jobId}/executions`, {
+    params: { limit },
+  });
+  return data;
+}
+
+export async function getCronExecutionDetail(executionId: string): Promise<CronExecutionDetail> {
+  const { data } = await api.get<CronExecutionDetail>(`/cron/executions/${executionId}/detail`);
   return data;
 }
 

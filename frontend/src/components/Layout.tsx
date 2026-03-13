@@ -1,16 +1,17 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { MessageCircle, ListTodo, Wrench, Puzzle, FolderClosed } from "lucide-react";
+import { MessageCircle, ListTodo, Wrench, Puzzle, FolderClosed, MessagesSquare } from "lucide-react";
 import clsx from "clsx";
 import NimoIcon from "./NimoIcon";
 
 export default function Layout() {
   const { pathname } = useLocation();
   const nav = [
-    { to: "/chat",      icon: MessageCircle, label: "对话" },
-    { to: "/tools",     icon: Wrench,        label: "工具" },
-    { to: "/skills",    icon: Puzzle,        label: "技能" },
-    { to: "/tasks",     icon: ListTodo,      label: "任务" },
-    { to: "/workspace", icon: FolderClosed,  label: "工作空间" },
+    { to: "/chat",      icon: MessageCircle,  label: "对话" },
+    { to: "/sessions",  icon: MessagesSquare,  label: "会话" },
+    { to: "/tools",     icon: Wrench,          label: "工具" },
+    { to: "/skills",    icon: Puzzle,          label: "技能" },
+    { to: "/tasks",     icon: ListTodo,        label: "任务" },
+    { to: "/workspace", icon: FolderClosed,    label: "工作空间" },
   ];
 
   return (
