@@ -37,6 +37,7 @@ dependencies = [
     "croniter>=2.0.0",
     # 渠道集成
     "dingtalk-stream>=0.24.0",
+    "python-socks[asyncio]>=2.0.0",   # DingTalk Stream WebSocket SOCKS 代理支持
     "lark-oapi>=1.2.0",
 ]
 
