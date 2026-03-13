@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.database import get_db
 from agentpal.models.cron import CronJob, CronJobExecution
+from agentpal.models.llm_usage import LLMCallLog
 from agentpal.models.memory import MemoryRecord
 from agentpal.models.session import SessionRecord, SubAgentTask
 from agentpal.models.skill import SkillRecord
@@ -22,6 +23,9 @@ class DashboardStats(BaseModel):
     sessions_by_channel: dict[str, int] = {}
     total_messages: int = 0
     total_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    llm_calls: int = 0
     models_in_use: dict[str, int] = {}
     total_tool_calls: int = 0
     tool_calls_by_name: dict[str, int] = {}
@@ -70,6 +74,23 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)) -> DashboardSt
     total_tokens = await db.scalar(
         select(func.coalesce(func.sum(SessionRecord.context_tokens), 0))
     ) or 0
+
+    # ── LLM 调用统计（从 llm_call_logs 读取，更精确）────────
+    input_tokens = await db.scalar(
+        select(func.coalesce(func.sum(LLMCallLog.input_tokens), 0))
+    ) or 0
+
+    output_tokens = await db.scalar(
+        select(func.coalesce(func.sum(LLMCallLog.output_tokens), 0))
+    ) or 0
+
+    llm_calls = await db.scalar(
+        select(func.count()).select_from(LLMCallLog)
+    ) or 0
+
+    # llm_call_logs 总和更准确，同步给 total_tokens（两者理论上应一致）
+    if input_tokens + output_tokens > 0:
+        total_tokens = input_tokens + output_tokens
 
     # ── Messages ────────────────────────────────────────────
     total_messages = await db.scalar(
@@ -155,6 +176,9 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)) -> DashboardSt
         sessions_by_channel=sessions_by_channel,
         total_messages=total_messages,
         total_tokens=total_tokens,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        llm_calls=llm_calls,
         models_in_use=models_in_use,
         total_tool_calls=total_tool_calls,
         tool_calls_by_name=tool_calls_by_name,

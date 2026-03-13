@@ -14,7 +14,8 @@ from agentpal.agents.base import BaseAgent
 from agentpal.config import get_settings
 from agentpal.memory.base import BaseMemory
 from agentpal.memory.factory import MemoryFactory
-from agentpal.models.session import SubAgentTask, TaskStatus
+from agentpal.models.llm_usage import LLMCallLog  # noqa: F401 — 触发 Base.metadata 注册
+from agentpal.models.session import SessionRecord, SubAgentTask, TaskStatus
 from agentpal.workspace.context_builder import ContextBuilder
 from agentpal.workspace.manager import WorkspaceManager
 from agentpal.workspace.memory_writer import MemoryWriter
@@ -80,12 +81,18 @@ class PersonalAssistant(BaseAgent):
         messages.append({"role": "user", "content": user_input})
 
         response = None
+        usage_rounds: list[tuple[int, int, int]] = []  # (round, input, output)
 
         # ── 工具调用循环 ──────────────────────────────────
-        for _ in range(MAX_TOOL_ROUNDS):
+        for round_idx in range(MAX_TOOL_ROUNDS):
             tools_schema = toolkit.get_json_schemas() if toolkit else None
             model = _build_model(self._model_config)
             response = await model(messages, tools=tools_schema)
+
+            # 记录本轮 token 用量
+            if response.usage is not None:
+                u = response.usage
+                usage_rounds.append((round_idx + 1, u.input_tokens, u.output_tokens))
 
             tool_calls = [
                 block for block in (response.content or [])
@@ -122,6 +129,8 @@ class PersonalAssistant(BaseAgent):
 
         final_text = _extract_text(response)
         await self._remember_assistant(final_text)
+        # 写 token 用量日志 + 更新 session.context_tokens
+        await self._record_turn_usage(usage_rounds)
         # 触发记忆压缩（后台异步，不阻塞）
         await self._memory_writer.maybe_flush(
             self.session_id, self.memory, self._ws_manager, self._model_config
@@ -162,8 +171,9 @@ class PersonalAssistant(BaseAgent):
             accumulated_thinking = ""
             accumulated_tool_calls: list[dict[str, Any]] = []
             accumulated_files: list[dict[str, Any]] = []
+            usage_rounds: list[tuple[int, int, int]] = []  # (round, input, output)
 
-            for _ in range(MAX_TOOL_ROUNDS):
+            for round_idx in range(MAX_TOOL_ROUNDS):
                 tools_schema = toolkit.get_json_schemas() if toolkit else None
                 model = _build_model(self._model_config, stream=True)
 
@@ -204,6 +214,11 @@ class PersonalAssistant(BaseAgent):
                     break
 
                 response = final_response
+                # 记录本轮 token 用量
+                if response.usage is not None:
+                    u = response.usage
+                    usage_rounds.append((round_idx + 1, u.input_tokens, u.output_tokens))
+
                 tool_calls = [
                     b for b in (response.content or [])
                     if isinstance(b, dict) and b.get("type") == "tool_use"
@@ -298,6 +313,8 @@ class PersonalAssistant(BaseAgent):
                 meta["files"] = accumulated_files
 
             await self._remember_assistant(final_text, meta=meta or None)
+            # 写 token 用量日志 + 更新 session.context_tokens
+            await self._record_turn_usage(usage_rounds)
             yield {"type": "done"}
 
             # 触发记忆压缩（后台异步，不阻塞 SSE）
@@ -446,6 +463,58 @@ class PersonalAssistant(BaseAgent):
         output_text, _, _ = await self._run_tool(toolkit, tool_call)
         return {"role": "tool", "tool_call_id": tool_id, "content": output_text}
 
+    # ── Token 用量记录 ────────────────────────────────────────
+
+    async def _record_turn_usage(
+        self,
+        usage_rounds: list[tuple[int, int, int]],  # [(call_round, input_tokens, output_tokens)]
+    ) -> None:
+        """将本轮对话的 LLM 用量写入 llm_call_logs，并累加 session.context_tokens。
+
+        每个工具调用轮次记一条 LLMCallLog；最后统一更新 SessionRecord.context_tokens。
+        在 reply() / reply_stream() 完成后调用，不阻塞 SSE 流。
+        """
+        if not usage_rounds or self._db is None:
+            return
+
+        from loguru import logger
+        from sqlalchemy import text
+
+        model_name = self._model_config.get("model_name", "")
+        provider = self._model_config.get("provider", "")
+        total_turn_tokens = 0
+
+        for call_round, input_tokens, output_tokens in usage_rounds:
+            total = input_tokens + output_tokens
+            total_turn_tokens += total
+            self._db.add(LLMCallLog(
+                session_id=self.session_id,
+                model_name=model_name,
+                provider=provider,
+                call_round=call_round,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total,
+            ))
+
+        await self._db.flush()
+
+        if total_turn_tokens == 0:
+            return
+
+        # 用原生 SQL UPDATE 直接累加 context_tokens（绕过 ORM identity map，支持 NULL → 0 初始化）
+        try:
+            await self._db.execute(
+                text(
+                    "UPDATE sessions SET context_tokens = COALESCE(context_tokens, 0) + :tokens"
+                    " WHERE id = :sid"
+                ),
+                {"tokens": total_turn_tokens, "sid": self.session_id},
+            )
+            await self._db.flush()
+        except Exception as exc:
+            logger.warning("_record_turn_usage: 更新 context_tokens 失败 session={} err={}", self.session_id, exc)
+
     async def _load_prompt_skills(self) -> list[dict[str, Any]]:
         """加载已启用的 prompt 型技能内容，用于注入 system prompt。"""
         if self._db is None:
@@ -561,29 +630,29 @@ def _default_model_config() -> dict[str, Any]:
 
 
 def _build_model(config: dict[str, Any], stream: bool = False) -> Any:
-    """根据 provider 实例化 agentscope 1.x 模型对象。"""
-    provider = config.get("provider", "dashscope")
-    model_name = config.get("model_name", "qwen-max")
-    api_key = config.get("api_key", "")
-    base_url = config.get("base_url", "")
+    """根据 model_config 通过 ProviderManager 实例化模型（自动带重试）。
 
-    if provider == "dashscope":
-        from agentscope.model import DashScopeChatModel
-        return DashScopeChatModel(model_name=model_name, api_key=api_key, stream=stream)
+    config 字段：
+        provider   — Provider ID（如 "dashscope"、"compatible"）
+        model_name — 模型 ID（如 "qwen-max"）
+        api_key    — 可选，Session 级覆盖（优先于 Provider 存储的 api_key）
+        base_url   — 可选，Session 级覆盖（优先于 Provider 存储的 base_url）
+    """
+    from agentpal.providers.manager import ProviderManager
 
-    if provider in ("openai", "compatible"):
-        from agentscope.model import OpenAIChatModel
-        client_kwargs: dict[str, Any] = {}
-        if base_url:
-            client_kwargs["base_url"] = base_url
-        return OpenAIChatModel(
-            model_name=model_name,
-            api_key=api_key,
-            stream=stream,
-            client_kwargs=client_kwargs or None,
-        )
+    provider_id = config.get("provider", "compatible")
+    model_name = config.get("model_name", "")
+    api_key_override = config.get("api_key") or None
+    base_url_override = config.get("base_url") or None
 
-    raise ValueError(f"不支持的 LLM provider: {provider!r}")
+    mgr = ProviderManager.get_instance()
+    return mgr.get_chat_model(
+        provider_id=provider_id,
+        model_id=model_name,
+        stream=stream,
+        api_key_override=api_key_override,
+        base_url_override=base_url_override,
+    )
 
 
 def _extract_text(response: Any) -> str:

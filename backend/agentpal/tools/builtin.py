@@ -708,6 +708,99 @@ def cron_cli(
         return _text_response(f"<error>操作失败: {e}</error>")
 
 
+# ── 10. execute_python_code ──────────────────────────────
+
+
+def execute_python_code(
+    code: str,
+    packages: list[str] | None = None,
+    timeout: int = 30,
+) -> ToolResponse:
+    """在独立子进程中执行 Python 代码，支持动态安装依赖包。
+
+    代码在 Agent 工作空间目录下运行，stdout / stderr 完整捕获并返回。
+    每次调用启动全新 Python 进程，与主进程完全隔离。
+
+    Args:
+        code: 要执行的 Python 代码（支持多行、import、print 等）
+        packages: 执行前需要 pip install 的包名列表，如 ["pandas", "matplotlib"]
+        timeout: 代码执行的最长等待秒数（默认 30 秒）
+
+    Returns:
+        包含 returncode、stdout、stderr 的执行结果
+    """
+    import sys
+    import tempfile
+
+    settings = get_settings()
+    workspace = Path(settings.workspace_dir).expanduser()
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    # ── 1. 可选：安装依赖包 ──────────────────────────────
+    if packages:
+        install_result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", *packages],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if install_result.returncode != 0:
+            return _text_response(
+                f"<error>pip install 失败\n{install_result.stderr.strip()}</error>"
+            )
+
+    # ── 2. 写入临时文件并执行 ────────────────────────────
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".py",
+            delete=False,
+            encoding="utf-8",
+            dir=workspace,
+            prefix="_agentpal_exec_",
+        ) as tmp:
+            tmp.write(code)
+            tmp_path = tmp.name
+
+        result = subprocess.run(
+            [sys.executable, tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=workspace,
+        )
+
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+
+        # 截断超长输出，防止撑爆上下文
+        max_chars = 8000
+        if len(stdout) > max_chars:
+            stdout = stdout[:max_chars] + f"\n\n[... stdout 已截断，共 {len(result.stdout)} 字符]"
+        if len(stderr) > max_chars:
+            stderr = stderr[:max_chars] + f"\n\n[... stderr 已截断，共 {len(result.stderr)} 字符]"
+
+        output = (
+            f"<returncode>{result.returncode}</returncode>\n"
+            f"<stdout>{stdout}</stdout>\n"
+            f"<stderr>{stderr}</stderr>"
+        )
+        return _text_response(output)
+
+    except subprocess.TimeoutExpired:
+        return _text_response(f"<error>Python 代码执行超时（{timeout} 秒）</error>")
+    except Exception as e:
+        return _text_response(f"<error>{e}</error>")
+    finally:
+        # 清理临时文件
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 # ── 工具元数据注册表 ──────────────────────────────────────
 
 BUILTIN_TOOLS: list[dict] = [
@@ -773,5 +866,12 @@ BUILTIN_TOOLS: list[dict] = [
         "description": "管理定时任务（列出、创建、更新、删除、启用禁用、查看历史）",
         "icon": "Timer",
         "dangerous": False,
+    },
+    {
+        "name": "execute_python_code",
+        "func": execute_python_code,
+        "description": "在独立子进程中动态执行 Python 代码，支持安装依赖包",
+        "icon": "Code2",
+        "dangerous": True,
     },
 ]
