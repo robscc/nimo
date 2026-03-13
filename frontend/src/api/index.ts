@@ -377,4 +377,32 @@ export async function getCronExecutionDetail(executionId: string): Promise<CronE
   return data;
 }
 
+// ── Dashboard API ─────────────────────────────────────────
+
+export interface DashboardStats {
+  total_sessions: number;
+  sessions_by_channel: Record<string, number>;
+  total_messages: number;
+  total_tokens: number;
+  models_in_use: Record<string, number>;
+  total_tool_calls: number;
+  tool_calls_by_name: Record<string, number>;
+  tool_errors: number;
+  avg_tool_duration_ms: number;
+  total_skills: number;
+  enabled_skills: number;
+  total_cron_jobs: number;
+  enabled_cron_jobs: number;
+  cron_executions: number;
+  cron_failures: number;
+  total_errors: number;
+  sub_agent_tasks: number;
+  sub_agent_failures: number;
+}
+
+export async function getDashboardStats(): Promise<DashboardStats> {
+  const { data } = await api.get<DashboardStats>("/dashboard/stats");
+  return data;
+}
+
 export default api;
