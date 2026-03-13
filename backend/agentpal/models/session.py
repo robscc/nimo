@@ -71,6 +71,11 @@ class SubAgentTask(Base):
 
     每次 PersonalAssistant 派遣 SubAgent 时创建一条记录，
     异步任务完成后更新 status 和 result。
+
+    新增字段：
+    - agent_name:     执行此任务的 SubAgent 角色名
+    - task_type:      任务类型（用于 SubAgent 角色路由）
+    - execution_log:  完整执行日志（LLM 对话 + 工具调用）
     """
 
     __tablename__ = "sub_agent_tasks"
@@ -82,6 +87,9 @@ class SubAgentTask(Base):
     status: Mapped[str] = mapped_column(String(32), default=TaskStatus.PENDING)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    task_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    execution_log: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

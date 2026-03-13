@@ -88,8 +88,9 @@ class TestSubAgentMemoryIsolation:
         # model.__call__ 是 async，必须用 AsyncMock
         mock_model = AsyncMock(return_value=mock_response)
 
-        with patch("agentpal.agents.sub_agent._build_model", return_value=mock_model):
-            await sub_agent.reply("question")
+        with patch("agentpal.agents.personal_assistant._build_model", return_value=mock_model):
+            with patch.object(sub_agent, "_build_toolkit", return_value=None):
+                await sub_agent.reply("question")
 
         user_msgs = await sub_agent.memory.get_recent(sub_agent.session_id)
         roles = [m.role for m in user_msgs]

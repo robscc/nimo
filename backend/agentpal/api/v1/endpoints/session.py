@@ -33,6 +33,8 @@ class SessionResponse(BaseModel):
 class SessionSummary(BaseModel):
     id: str
     title: str
+    channel: str
+    model_name: str | None
     message_count: int
     created_at: str
     updated_at: str
@@ -120,6 +122,8 @@ async def list_sessions(
             SessionSummary(
                 id=s.id,
                 title=title,
+                channel=s.channel,
+                model_name=s.model_name,
                 message_count=count_map.get(s.id, 0),
                 created_at=s.created_at.isoformat(),
                 updated_at=s.updated_at.isoformat(),

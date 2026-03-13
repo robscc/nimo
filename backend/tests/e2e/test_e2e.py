@@ -63,6 +63,158 @@ class TestChatPage:
         expect(new_btn).to_be_visible()
 
 
+# ── Chat Conversation (LLM) ──────────────────────────────
+
+
+class TestChatConversation:
+    """对话功能 — 发送消息并验证 LLM 返回。"""
+
+    def test_send_message_and_receive_reply(self, page: Page):
+        """发送一条简单消息，LLM 应正常返回文本回复。"""
+        page.goto(f"{BASE_URL}/chat")
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1500)  # 等待 session 创建
+
+        # 输入消息
+        input_box = page.locator("input[placeholder*='输入消息']")
+        expect(input_box).to_be_visible()
+        input_box.fill("请用一句话回答：1+1等于几？")
+
+        # 点击发送按钮
+        send_btn = page.locator("form button[type='submit']")
+        expect(send_btn).to_be_enabled()
+        send_btn.click()
+
+        # 用户消息气泡应出现（nimo-500 背景色）
+        user_bubble = page.locator("div.bg-nimo-500.text-white.rounded-2xl")
+        expect(user_bubble.last).to_be_visible(timeout=3000)
+        expect(user_bubble.last).to_contain_text("1+1")
+
+        # 等待 AI 回复出现（白色背景气泡，非流式占位符）
+        # AI 的气泡是 bg-white border rounded-2xl，内容不为空
+        # 最长等 30 秒（LLM 可能较慢）
+        ai_bubble = page.locator("div.bg-white.border.rounded-2xl").last
+        expect(ai_bubble).to_be_visible(timeout=30000)
+
+        # 等待流式结束：闪烁光标消失
+        page.wait_for_timeout(2000)
+        # 再给额外时间让流式完成
+        page.wait_for_function(
+            """() => {
+                const bubbles = document.querySelectorAll('div.bg-white.border.rounded-2xl');
+                const last = bubbles[bubbles.length - 1];
+                return last && last.textContent.length > 2 && !last.querySelector('.animate-pulse');
+            }""",
+            timeout=30000,
+        )
+
+        # 验证 AI 回复内容包含数字 "2"
+        ai_text = ai_bubble.inner_text()
+        assert len(ai_text) > 0, "AI 回复不应为空"
+        assert "2" in ai_text, f"AI 回复应包含 '2'，实际: {ai_text}"
+
+    def test_send_message_shows_in_session_list(self, page: Page):
+        """发送消息后，左侧会话列表应更新标题。"""
+        page.goto(f"{BASE_URL}/chat")
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1500)
+
+        # 发送消息
+        input_box = page.locator("input[placeholder*='输入消息']")
+        input_box.fill("你好呀，这是一条测试消息")
+
+        send_btn = page.locator("form button[type='submit']")
+        send_btn.click()
+
+        # 等待回复完成
+        page.wait_for_function(
+            """() => {
+                const bubbles = document.querySelectorAll('div.bg-white.border.rounded-2xl');
+                const last = bubbles[bubbles.length - 1];
+                return last && last.textContent.length > 2 && !last.querySelector('.animate-pulse');
+            }""",
+            timeout=30000,
+        )
+
+        # 左侧会话列表应更新 — 标题应包含用户的第一句话
+        session_panel = page.locator("div.w-64.bg-white.border-r")
+        expect(session_panel.get_by_text("你好呀").first).to_be_visible(timeout=5000)
+
+    def test_multi_turn_conversation(self, page: Page):
+        """多轮对话：连续发两条消息，均应得到回复。"""
+        page.goto(f"{BASE_URL}/chat")
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1500)
+
+        input_box = page.locator("input[placeholder*='输入消息']")
+        send_btn = page.locator("form button[type='submit']")
+
+        # 第一轮
+        input_box.fill("请记住这个数字：42")
+        send_btn.click()
+
+        # 等待第一轮回复完成
+        page.wait_for_function(
+            """() => {
+                const bubbles = document.querySelectorAll('div.bg-white.border.rounded-2xl');
+                const last = bubbles[bubbles.length - 1];
+                return last && last.textContent.length > 2 && !last.querySelector('.animate-pulse');
+            }""",
+            timeout=30000,
+        )
+
+        # 第二轮
+        input_box.fill("我刚才让你记住的数字是多少？")
+        send_btn.click()
+
+        # 等待第二轮回复完成
+        page.wait_for_function(
+            """() => {
+                const bubbles = document.querySelectorAll('div.bg-white.border.rounded-2xl');
+                return bubbles.length >= 2
+                    && bubbles[bubbles.length - 1].textContent.length > 2
+                    && !bubbles[bubbles.length - 1].querySelector('.animate-pulse');
+            }""",
+            timeout=30000,
+        )
+
+        # 验证：第二轮回复应该包含 42
+        ai_bubbles = page.locator("div.bg-white.border.rounded-2xl")
+        last_reply = ai_bubbles.last.inner_text()
+        assert "42" in last_reply, f"多轮对话应记住数字 42，实际回复: {last_reply}"
+
+    def test_clear_chat_and_new_session(self, page: Page):
+        """清空对话后应重置为空白。"""
+        page.goto(f"{BASE_URL}/chat")
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1500)
+
+        # 先发一条消息
+        input_box = page.locator("input[placeholder*='输入消息']")
+        input_box.fill("随便说点什么")
+        page.locator("form button[type='submit']").click()
+
+        # 等待回复
+        page.wait_for_function(
+            """() => {
+                const bubbles = document.querySelectorAll('div.bg-white.border.rounded-2xl');
+                const last = bubbles[bubbles.length - 1];
+                return last && last.textContent.length > 2 && !last.querySelector('.animate-pulse');
+            }""",
+            timeout=30000,
+        )
+
+        # 点击清空按钮
+        clear_btn = page.locator("button[title='清空对话']")
+        expect(clear_btn).to_be_visible()
+        clear_btn.click()
+
+        page.wait_for_timeout(1000)
+
+        # 清空后应回到欢迎界面
+        expect(page.get_by_text("嗨！我是 nimo").first).to_be_visible(timeout=5000)
+
+
 # ── Tools Page ────────────────────────────────────────────
 
 
@@ -160,10 +312,56 @@ class TestNavigation:
         page.wait_for_load_state("networkidle")
         expect(page.get_by_text("技能管理", exact=True)).to_be_visible()
 
+        # 导航到 Sessions
+        page.locator("a[title='会话']").click()
+        page.wait_for_load_state("networkidle")
+        expect(page.get_by_text("会话管理", exact=True)).to_be_visible()
+
         # 导航回 Chat
         page.locator("a[title='对话']").click()
         page.wait_for_load_state("networkidle")
         expect(page.get_by_text("nimo", exact=True).first).to_be_visible()
+
+
+# ── Sessions Page ────────────────────────────────────────
+
+
+class TestSessionsPage:
+    """会话管理页面。"""
+
+    def test_sessions_page_loads(self, page: Page):
+        """会话管理页面能正常加载。"""
+        page.goto(f"{BASE_URL}/sessions")
+        page.wait_for_load_state("networkidle")
+        expect(page.get_by_text("会话管理", exact=True)).to_be_visible()
+
+    def test_sessions_list_visible(self, page: Page):
+        """会话列表可见，应有至少一个会话。"""
+        # 先创建一个会话
+        page.goto(f"{BASE_URL}/chat")
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1500)
+
+        # 再访问会话管理页面
+        page.goto(f"{BASE_URL}/sessions")
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(1000)
+
+        # 应至少能看到 "个会话" 统计
+        expect(page.get_by_text("个会话").first).to_be_visible(timeout=5000)
+
+    def test_sessions_search(self, page: Page):
+        """搜索功能应可见并可交互。"""
+        page.goto(f"{BASE_URL}/sessions")
+        page.wait_for_load_state("networkidle")
+
+        search_input = page.locator("input[placeholder*='搜索']")
+        expect(search_input).to_be_visible()
+        search_input.fill("不存在的会话")
+        page.wait_for_timeout(500)
+
+        # 搜索不到时应显示空状态
+        expect(page.get_by_text("没有匹配的会话").first).to_be_visible(timeout=3000)
 
 
 # ── Session Meta Features ────────────────────────────────
@@ -172,8 +370,8 @@ class TestNavigation:
 class TestSessionMetaFeatures:
     """会话元信息功能测试。"""
 
-    def test_tool_checkboxes_in_meta_panel(self, page: Page):
-        """会话信息面板中应显示工具复选框。"""
+    def test_tool_cards_in_meta_panel(self, page: Page):
+        """会话信息面板中应显示工具卡片（可点击切换）。"""
         page.goto(f"{BASE_URL}/chat")
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(1000)
@@ -183,6 +381,6 @@ class TestSessionMetaFeatures:
         page.wait_for_timeout(500)
 
         meta_panel = page.locator("[data-testid='session-meta-panel']")
-        # 应有 checkbox（工具列表中的复选框）
-        checkboxes = meta_panel.locator("input[type='checkbox']")
-        expect(checkboxes.first).to_be_visible()
+        # 应有工具卡片按钮（带圆点指示器的按钮）
+        tool_cards = meta_panel.locator("button.rounded-lg")
+        expect(tool_cards.first).to_be_visible()
