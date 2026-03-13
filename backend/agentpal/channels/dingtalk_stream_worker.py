@@ -106,26 +106,22 @@ async def _run_stream_client(app_key: str, app_secret: str) -> None:
                 logger.exception(f"DingTalk Stream: 消息处理异常 — {exc}")
             return dingtalk_stream.AckMessage.STATUS_OK, "OK"
 
-    class _ConnectLogSystemHandler(dingtalk_stream.SystemHandler):
-        """系统消息处理器：首次收到系统消息时记录 WebSocket 连接成功日志。"""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self._connected = False
-
-        async def process(self, message: Any) -> tuple[int, str]:
-            if not self._connected:
-                self._connected = True
+    async def _watch_connection(c: Any) -> None:
+        """轮询 client.websocket，首次建连后打印成功日志（SDK 无连接回调）。"""
+        for _ in range(150):  # 最长等 30 秒（每次 200 ms）
+            await asyncio.sleep(0.2)
+            if getattr(c, "websocket", None) is not None:
                 logger.info("DingTalk Stream: WebSocket 连接成功 ✅，等待消息中…")
-            return dingtalk_stream.AckMessage.STATUS_OK, "OK"
+                return
+        logger.warning("DingTalk Stream: 等待 WebSocket 建连超时（30s），请检查网络配置")
 
     credential = dingtalk_stream.Credential(app_key, app_secret)
     client = dingtalk_stream.DingTalkStreamClient(credential)
-    client.system_handler = _ConnectLogSystemHandler()
     client.register_callback_handler(
         dingtalk_stream.ChatbotMessage.TOPIC,
         _SdkChatbotHandler(),
     )
+    asyncio.create_task(_watch_connection(client))
     logger.info("DingTalk Stream: 正在连接…")
     await client.start()  # SDK 内部 while True 处理重连
 
