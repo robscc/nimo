@@ -36,7 +36,7 @@ dependencies = [
     "loguru>=0.7.0",
     "croniter>=2.0.0",
     # 渠道集成
-    "dingtalk-sdk>=1.2.0",
+    "dingtalk-stream>=0.24.0",
     "lark-oapi>=1.2.0",
 ]
 

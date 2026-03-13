@@ -33,8 +33,8 @@ async def _handle_incoming(channel_name: str, payload: dict[str, Any], db: Async
 
     settings = get_settings()
     memory = MemoryFactory.create(settings.memory_backend, db=db)
-    assistant = PersonalAssistant(session_id=incoming.session_id, memory=memory)
-    reply_text = await assistant.reply(incoming.user_input if hasattr(incoming, "user_input") else incoming.text)
+    assistant = PersonalAssistant(session_id=incoming.session_id, memory=memory, db=db)
+    reply_text = await assistant.reply(incoming.text)
 
     from agentpal.channels.base import OutgoingMessage
     await ch.send(OutgoingMessage(session_id=incoming.session_id, text=reply_text))
