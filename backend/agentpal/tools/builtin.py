@@ -523,6 +523,191 @@ def skill_cli(action: str, name: str = "", url: str = "") -> ToolResponse:
         return _text_response(f"<error>操作失败: {e}</error>")
 
 
+# ── 9. cron_cli ──────────────────────────────────────────
+
+
+def cron_cli(
+    action: str,
+    name: str = "",
+    schedule: str = "",
+    task_prompt: str = "",
+    job_id: str = "",
+    enabled: bool = True,
+) -> ToolResponse:
+    """管理 AgentPal 内置定时任务的命令行工具（使用系统内部调度器，非系统 crontab）。
+
+    支持的操作：
+    - list: 列出所有定时任务
+    - create: 创建新定时任务（需 name、schedule、task_prompt）
+    - update: 更新定时任务（需 job_id，可选 name、schedule、task_prompt）
+    - delete: 删除定时任务（需 job_id）
+    - toggle: 启用/禁用定时任务（需 job_id、enabled）
+    - history: 查看执行历史（可选 job_id 按任务筛选）
+
+    Args:
+        action: 操作类型，可选值: list, create, update, delete, toggle, history
+        name: 任务名称（用于 create/update）
+        schedule: cron 表达式（用于 create/update），格式为标准 5 位 cron（分 时 日 月 周），例如 "0 9 * * *" 表示每天 9 点
+        task_prompt: 任务执行时发送给 Agent 的提示词（用于 create/update）
+        job_id: 任务 ID（用于 update/delete/toggle/history）
+        enabled: 是否启用（用于 toggle，默认 True）
+
+    Returns:
+        操作结果文本
+    """
+    import asyncio
+    import concurrent.futures
+
+    async def _run() -> str:
+        from agentpal.database import AsyncSessionLocal
+        from agentpal.services.cron_scheduler import CronManager
+
+        async with AsyncSessionLocal() as db:
+            mgr = CronManager(db)
+
+            if action == "list":
+                jobs = await mgr.list_jobs()
+                if not jobs:
+                    return (
+                        "当前没有定时任务。\n"
+                        "提示：可以用 cron_cli(action='create', name='任务名', schedule='0 9 * * *', task_prompt='...') 创建定时任务。\n\n"
+                        "cron 表达式格式：分 时 日 月 周\n"
+                        "  例: '0 9 * * *'   = 每天 09:00\n"
+                        "  例: '*/30 * * * *' = 每 30 分钟\n"
+                        "  例: '0 9 * * 1'   = 每周一 09:00"
+                    )
+                lines = []
+                for j in jobs:
+                    status = "✅" if j["enabled"] else "⏸️"
+                    next_run = j.get("next_run_at", "未知")
+                    lines.append(
+                        f"  {status} {j['name']}\n"
+                        f"     ID: {j['id']}\n"
+                        f"     计划: {j['schedule']}  |  下次执行: {next_run}"
+                    )
+                return f"定时任务列表（{len(jobs)} 个）:\n\n" + "\n\n".join(lines)
+
+            elif action == "create":
+                if not name:
+                    return "<error>create 操作需要提供 name 参数（任务名称）</error>"
+                if not schedule:
+                    return (
+                        "<error>create 操作需要提供 schedule 参数（cron 表达式）</error>\n"
+                        "cron 表达式格式：分 时 日 月 周\n"
+                        "  例: '0 9 * * *'   = 每天 09:00\n"
+                        "  例: '*/30 * * * *' = 每 30 分钟"
+                    )
+                if not task_prompt:
+                    return "<error>create 操作需要提供 task_prompt 参数（任务执行时的提示词）</error>"
+
+                try:
+                    result = await mgr.create_job({
+                        "name": name,
+                        "schedule": schedule,
+                        "task_prompt": task_prompt,
+                        "enabled": enabled,
+                    })
+                    await db.commit()
+                    return (
+                        f"✅ 定时任务创建成功！\n"
+                        f"  名称: {result['name']}\n"
+                        f"  ID: {result['id']}\n"
+                        f"  计划: {result['schedule']}\n"
+                        f"  下次执行: {result.get('next_run_at', '计算中...')}\n"
+                        f"  提示词: {result['task_prompt'][:100]}"
+                    )
+                except ValueError as e:
+                    return f"<error>{e}</error>"
+
+            elif action == "update":
+                if not job_id:
+                    return "<error>update 操作需要提供 job_id 参数</error>"
+                update_data: dict[str, Any] = {}
+                if name:
+                    update_data["name"] = name
+                if schedule:
+                    update_data["schedule"] = schedule
+                if task_prompt:
+                    update_data["task_prompt"] = task_prompt
+                if not update_data:
+                    return "<error>update 操作至少需要提供一个要更新的字段（name/schedule/task_prompt）</error>"
+
+                try:
+                    result = await mgr.update_job(job_id, update_data)
+                    if result is None:
+                        return f"<error>定时任务不存在: {job_id}</error>"
+                    await db.commit()
+                    return (
+                        f"✅ 定时任务已更新\n"
+                        f"  名称: {result['name']}\n"
+                        f"  计划: {result['schedule']}\n"
+                        f"  下次执行: {result.get('next_run_at', '计算中...')}"
+                    )
+                except ValueError as e:
+                    return f"<error>{e}</error>"
+
+            elif action == "delete":
+                if not job_id:
+                    return "<error>delete 操作需要提供 job_id 参数</error>"
+                ok = await mgr.delete_job(job_id)
+                if ok:
+                    await db.commit()
+                    return f"✅ 定时任务已删除: {job_id}"
+                return f"<error>定时任务不存在: {job_id}</error>"
+
+            elif action == "toggle":
+                if not job_id:
+                    return "<error>toggle 操作需要提供 job_id 参数</error>"
+                result = await mgr.toggle_job(job_id, enabled)
+                if result is None:
+                    return f"<error>定时任务不存在: {job_id}</error>"
+                await db.commit()
+                state = "启用" if enabled else "禁用"
+                return f"✅ 定时任务已{state}: {result['name']}"
+
+            elif action == "history":
+                executions = await mgr.list_executions(
+                    cron_job_id=job_id if job_id else None, limit=20
+                )
+                if not executions:
+                    return "暂无执行记录。"
+                lines = []
+                for ex in executions:
+                    status_icon = {"done": "✅", "failed": "❌", "running": "⏳"}.get(
+                        ex.get("status", ""), "❓"
+                    )
+                    result_text = ex.get("result", "") or ex.get("error", "") or ""
+                    if len(result_text) > 100:
+                        result_text = result_text[:100] + "..."
+                    lines.append(
+                        f"  {status_icon} {ex.get('cron_job_name', '?')} — {ex.get('started_at', '?')}\n"
+                        f"     结果: {result_text or '(无)'}"
+                    )
+                return f"执行历史（最近 {len(executions)} 条）:\n\n" + "\n\n".join(lines)
+
+            else:
+                return (
+                    f"<error>不支持的操作: {action}</error>\n"
+                    f"可用操作: list, create, update, delete, toggle, history"
+                )
+
+    def _thread_run() -> str:
+        """在独立线程中创建新事件循环运行异步代码。"""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_thread_run)
+            result_text = future.result(timeout=30)
+        return _text_response(result_text)
+    except Exception as e:
+        return _text_response(f"<error>操作失败: {e}</error>")
+
+
 # ── 工具元数据注册表 ──────────────────────────────────────
 
 BUILTIN_TOOLS: list[dict] = [
@@ -580,6 +765,13 @@ BUILTIN_TOOLS: list[dict] = [
         "func": skill_cli,
         "description": "管理技能包（列出、安装、启用、禁用、卸载）",
         "icon": "Puzzle",
+        "dangerous": False,
+    },
+    {
+        "name": "cron_cli",
+        "func": cron_cli,
+        "description": "管理定时任务（列出、创建、更新、删除、启用禁用、查看历史）",
+        "icon": "Timer",
         "dangerous": False,
     },
 ]
