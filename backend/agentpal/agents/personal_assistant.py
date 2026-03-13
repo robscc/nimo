@@ -159,6 +159,9 @@ class PersonalAssistant(BaseAgent):
             messages.append({"role": "user", "content": user_input})
 
             final_text = ""
+            accumulated_thinking = ""
+            accumulated_tool_calls: list[dict[str, Any]] = []
+            accumulated_files: list[dict[str, Any]] = []
 
             for _ in range(MAX_TOOL_ROUNDS):
                 tools_schema = toolkit.get_json_schemas() if toolkit else None
@@ -189,6 +192,7 @@ class PersonalAssistant(BaseAgent):
                             if len(full) > prev_thinking_len:
                                 yield {"type": "thinking_delta", "delta": full[prev_thinking_len:]}
                                 prev_thinking_len = len(full)
+                            accumulated_thinking = full  # 记录最终完整 thinking
 
                         elif btype == "text" and not has_tool_calls:
                             full = block.get("text", "")
@@ -260,7 +264,40 @@ class PersonalAssistant(BaseAgent):
                         {"role": "tool", "tool_call_id": tc_id, "content": output_text}
                     )
 
-            await self._remember_assistant(final_text)
+                    # 收集工具调用记录
+                    accumulated_tool_calls.append({
+                        "id": tc_id,
+                        "name": tc_name,
+                        "input": tc_input,
+                        "output": output_text,
+                        "error": error_text,
+                        "duration_ms": duration_ms,
+                        "status": "done",
+                    })
+
+                    # 收集 send_file_to_user 产生的文件
+                    if tc_name == "send_file_to_user" and not error_text:
+                        try:
+                            info = json.loads(output_text)
+                            if info.get("status") == "sent":
+                                accumulated_files.append({
+                                    "url": info["url"],
+                                    "name": info["filename"],
+                                    "mime": info.get("mime", "application/octet-stream"),
+                                })
+                        except Exception:
+                            pass
+
+            # 构造 meta 并持久化
+            meta: dict[str, Any] = {}
+            if accumulated_thinking:
+                meta["thinking"] = accumulated_thinking
+            if accumulated_tool_calls:
+                meta["tool_calls"] = accumulated_tool_calls
+            if accumulated_files:
+                meta["files"] = accumulated_files
+
+            await self._remember_assistant(final_text, meta=meta or None)
             yield {"type": "done"}
 
             # 触发记忆压缩（后台异步，不阻塞 SSE）

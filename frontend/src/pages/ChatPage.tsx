@@ -7,7 +7,7 @@ import {
   Info, Settings, Cpu, Puzzle, X,
 } from "lucide-react";
 import clsx from "clsx";
-import { clearMemory, createSession, getSessionMessages } from "../api";
+import { clearMemory, createSession, getSessions, getSessionMessages } from "../api";
 import NimoIcon from "../components/NimoIcon";
 import SessionPanel from "../components/SessionPanel";
 import { useSessionMeta, useUpdateSessionConfig } from "../hooks/useSessionMeta";
@@ -447,6 +447,27 @@ function SessionMetaPanel({
 
 // ── Main Page ──────────────────────────────────────────────
 
+function mapHistoryToMessages(history: Awaited<ReturnType<typeof getSessionMessages>>) {
+  return history.map((m) => {
+    const meta = m.meta;
+    return {
+      role: m.role as "user" | "assistant",
+      content: m.content,
+      thinking: meta?.thinking,
+      toolCalls: meta?.tool_calls?.map((tc) => ({
+        id: tc.id,
+        name: tc.name,
+        input: tc.input,
+        output: tc.output,
+        error: tc.error,
+        duration_ms: tc.duration_ms,
+        status: "done" as const,
+      })),
+      files: meta?.files,
+    };
+  });
+}
+
 export default function ChatPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const sessionIdParam = searchParams.get("session");
@@ -462,14 +483,29 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
 
-  // 初始化：无 session 参数时自动创建
+  // 初始化：优先加载 URL 中的 session，否则加载最新 session，否则新建
   useEffect(() => {
-    if (!sessionId) {
-      createSession().then(({ id }) => {
-        setSessionId(id);
-        setSearchParams({ session: id }, { replace: true });
-      });
-    }
+    (async () => {
+      if (sessionIdParam) {
+        // URL 已指定 session：直接加载其消息
+        const history = await getSessionMessages(sessionIdParam);
+        setMessages(mapHistoryToMessages(history));
+      } else {
+        // 无 URL 参数：加载最近一条 session，没有才新建
+        const sessions = await getSessions();
+        if (sessions.length > 0) {
+          const latest = sessions[0];
+          setSessionId(latest.id);
+          setSearchParams({ session: latest.id }, { replace: true });
+          const history = await getSessionMessages(latest.id);
+          setMessages(mapHistoryToMessages(history));
+        } else {
+          const { id } = await createSession();
+          setSessionId(id);
+          setSearchParams({ session: id }, { replace: true });
+        }
+      }
+    })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -483,9 +519,7 @@ export default function ChatPage() {
     setSessionId(id);
     setSearchParams({ session: id });
     const history = await getSessionMessages(id);
-    setMessages(
-      history.map((m) => ({ role: m.role as "user" | "assistant", content: m.content }))
-    );
+    setMessages(mapHistoryToMessages(history));
   };
 
   // 新建对话回调

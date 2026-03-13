@@ -36,10 +36,29 @@ export interface SessionSummary {
   updated_at: string;
 }
 
+export interface HistoryMessageMeta {
+  thinking?: string;
+  tool_calls?: Array<{
+    id: string;
+    name: string;
+    input: Record<string, unknown>;
+    output?: string;
+    error?: string | null;
+    duration_ms?: number;
+    status: string;
+  }>;
+  files?: Array<{
+    url: string;
+    name: string;
+    mime: string;
+  }>;
+}
+
 export interface HistoryMessage {
   role: string;
   content: string;
   created_at: string;
+  meta?: HistoryMessageMeta | null;
 }
 
 // ── API 方法 ──────────────────────────────────────────────

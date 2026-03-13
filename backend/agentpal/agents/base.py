@@ -38,9 +38,14 @@ class BaseAgent(ABC):
             MemoryMessage(session_id=self.session_id, role=MemoryRole.USER, content=content)
         )
 
-    async def _remember_assistant(self, content: str) -> None:
+    async def _remember_assistant(self, content: str, meta: dict | None = None) -> None:
         await self.memory.add(
-            MemoryMessage(session_id=self.session_id, role=MemoryRole.ASSISTANT, content=content)
+            MemoryMessage(
+                session_id=self.session_id,
+                role=MemoryRole.ASSISTANT,
+                content=content,
+                metadata=meta or {},
+            )
         )
 
     async def _get_history(self, limit: int = 20) -> list[dict[str, Any]]:

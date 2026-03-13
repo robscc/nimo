@@ -64,6 +64,7 @@ class MessageOut(BaseModel):
     role: str
     content: str
     created_at: str
+    meta: dict | None = None
 
 
 class CreateSessionResponse(BaseModel):
@@ -273,7 +274,7 @@ async def get_session_messages(
     )
     records = result.scalars().all()
     return [
-        MessageOut(role=r.role, content=r.content, created_at=r.created_at.isoformat())
+        MessageOut(role=r.role, content=r.content, created_at=r.created_at.isoformat(), meta=r.meta or None)
         for r in records
     ]
 
