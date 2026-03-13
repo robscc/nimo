@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   Send, Trash2, Wrench, ChevronDown, ChevronRight,
   CheckCircle2, Loader2, XCircle, Paperclip, Brain,
-  Info, Settings, Cpu, Puzzle, X,
+  Info, Settings, Cpu, Puzzle, X, Smartphone,
 } from "lucide-react";
 import clsx from "clsx";
 import { clearMemory, createSession, getSessions, getSessionMessages } from "../api";
@@ -483,6 +483,8 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
 
+  const isReadOnly = sessionId?.startsWith("dingtalk:") ?? false;
+
   // 初始化：优先加载 URL 中的 session，否则加载最新 session，否则新建
   useEffect(() => {
     (async () => {
@@ -743,6 +745,7 @@ export default function ChatPage() {
             <span>nimo</span>
           </h1>
           <div className="flex items-center gap-1">
+          {!isReadOnly && (
           <button
             onClick={handleClear}
             className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
@@ -750,6 +753,8 @@ export default function ChatPage() {
           >
             <Trash2 size={18} />
           </button>
+          )}
+          {!isReadOnly && (
           <button
             onClick={() => setShowMeta((v) => !v)}
             className={clsx(
@@ -762,6 +767,7 @@ export default function ChatPage() {
           >
             <Settings size={18} />
           </button>
+          )}
           </div>
         </div>
 
@@ -836,6 +842,12 @@ export default function ChatPage() {
         </div>
 
         {/* Input */}
+        {isReadOnly ? (
+          <div className="px-6 py-4 bg-white border-t flex items-center justify-center gap-2 text-gray-400 text-sm">
+            <Smartphone size={16} className="text-blue-400" />
+            <span>钉钉会话（只读）— 仅供查看历史消息</span>
+          </div>
+        ) : (
         <form onSubmit={handleSubmit} className="px-6 py-4 bg-white border-t flex gap-3">
           <label
             className="w-10 h-10 rounded-xl border border-gray-200 text-gray-400 hover:text-nimo-500 hover:border-nimo-300 flex items-center justify-center cursor-pointer transition-colors shrink-0"
@@ -866,10 +878,11 @@ export default function ChatPage() {
             <Send size={18} />
           </button>
         </form>
+        )}
       </div>
 
       {/* Session Meta Panel */}
-      {showMeta && sessionId && (
+      {showMeta && sessionId && !isReadOnly && (
         <SessionMetaPanel
           sessionId={sessionId}
           onClose={() => setShowMeta(false)}

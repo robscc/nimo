@@ -5,9 +5,10 @@
                                           |
                                   _handle_message()
                                           |
-                              PersonalAssistant.reply()
+                              PersonalAssistant.reply_stream()
                                           |
                       sessionWebhook --HTTP--> DingTalk 云
+                      （逐条发送：工具开始 → 工具完成 → 图片 → 最终回复）
 
 配置（.env 或 ~/.nimo/config.yaml）：
     DINGTALK_ENABLED=true
@@ -20,7 +21,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import mimetypes
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -130,7 +135,13 @@ async def _run_stream_client(app_key: str, app_secret: str) -> None:
 
 
 async def _handle_message(callback_data: dict[str, Any]) -> None:
-    """解析 ChatbotMessage，调用助手，并回复消息。
+    """解析 ChatbotMessage，调用助手，逐条发送回复。
+
+    流程：
+        1. tool_start  → 立即发一条 Markdown "⏳ 正在调用 xxx …"
+        2. tool_done   → 立即发一条 Markdown 展示工具结果
+        3. file (图片) → 上传到钉钉获取 mediaId，发 Markdown 内嵌图片
+        4. 最终文本    → 纯文本 / Markdown 回复
 
     Args:
         callback_data: CallbackMessage.data dict（来自 DingTalk SDK）
@@ -158,16 +169,251 @@ async def _handle_message(callback_data: dict[str, Any]) -> None:
         f"from={sender_nick}  text={text[:60]!r}"
     )
 
-    reply_text = await _invoke_assistant(session_id, text)
-
     session_webhook = getattr(message, "session_webhook", None)
-    if session_webhook:
-        await _send_reply(session_webhook, reply_text)
-    else:
+    if not session_webhook:
         logger.warning("DingTalk Stream: 消息缺少 session_webhook，无法回复")
+        return
+
+    await _stream_reply(session_id, text, session_webhook)
 
 
-# ── 辅助函数 ──────────────────────────────────────────────
+# ── 流式回复：逐条发送 ────────────────────────────────────
+
+
+async def _ensure_dingtalk_session(db: Any, session_id: str) -> None:
+    """Upsert SessionRecord，确保钉钉会话出现在会话列表中。"""
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    from agentpal.models.session import SessionRecord
+
+    now = datetime.now(timezone.utc)
+    stmt = (
+        sqlite_insert(SessionRecord)
+        .values(
+            id=session_id,
+            channel="dingtalk",
+            status="active",
+            created_at=now,
+            updated_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=["id"],
+            set_={"updated_at": now},
+        )
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+
+async def _stream_reply(
+    session_id: str, text: str, session_webhook: str
+) -> None:
+    """消费 reply_stream() 事件，逐条通过 sessionWebhook 发送消息。"""
+    from agentpal.agents.personal_assistant import PersonalAssistant
+    from agentpal.database import AsyncSessionLocal
+    from agentpal.memory.factory import MemoryFactory
+
+    settings = get_settings()
+    reply_parts: list[str] = []
+
+    async with AsyncSessionLocal() as db:
+        await _ensure_dingtalk_session(db, session_id)
+        memory = MemoryFactory.create(settings.memory_backend, db=db)
+        assistant = PersonalAssistant(session_id=session_id, memory=memory, db=db)
+
+        async for event in assistant.reply_stream(text):
+            etype = event.get("type")
+
+            if etype == "tool_start":
+                # 立即发送 "正在调用" 提示
+                tc_name = event.get("name", "")
+                tc_input = event.get("input", {})
+                md = _format_tool_start(tc_name, tc_input)
+                await _send_markdown_reply(session_webhook, "⏳ 工具调用", md)
+
+            elif etype == "tool_done":
+                # 立即发送工具结果
+                md = _format_tool_done(event)
+                await _send_markdown_reply(session_webhook, "✅ 工具结果", md)
+
+                # 如果是 send_file_to_user 且成功，尝试发送图片
+                if (
+                    event.get("name") == "send_file_to_user"
+                    and not event.get("error")
+                ):
+                    await _try_send_image(session_webhook, event, settings)
+
+            elif etype == "text_delta":
+                reply_parts.append(event.get("delta", ""))
+
+            elif etype == "error":
+                err_msg = event.get("message", "未知错误")
+                await _send_reply(session_webhook, f"❌ {err_msg}")
+
+    # 发送最终文本回复
+    final_text = "".join(reply_parts)
+    if final_text.strip():
+        await _send_reply(session_webhook, final_text)
+
+
+# ── 工具消息格式化 ────────────────────────────────────────
+
+
+def _format_tool_start(name: str, tc_input: Any) -> str:
+    """格式化 tool_start 事件为钉钉 Markdown。"""
+    if isinstance(tc_input, dict):
+        input_str = json.dumps(tc_input, ensure_ascii=False, separators=(",", ":"))
+    else:
+        input_str = str(tc_input)
+
+    if len(input_str) > 200:
+        input_str = input_str[:200] + "…"
+
+    return f"⏳ 正在调用 **{name}** …\n\n> 输入：{input_str}"
+
+
+def _format_tool_done(event: dict[str, Any]) -> str:
+    """格式化 tool_done 事件为钉钉 Markdown。"""
+    name = event.get("name", "unknown")
+    output = event.get("output", "")
+    error = event.get("error")
+    duration = event.get("duration_ms")
+
+    output_str = str(output)
+    if len(output_str) > 500:
+        output_str = output_str[:500] + "…"
+
+    section = f"🔧 **{name}**\n"
+    if error:
+        section += f"> ❌ 错误：{error}\n"
+    else:
+        section += f"> 输出：{output_str}\n"
+    if duration is not None:
+        section += f"> ⏱ {duration}ms"
+
+    return section
+
+
+# ── 图片发送 ──────────────────────────────────────────────
+
+
+async def _try_send_image(
+    session_webhook: str, tool_done_event: dict[str, Any], settings: Any
+) -> None:
+    """尝试从 send_file_to_user 的输出中提取文件并发送图片到钉钉。
+
+    策略：
+        1. 解析 tool output 获取本地文件路径
+        2. 上传到钉钉 /media/upload 获取 mediaId
+        3. 通过 Markdown `![](mediaId)` 发送图片
+    """
+    try:
+        output_str = tool_done_event.get("output", "")
+        info = json.loads(output_str)
+        if info.get("status") != "sent":
+            return
+
+        filename = info.get("filename", "")
+
+        # 检查是否为图片（文件名 + 文件头双重验证）
+        mime, _ = mimetypes.guess_type(filename)
+        if not mime or not mime.startswith("image/"):
+            logger.debug(f"DingTalk Stream: 文件 {filename} 非图片类型（{mime}），跳过")
+            return
+
+        # 定位本地文件
+        local_path = Path("uploads") / filename
+        if not local_path.exists():
+            logger.warning(f"DingTalk Stream: 图片文件不存在 {local_path}")
+            return
+
+        # 文件头校验：确认实际内容是图片
+        _IMAGE_MAGIC = {
+            b"\x89PNG": "image/png",
+            b"\xff\xd8\xff": "image/jpeg",
+            b"GIF8": "image/gif",
+            b"RIFF": "image/webp",  # RIFF....WEBP
+            b"BM": "image/bmp",
+        }
+        with open(local_path, "rb") as f:
+            header = f.read(8)
+        if not any(header.startswith(magic) for magic in _IMAGE_MAGIC):
+            logger.debug(
+                f"DingTalk Stream: 文件 {filename} 文件头不匹配已知图片格式，跳过"
+            )
+            return
+
+        # 上传到钉钉获取 mediaId
+        app_key = settings.dingtalk_app_key
+        app_secret = settings.dingtalk_app_secret
+        if not app_key or not app_secret:
+            logger.debug("DingTalk Stream: 缺少 app_key/secret，跳过图片上传")
+            return
+
+        media_id = await _upload_to_dingtalk(app_key, app_secret, local_path, mime)
+        if not media_id:
+            return
+
+        # 用 Markdown 发送图片
+        md = f"![{filename}]({media_id})"
+        await _send_markdown_reply(session_webhook, "📷 图片", md)
+        logger.info(f"DingTalk Stream → 图片已发送: {filename}")
+
+    except Exception as exc:
+        logger.warning(f"DingTalk Stream: 发送图片失败 — {exc}")
+
+
+async def _get_dingtalk_access_token(app_key: str, app_secret: str) -> str | None:
+    """获取钉钉 API access_token。"""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://oapi.dingtalk.com/gettoken",
+                params={"appkey": app_key, "appsecret": app_secret},
+            )
+        data = resp.json()
+        if data.get("errcode") == 0:
+            return data["access_token"]
+        logger.warning(f"DingTalk Stream: 获取 access_token 失败 — {data}")
+        return None
+    except Exception as exc:
+        logger.warning(f"DingTalk Stream: 获取 access_token 异常 — {exc}")
+        return None
+
+
+async def _upload_to_dingtalk(
+    app_key: str, app_secret: str, file_path: Path, mime_type: str
+) -> str | None:
+    """上传文件到钉钉媒体接口，返回 mediaId。"""
+    import httpx
+
+    access_token = await _get_dingtalk_access_token(app_key, app_secret)
+    if not access_token:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            with open(file_path, "rb") as f:
+                resp = await client.post(
+                    "https://oapi.dingtalk.com/media/upload",
+                    params={"access_token": access_token, "type": "image"},
+                    files={"media": (file_path.name, f, mime_type)},
+                )
+        data = resp.json()
+        if data.get("errcode") == 0:
+            media_id = data.get("media_id", "")
+            logger.debug(f"DingTalk Stream: 图片上传成功 media_id={media_id[:20]}…")
+            return media_id
+        logger.warning(f"DingTalk Stream: 图片上传失败 — {data}")
+        return None
+    except Exception as exc:
+        logger.warning(f"DingTalk Stream: 图片上传异常 — {exc}")
+        return None
+
+
+# ── 基础发送函数 ──────────────────────────────────────────
 
 
 def _extract_text(message: Any) -> str:
@@ -178,19 +424,6 @@ def _extract_text(message: Any) -> str:
     raw: str = getattr(text_obj, "content", "") or ""
     # 去除开头所有 @xxx 标记（群消息中机器人名可能出现在开头）
     return re.sub(r"^(@\S+\s*)+", "", raw.strip()).strip()
-
-
-async def _invoke_assistant(session_id: str, text: str) -> str:
-    """为每条消息创建独立数据库会话并调用 PersonalAssistant.reply()。"""
-    from agentpal.agents.personal_assistant import PersonalAssistant
-    from agentpal.database import AsyncSessionLocal
-    from agentpal.memory.factory import MemoryFactory
-
-    settings = get_settings()
-    async with AsyncSessionLocal() as db:
-        memory = MemoryFactory.create(settings.memory_backend, db=db)
-        assistant = PersonalAssistant(session_id=session_id, memory=memory, db=db)
-        return await assistant.reply(text)
 
 
 async def _send_reply(session_webhook: str, text: str) -> None:
@@ -213,6 +446,35 @@ async def _send_reply(session_webhook: str, text: str) -> None:
             logger.debug(f"DingTalk Stream → 回复已发送 ({len(text)} 字符) ✅")
     except Exception as exc:
         logger.error(f"DingTalk Stream: 发送回复异常 — {exc}")
+
+
+async def _send_markdown_reply(
+    session_webhook: str, title: str, markdown_text: str
+) -> None:
+    """通过 DingTalk 临时 sessionWebhook 发送 Markdown 回复（异步 HTTP）。"""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                session_webhook,
+                json={
+                    "msgtype": "markdown",
+                    "markdown": {
+                        "title": title,
+                        "text": markdown_text,
+                    },
+                    "at": {"isAtAll": False},
+                },
+            )
+        if resp.status_code != 200:
+            logger.warning(f"DingTalk Stream: Markdown 回复失败 HTTP {resp.status_code}")
+        else:
+            logger.debug(
+                f"DingTalk Stream → Markdown 回复已发送 ({len(markdown_text)} 字符) ✅"
+            )
+    except Exception as exc:
+        logger.error(f"DingTalk Stream: 发送 Markdown 回复异常 — {exc}")
 
 
 # ── 单例（供 main.py lifespan 调用）──────────────────────

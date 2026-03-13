@@ -6,7 +6,7 @@ import {
   Loader2, MessagesSquare, ChevronDown, ChevronRight, ExternalLink,
 } from "lucide-react";
 import clsx from "clsx";
-import { useSessions } from "../hooks/useSessions";
+import { useAllSessions } from "../hooks/useSessions";
 import { deleteSession, type SessionSummary } from "../api";
 
 function relativeTime(iso: string): string {
@@ -42,6 +42,7 @@ function SessionRow({
   deleting: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const isDingtalk = session.channel === "dingtalk";
 
   return (
     <div className={clsx(
@@ -65,7 +66,14 @@ function SessionRow({
 
         {/* Title + time */}
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-gray-800 truncate">{session.title}</p>
+          <p className="text-sm font-medium text-gray-800 truncate">
+            {session.title}
+            {isDingtalk && (
+              <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-600">
+                钉钉
+              </span>
+            )}
+          </p>
           <p className="text-xs text-gray-400 mt-0.5">{relativeTime(session.updated_at)}</p>
         </div>
 
@@ -90,6 +98,7 @@ function SessionRow({
           >
             <ExternalLink size={14} />
           </button>
+          {!isDingtalk && (
           <button
             onClick={onDelete}
             disabled={deleting}
@@ -98,6 +107,7 @@ function SessionRow({
           >
             <Trash2 size={14} />
           </button>
+          )}
         </div>
       </div>
 
@@ -135,7 +145,7 @@ function SessionRow({
 export default function SessionsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { data: sessions = [], isLoading } = useSessions();
+  const { data: sessions = [], isLoading } = useAllSessions();
   const [search, setSearch] = useState("");
   const [deletingId, setDeletingId] = useState<string | null>(null);
 

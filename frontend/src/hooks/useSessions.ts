@@ -9,6 +9,14 @@ export function useSessions(channel = "web") {
   });
 }
 
+export function useAllSessions() {
+  const web = useSessions("web");
+  const dingtalk = useSessions("dingtalk");
+  const all = [...(web.data ?? []), ...(dingtalk.data ?? [])]
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+  return { data: all, isLoading: web.isLoading || dingtalk.isLoading };
+}
+
 export function useCreateSession() {
   const qc = useQueryClient();
   return useMutation({

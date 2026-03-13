@@ -19,7 +19,7 @@ from agentpal.workspace.context_builder import ContextBuilder
 from agentpal.workspace.manager import WorkspaceManager
 from agentpal.workspace.memory_writer import MemoryWriter
 
-MAX_TOOL_ROUNDS = 8  # 最大工具调用轮次，防止死循环
+MAX_TOOL_ROUNDS = 32  # 最大工具调用轮次，防止死循环
 
 
 class PersonalAssistant(BaseAgent):
@@ -542,7 +542,10 @@ def _get_tool_names(toolkit: Any) -> list[str]:
     if toolkit is None:
         return []
     try:
-        return [t.get("name", "") for t in (getattr(toolkit, "_tools", []) or [])]
+        tools = getattr(toolkit, "tools", None)
+        if isinstance(tools, dict):
+            return list(tools.keys())
+        return []
     except Exception:
         return []
 
