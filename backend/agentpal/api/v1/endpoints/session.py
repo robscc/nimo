@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agentpal.config import get_settings
 from agentpal.database import get_db
 from agentpal.memory.factory import MemoryFactory
+from agentpal.models.llm_usage import LLMCallLog
 from agentpal.models.memory import MemoryRecord
 from agentpal.models.session import SessionRecord, SessionStatus
 
@@ -286,3 +287,58 @@ async def clear_session_memory(session_id: str, db: AsyncSession = Depends(get_d
     memory = MemoryFactory.create(settings.memory_backend, db=db)
     await memory.clear(session_id)
     return {"status": "cleared", "session_id": session_id}
+
+
+class LLMCallItem(BaseModel):
+    id: int
+    model_name: str
+    provider: str
+    call_round: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    created_at: str
+
+
+class SessionUsageResponse(BaseModel):
+    session_id: str
+    total_input_tokens: int
+    total_output_tokens: int
+    total_tokens: int
+    llm_calls: int
+    calls: list[LLMCallItem]
+
+
+@router.get("/{session_id}/usage", response_model=SessionUsageResponse)
+async def get_session_usage(session_id: str, db: AsyncSession = Depends(get_db)):
+    """获取指定 session 的 LLM token 用量明细。"""
+    result = await db.execute(
+        select(LLMCallLog)
+        .where(LLMCallLog.session_id == session_id)
+        .order_by(LLMCallLog.created_at.asc())
+    )
+    logs = result.scalars().all()
+
+    total_input = sum(r.input_tokens for r in logs)
+    total_output = sum(r.output_tokens for r in logs)
+
+    return SessionUsageResponse(
+        session_id=session_id,
+        total_input_tokens=total_input,
+        total_output_tokens=total_output,
+        total_tokens=total_input + total_output,
+        llm_calls=len(logs),
+        calls=[
+            LLMCallItem(
+                id=r.id,
+                model_name=r.model_name,
+                provider=r.provider,
+                call_round=r.call_round,
+                input_tokens=r.input_tokens,
+                output_tokens=r.output_tokens,
+                total_tokens=r.total_tokens,
+                created_at=r.created_at.isoformat(),
+            )
+            for r in logs
+        ],
+    )

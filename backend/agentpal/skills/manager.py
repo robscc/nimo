@@ -379,7 +379,7 @@ class SkillManager:
             logger.warning(f"Skill [{name}] 安装目录不存在: {install_path}")
             return []
 
-        meta = SkillLoader.load_skill_meta(install_path)
+        meta = SkillLoader.auto_load_meta(install_path)
         return SkillLoader.load_tool_functions(install_path, meta)
 
     async def get_all_skill_tools(self) -> list[dict[str, Any]]:
@@ -395,7 +395,7 @@ class SkillManager:
             if not install_path.exists():
                 continue
             try:
-                meta = SkillLoader.load_skill_meta(install_path)
+                meta = SkillLoader.auto_load_meta(install_path)
                 tools = SkillLoader.load_tool_functions(install_path, meta)
                 all_tools.extend(tools)
             except Exception as exc:
