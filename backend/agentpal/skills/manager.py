@@ -26,7 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.config import get_settings
 from agentpal.models.skill import SkillRecord
+from agentpal.services.skill_event_bus import skill_event_bus
 from agentpal.skills.loader import SkillLoader
+from agentpal.skills.versions import SkillVersionManager
 
 
 class SkillManager:
@@ -36,6 +38,7 @@ class SkillManager:
         self._db = db
         self._skills_dir = Path(get_settings().skills_dir).resolve()
         self._skills_dir.mkdir(parents=True, exist_ok=True)
+        self._version_mgr = SkillVersionManager(self._skills_dir)
 
     # ── 安装 ──────────────────────────────────────────────
 
@@ -88,6 +91,10 @@ class SkillManager:
             # 目标安装目录
             install_dir = self._skills_dir / skill_name
             if install_dir.exists():
+                # 安装前备份旧版本（热重载支持）
+                old_meta = SkillLoader.auto_load_meta(install_dir)
+                old_version = old_meta.get("version", "0.0.0")
+                self._version_mgr.backup_version(skill_name, install_dir, old_version)
                 # 已安装：先卸载旧版本
                 shutil.rmtree(install_dir)
                 logger.info(f"已移除旧版 Skill: {skill_name}")
@@ -120,6 +127,15 @@ class SkillManager:
         }
         if is_prompt_skill:
             result["skill_type"] = "prompt"
+
+        # 广播热重载事件
+        await skill_event_bus.broadcast({
+            "type": "skill_reloaded",
+            "name": skill_name,
+            "version": meta.get("version", "0.0.0"),
+            "action": "install",
+        })
+
         return result
 
     async def install_from_url(self, url: str) -> dict[str, Any]:
@@ -242,6 +258,9 @@ class SkillManager:
             actual_name = meta.get("name", skill_name)
             install_dir = self._skills_dir / actual_name
             if install_dir.exists():
+                # 安装前备份旧版本
+                old_meta = SkillLoader.auto_load_meta(install_dir)
+                self._version_mgr.backup_version(actual_name, install_dir, old_meta.get("version", "0.0.0"))
                 shutil.rmtree(install_dir)
             shutil.copytree(str(skill_root), str(install_dir))
             logger.info(f"Skill [{actual_name}] 从 skills.sh 安装到 {install_dir}")
@@ -272,6 +291,15 @@ class SkillManager:
         }
         if is_prompt_skill:
             result["skill_type"] = "prompt"
+
+        # 广播热重载事件
+        await skill_event_bus.broadcast({
+            "type": "skill_reloaded",
+            "name": actual_name,
+            "version": meta.get("version", "0.0.0"),
+            "action": "install",
+        })
+
         return result
 
     # ── 卸载 ──────────────────────────────────────────────
@@ -294,6 +322,9 @@ class SkillManager:
         if install_path.exists():
             shutil.rmtree(install_path)
             logger.info(f"已删除 Skill 文件: {install_path}")
+
+        # 清理历史版本快照
+        self._version_mgr.delete_all_versions(name)
 
         # 删除数据库记录
         await self._db.delete(record)
@@ -319,6 +350,72 @@ class SkillManager:
         await self._db.flush()
         logger.info(f"Skill [{name}] {'启用' if enabled else '禁用'}")
         return True
+
+    # ── 版本历史 ──────────────────────────────────────────
+
+    async def list_versions(self, name: str) -> list[dict[str, Any]]:
+        """列出指定技能的历史版本（0=最近）。
+
+        Returns:
+            [{"index": 0, "version": "1.0.0", "backed_up_at": "..."}, ...]
+            如果技能不存在，返回 []
+        """
+        record = await self._db.get(SkillRecord, name)
+        if record is None:
+            return []
+        return self._version_mgr.list_versions(name)
+
+    async def rollback(self, name: str, index: int) -> dict[str, Any] | None:
+        """回滚技能到指定历史版本。
+
+        Args:
+            name:   技能名称
+            index:  版本索引（0=最近备份，1=次新，…）
+
+        Returns:
+            {"name": ..., "version": ..., "tools": [...]} 或 None（版本不存在）
+
+        Raises:
+            ValueError: 技能记录不存在
+        """
+        record = await self._db.get(SkillRecord, name)
+        if record is None:
+            raise ValueError(f"技能 {name!r} 不存在")
+
+        install_dir = Path(record.install_path)
+
+        # 恢复历史版本文件
+        version_meta = self._version_mgr.restore_version(name, index, install_dir)
+        if version_meta is None:
+            return None
+
+        # 重新加载模块元数据
+        SkillLoader.unload_skill(name)
+        meta = SkillLoader.auto_load_meta(install_dir)
+        tool_funcs = SkillLoader.load_tool_functions(install_dir, meta)
+
+        # 更新数据库记录
+        record.version = meta.get("version", "0.0.0")
+        record.description = meta.get("description", record.description)
+        record.meta = meta
+        await self._db.flush()
+
+        # 广播热重载事件
+        await skill_event_bus.broadcast({
+            "type": "skill_reloaded",
+            "name": name,
+            "version": meta.get("version", "0.0.0"),
+            "action": "rollback",
+        })
+
+        logger.info(f"Skill [{name}] 已回滚到版本 {meta.get('version', '?')}")
+        return {
+            "name": name,
+            "version": meta.get("version", "0.0.0"),
+            "description": meta.get("description", ""),
+            "tools": [t["name"] for t in tool_funcs],
+            "install_path": str(install_dir),
+        }
 
     # ── 查询 ──────────────────────────────────────────────
 

@@ -1,8 +1,8 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Puzzle, Upload, Link as LinkIcon, Trash2,
   CheckCircle2, XCircle, Loader2, ChevronDown, ChevronRight,
-  Package, AlertTriangle, ExternalLink,
+  Package, AlertTriangle, ExternalLink, History, RotateCcw, RefreshCw,
 } from "lucide-react";
 import clsx from "clsx";
 import {
@@ -11,11 +11,55 @@ import {
   useInstallSkillFromZip,
   useInstallSkillFromUrl,
   useUninstallSkill,
+  useSkillVersions,
+  useRollbackSkill,
+  useSkillEvents,
   type SkillInfo,
+  type SkillReloadedEvent,
 } from "../hooks/useSkills";
 
+// ── Hot-reload Toast ───────────────────────────────────────
+function ReloadToast({
+  event,
+  onClose,
+}: {
+  event: SkillReloadedEvent;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 4000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+
+  const actionLabel: Record<SkillReloadedEvent["action"], string> = {
+    install:   "已安装",
+    rollback:  "已回滚",
+    uninstall: "已卸载",
+  };
+
+  return (
+    <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 bg-gray-800 text-white text-sm px-4 py-3 rounded-xl shadow-xl">
+      <RefreshCw size={14} className="text-nimo-300 shrink-0" />
+      <span>
+        <span className="font-medium">{event.name}</span>
+        {" "}v{event.version} {actionLabel[event.action]}，Agent 已热重载
+      </span>
+      <button
+        onClick={onClose}
+        className="ml-2 text-gray-400 hover:text-white transition-colors leading-none"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 // ── Toggle Switch ─────────────────────────────────────────
-function Toggle({ enabled, onChange, disabled }: {
+function Toggle({
+  enabled,
+  onChange,
+  disabled,
+}: {
   enabled: boolean;
   onChange: (v: boolean) => void;
   disabled?: boolean;
@@ -43,17 +87,92 @@ function Toggle({ enabled, onChange, disabled }: {
 // ── Source Badge ───────────────────────────────────────────
 function SourceBadge({ source }: { source: string }) {
   const colors: Record<string, string> = {
-    local: "bg-gray-100 text-gray-600",
-    upload: "bg-blue-100 text-blue-600",
-    url: "bg-green-100 text-green-600",
-    clawhub: "bg-purple-100 text-purple-600",
+    local:       "bg-gray-100 text-gray-600",
+    upload:      "bg-blue-100 text-blue-600",
+    url:         "bg-green-100 text-green-600",
+    clawhub:     "bg-purple-100 text-purple-600",
     "skills.sh": "bg-amber-100 text-amber-600",
   };
 
   return (
-    <span className={clsx("text-xs px-1.5 py-0.5 rounded font-medium", colors[source] || "bg-gray-100 text-gray-600")}>
+    <span
+      className={clsx(
+        "text-xs px-1.5 py-0.5 rounded font-medium",
+        colors[source] ?? "bg-gray-100 text-gray-600"
+      )}
+    >
       {source}
     </span>
+  );
+}
+
+// ── Version History ────────────────────────────────────────
+function VersionHistory({
+  skillName,
+  onRollbackDone,
+}: {
+  skillName: string;
+  onRollbackDone: () => void;
+}) {
+  const { data: versions = [], isLoading } = useSkillVersions(skillName);
+  const rollback = useRollbackSkill();
+
+  const handleRollback = async (
+    e: React.MouseEvent,
+    index: number,
+    version: string
+  ) => {
+    e.stopPropagation();
+    if (!confirm(`确定回滚到版本 v${version}？当前版本会被备份。`)) return;
+    try {
+      await rollback.mutateAsync({ name: skillName, index });
+      onRollbackDone();
+    } catch (err) {
+      alert(`回滚失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-gray-400 py-2">
+        <Loader2 size={12} className="animate-spin" />
+        加载版本历史…
+      </div>
+    );
+  }
+
+  if (versions.length === 0) {
+    return <p className="text-xs text-gray-400 py-1.5">暂无历史备份版本</p>;
+  }
+
+  return (
+    <div className="space-y-1">
+      {versions.map((v) => (
+        <div
+          key={v.index}
+          className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-gray-50 hover:bg-gray-100 transition-colors"
+        >
+          <div className="flex items-center gap-2 text-xs">
+            <span className="font-mono text-gray-700">v{v.version}</span>
+            {v.backed_up_at && (
+              <span className="text-gray-400">
+                {new Date(v.backed_up_at).toLocaleDateString("zh-CN")}
+              </span>
+            )}
+          </div>
+          <button
+            onClick={(e) => handleRollback(e, v.index, v.version)}
+            disabled={rollback.isPending}
+            className="flex items-center gap-1 text-xs text-nimo-500 hover:text-nimo-700 hover:bg-nimo-50 px-2 py-1 rounded transition-colors disabled:opacity-50"
+          >
+            {rollback.isPending
+              ? <Loader2 size={10} className="animate-spin" />
+              : <RotateCcw size={10} />}
+            回滚
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -72,31 +191,43 @@ function SkillCard({
   deletePending: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [showVersions, setShowVersions] = useState(false);
 
   return (
-    <div className={clsx(
-      "rounded-xl border transition-all",
-      skill.enabled ? "bg-white border-gray-200" : "bg-gray-50 border-gray-100",
-    )}>
+    <div
+      className={clsx(
+        "rounded-xl border transition-all",
+        skill.enabled
+          ? "bg-white border-gray-200"
+          : "bg-gray-50 border-gray-100"
+      )}
+    >
+      {/* Header row */}
       <div
         className="flex items-start gap-3 p-4 cursor-pointer hover:bg-black/[0.02] transition-colors"
         onClick={() => setOpen((o) => !o)}
       >
         {/* Icon */}
-        <div className={clsx(
-          "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
-          skill.enabled ? "bg-nimo-100 text-nimo-500" : "bg-gray-100 text-gray-400"
-        )}>
+        <div
+          className={clsx(
+            "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
+            skill.enabled
+              ? "bg-nimo-100 text-nimo-500"
+              : "bg-gray-100 text-gray-400"
+          )}
+        >
           <Puzzle size={20} />
         </div>
 
         {/* Info */}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className={clsx(
-              "text-sm font-semibold",
-              skill.enabled ? "text-gray-800" : "text-gray-400"
-            )}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span
+              className={clsx(
+                "text-sm font-semibold",
+                skill.enabled ? "text-gray-800" : "text-gray-400"
+              )}
+            >
               {skill.name}
             </span>
             <span className="text-xs text-gray-400">v{skill.version}</span>
@@ -107,11 +238,16 @@ function SkillCard({
               </span>
             )}
           </div>
-          <p className="text-xs text-gray-400 mt-0.5">{skill.description || "暂无描述"}</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            {skill.description || "暂无描述"}
+          </p>
           {skill.tools.length > 0 && (
             <div className="flex flex-wrap gap-1 mt-1.5">
               {skill.tools.map((t) => (
-                <span key={t} className="text-xs bg-nimo-50 text-nimo-500 px-1.5 py-0.5 rounded font-mono">
+                <span
+                  key={t}
+                  className="text-xs bg-nimo-50 text-nimo-500 px-1.5 py-0.5 rounded font-mono"
+                >
                   {t}
                 </span>
               ))}
@@ -124,7 +260,7 @@ function SkillCard({
           )}
         </div>
 
-        {/* Actions */}
+        {/* Right actions */}
         <div className="flex items-center gap-2 shrink-0">
           <Toggle
             enabled={skill.enabled}
@@ -137,9 +273,10 @@ function SkillCard({
         </div>
       </div>
 
-      {/* Expanded details */}
+      {/* Expanded section */}
       {open && (
-        <div className="px-4 pb-4 border-t border-gray-100 pt-3 space-y-2">
+        <div className="px-4 pb-4 border-t border-gray-100 pt-3 space-y-3">
+          {/* Meta grid */}
           <div className="grid grid-cols-2 gap-2 text-xs">
             {skill.author && (
               <div>
@@ -170,13 +307,42 @@ function SkillCard({
               </div>
             )}
           </div>
-          <div className="flex justify-end pt-2">
+
+          {/* Version history */}
+          <div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowVersions((o) => !o);
+              }}
+              className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 transition-colors"
+            >
+              <History size={12} />
+              版本历史
+              {showVersions
+                ? <ChevronDown size={11} />
+                : <ChevronRight size={11} />}
+            </button>
+            {showVersions && (
+              <div className="mt-2">
+                <VersionHistory
+                  skillName={skill.name}
+                  onRollbackDone={() => setShowVersions(false)}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Danger zone */}
+          <div className="flex justify-end pt-1 border-t border-gray-50">
             <button
               onClick={(e) => { e.stopPropagation(); onDelete(); }}
               disabled={deletePending}
               className="flex items-center gap-1.5 text-xs text-red-500 hover:text-red-700 hover:bg-red-50 px-3 py-1.5 rounded-lg transition-colors"
             >
-              {deletePending ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+              {deletePending
+                ? <Loader2 size={12} className="animate-spin" />
+                : <Trash2 size={12} />}
               卸载
             </button>
           </div>
@@ -188,16 +354,23 @@ function SkillCard({
 
 // ── Main Page ─────────────────────────────────────────────
 export default function SkillsPage() {
-  const { data: skills = [], isLoading, refetch } = useSkills();
-  const toggle = useToggleSkill();
-  const installZip = useInstallSkillFromZip();
-  const installUrl = useInstallSkillFromUrl();
-  const uninstall = useUninstallSkill();
+  const { data: skills = [], isLoading } = useSkills();
+  const toggle       = useToggleSkill();
+  const installZip   = useInstallSkillFromZip();
+  const installUrl   = useInstallSkillFromUrl();
+  const uninstall    = useUninstallSkill();
 
-  const [urlInput, setUrlInput] = useState("");
+  const [urlInput,    setUrlInput]    = useState("");
   const [showUrlForm, setShowUrlForm] = useState(false);
-  const [installMsg, setInstallMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [installMsg,  setInstallMsg]  = useState<{ ok: boolean; text: string } | null>(null);
+  const [reloadToast, setReloadToast] = useState<SkillReloadedEvent | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // 订阅热重载 SSE 事件，弹出 Toast
+  const handleReload = useCallback((event: SkillReloadedEvent) => {
+    setReloadToast(event);
+  }, []);
+  useSkillEvents(handleReload);
 
   const enabledCount = skills.filter((s) => s.enabled).length;
 
@@ -207,11 +380,16 @@ export default function SkillsPage() {
     setInstallMsg(null);
     try {
       const result = await installZip.mutateAsync(file);
-      setInstallMsg({ ok: true, text: `已安装 ${result.name} v${result.version}（${result.tools.length} 个工具）` });
+      setInstallMsg({
+        ok: true,
+        text: `已安装 ${result.name} v${result.version}（${result.tools.length} 个工具）`,
+      });
     } catch (err) {
-      setInstallMsg({ ok: false, text: `安装失败: ${err instanceof Error ? err.message : String(err)}` });
+      setInstallMsg({
+        ok: false,
+        text: `安装失败: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
-    // Reset file input
     if (fileRef.current) fileRef.current.value = "";
   };
 
@@ -220,18 +398,27 @@ export default function SkillsPage() {
     setInstallMsg(null);
     try {
       const result = await installUrl.mutateAsync(urlInput.trim());
-      const typeLabel = result.skill_type === "prompt" ? "prompt 型技能" : `${result.tools.length} 个工具`;
-      setInstallMsg({ ok: true, text: `已安装 ${result.name} v${result.version}（${typeLabel}）` });
+      const typeLabel =
+        result.skill_type === "prompt"
+          ? "prompt 型技能"
+          : `${result.tools.length} 个工具`;
+      setInstallMsg({
+        ok: true,
+        text: `已安装 ${result.name} v${result.version}（${typeLabel}）`,
+      });
       setUrlInput("");
       setShowUrlForm(false);
     } catch (err) {
-      setInstallMsg({ ok: false, text: `安装失败: ${err instanceof Error ? err.message : String(err)}` });
+      setInstallMsg({
+        ok: false,
+        text: `安装失败: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
   };
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Header */}
+      {/* ── Header ── */}
       <div className="px-6 py-4 bg-white border-b">
         <div className="flex items-center justify-between">
           <div>
@@ -283,7 +470,9 @@ export default function SkillsPage() {
               disabled={installUrl.isPending || !urlInput.trim()}
               className="px-4 py-2 text-sm rounded-lg bg-nimo-500 text-white hover:bg-nimo-600 disabled:opacity-40 transition-colors flex items-center gap-1.5"
             >
-              {installUrl.isPending ? <Loader2 size={14} className="animate-spin" /> : null}
+              {installUrl.isPending && (
+                <Loader2 size={14} className="animate-spin" />
+              )}
               安装
             </button>
           </div>
@@ -291,11 +480,17 @@ export default function SkillsPage() {
 
         {/* Install message */}
         {installMsg && (
-          <div className={clsx(
-            "mt-2 flex items-center gap-2 text-xs px-3 py-2 rounded-lg",
-            installMsg.ok ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"
-          )}>
-            {installMsg.ok ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+          <div
+            className={clsx(
+              "mt-2 flex items-center gap-2 text-xs px-3 py-2 rounded-lg",
+              installMsg.ok
+                ? "bg-green-50 text-green-700"
+                : "bg-red-50 text-red-700"
+            )}
+          >
+            {installMsg.ok
+              ? <CheckCircle2 size={14} />
+              : <XCircle size={14} />}
             {installMsg.text}
             <button
               onClick={() => setInstallMsg(null)}
@@ -307,7 +502,7 @@ export default function SkillsPage() {
         )}
       </div>
 
-      {/* Skill list */}
+      {/* ── Skill list ── */}
       <div className="flex-1 overflow-y-auto px-6 py-4">
         {isLoading ? (
           <div className="flex items-center justify-center py-24">
@@ -329,9 +524,15 @@ export default function SkillsPage() {
               <SkillCard
                 key={skill.name}
                 skill={skill}
-                onToggle={(enabled) => toggle.mutate({ name: skill.name, enabled })}
+                onToggle={(enabled) =>
+                  toggle.mutate({ name: skill.name, enabled })
+                }
                 onDelete={() => {
-                  if (confirm(`确定卸载技能 "${skill.name}" 吗？此操作不可撤销。`)) {
+                  if (
+                    confirm(
+                      `确定卸载技能 "${skill.name}" 吗？此操作不可撤销。`
+                    )
+                  ) {
                     uninstall.mutate(skill.name);
                   }
                 }}
@@ -343,13 +544,21 @@ export default function SkillsPage() {
         )}
       </div>
 
-      {/* Footer */}
+      {/* ── Footer ── */}
       <div className="px-6 py-3 bg-white border-t">
         <p className="text-xs text-gray-400 flex items-center gap-1.5">
           <AlertTriangle size={12} />
           技能包中的代码会在服务端执行，请仅安装信任来源的技能
         </p>
       </div>
+
+      {/* ── Hot-reload Toast ── */}
+      {reloadToast && (
+        <ReloadToast
+          event={reloadToast}
+          onClose={() => setReloadToast(null)}
+        />
+      )}
     </div>
   );
 }
