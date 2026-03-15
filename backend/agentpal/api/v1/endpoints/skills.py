@@ -1,17 +1,20 @@
-"""Skills 管理 API — 安装、卸载、启用、禁用、列表。"""
+"""Skills 管理 API — 安装、卸载、启用、禁用、热重载、版本管理。"""
 
 from __future__ import annotations
 
-import shutil
+import asyncio
+import json
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.database import get_db
+from agentpal.services.skill_event_bus import skill_event_bus
 from agentpal.skills.manager import SkillManager
 
 router = APIRouter()
@@ -50,6 +53,16 @@ class InstallResult(BaseModel):
     skill_type: str | None = None
 
 
+class RollbackRequest(BaseModel):
+    index: int
+
+
+class VersionInfo(BaseModel):
+    index: int
+    version: str
+    backed_up_at: str | None = None
+
+
 # ── 路由 ─────────────────────────────────────────────────
 
 @router.get("", response_model=list[SkillInfo])
@@ -58,6 +71,76 @@ async def list_skills(db: AsyncSession = Depends(get_db)):
     mgr = SkillManager(db)
     skills = await mgr.list_skills()
     return [SkillInfo(**s) for s in skills]
+
+
+@router.get("/events")
+async def skill_events():
+    """SSE 端点 — 订阅技能热重载事件。
+
+    事件格式：
+        data: {"type": "skill_reloaded", "name": "...", "version": "...", "action": "install"|"rollback"}
+        data: {"type": "ping"}   (每 25 秒心跳，维持连接)
+    """
+    async def event_stream():
+        queue = skill_event_bus.subscribe()
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    # 心跳包，防止代理/浏览器断开连接
+                    yield 'data: {"type":"ping"}\n\n'
+        except asyncio.CancelledError:
+            pass
+        finally:
+            skill_event_bus.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@router.get("/{name}/versions", response_model=list[VersionInfo])
+async def get_skill_versions(name: str, db: AsyncSession = Depends(get_db)):
+    """获取指定技能的历史版本列表（0=最近备份）。"""
+    mgr = SkillManager(db)
+    versions = await mgr.list_versions(name)
+    return [VersionInfo(**v) for v in versions]
+
+
+@router.post("/{name}/rollback", response_model=InstallResult)
+async def rollback_skill(
+    name: str,
+    req: RollbackRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """回滚技能到指定历史版本。
+
+    - `index=0`：恢复到上一个版本
+    - `index=1`：恢复到更早版本
+    """
+    mgr = SkillManager(db)
+    try:
+        result = await mgr.rollback(name, req.index)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"回滚失败: {exc}")
+
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"技能 {name!r} 没有索引为 {req.index} 的历史版本",
+        )
+    await db.commit()
+    return InstallResult(**result)
 
 
 @router.get("/{name}")
@@ -88,6 +171,7 @@ async def install_from_zip(
     try:
         mgr = SkillManager(db)
         result = await mgr.install_from_zip(tmp_path, source="upload")
+        await db.commit()
         return InstallResult(**result)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -106,6 +190,7 @@ async def install_from_url(
     try:
         mgr = SkillManager(db)
         result = await mgr.install_from_url(req.url)
+        await db.commit()
         return InstallResult(**result)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -124,6 +209,7 @@ async def toggle_skill(
     ok = await mgr.enable(name) if req.enabled else await mgr.disable(name)
     if not ok:
         raise HTTPException(status_code=404, detail=f"技能 {name!r} 不存在")
+    await db.commit()
     return {"name": name, "enabled": req.enabled}
 
 
@@ -134,4 +220,5 @@ async def uninstall_skill(name: str, db: AsyncSession = Depends(get_db)):
     ok = await mgr.uninstall(name)
     if not ok:
         raise HTTPException(status_code=404, detail=f"技能 {name!r} 不存在")
+    await db.commit()
     return {"message": f"技能 {name!r} 已卸载"}
