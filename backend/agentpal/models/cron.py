@@ -46,6 +46,8 @@ class CronJob(Base):
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     notify_main: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 指定接收通知的 session（null = 走 MessageBus 通知主 Agent）
+    target_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

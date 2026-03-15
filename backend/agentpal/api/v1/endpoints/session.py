@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +20,7 @@ from agentpal.memory.factory import MemoryFactory
 from agentpal.models.llm_usage import LLMCallLog
 from agentpal.models.memory import MemoryRecord
 from agentpal.models.session import SessionRecord, SessionStatus
+from agentpal.services.session_event_bus import session_event_bus
 
 router = APIRouter()
 
@@ -287,6 +291,41 @@ async def clear_session_memory(session_id: str, db: AsyncSession = Depends(get_d
     memory = MemoryFactory.create(settings.memory_backend, db=db)
     await memory.clear(session_id)
     return {"status": "cleared", "session_id": session_id}
+
+
+@router.get("/{session_id}/events")
+async def session_events(session_id: str):
+    """SSE 端点：订阅指定 session 的实时消息推送。
+
+    当定时任务完成并将结果写入该 session 时，此端点会向客户端推送 new_message 事件。
+    客户端断开时自动取消订阅。
+    """
+    queue = session_event_bus.subscribe(session_id)
+
+    async def event_generator():
+        try:
+            # 发送初始连接确认
+            yield f"data: {json.dumps({'type': 'connected', 'session_id': session_id})}\n\n"
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    # 发送心跳保持连接
+                    yield ": heartbeat\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            session_event_bus.unsubscribe(session_id, queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 class LLMCallItem(BaseModel):

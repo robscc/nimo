@@ -48,6 +48,26 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
+async def run_migrations() -> None:
+    """轻量级列迁移 — 为已存在的表补充新列（SQLite 不支持 IF NOT EXISTS on ALTER COLUMN）。
+
+    每次启动时幂等执行，列已存在时静默跳过。
+    """
+    migrations = [
+        # cron_jobs: target_session_id (added in v0.2)
+        ("cron_jobs", "target_session_id", "ALTER TABLE cron_jobs ADD COLUMN target_session_id VARCHAR(128)"),
+    ]
+    async with engine.begin() as conn:
+        for table, column, sql in migrations:
+            # 查询列是否已存在
+            result = await conn.execute(
+                __import__("sqlalchemy").text(f"PRAGMA table_info({table})")
+            )
+            existing_cols = {row[1] for row in result.fetchall()}
+            if column not in existing_cols:
+                await conn.execute(__import__("sqlalchemy").text(sql))
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI Depends 注入用。"""
     async with AsyncSessionLocal() as session:

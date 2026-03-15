@@ -12,7 +12,7 @@ from loguru import logger
 
 from agentpal.api.v1.router import router as v1_router
 from agentpal.config import get_settings
-from agentpal.database import init_db
+from agentpal.database import init_db, run_migrations
 
 
 @asynccontextmanager
@@ -21,6 +21,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     logger.info(f"AgentPal 启动中 (env={settings.app_env})")
     await init_db()
+    await run_migrations()
     logger.info("数据库初始化完成 ✅")
 
     # 初始化 ~/.nimo/config.yaml（幂等）
