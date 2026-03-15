@@ -13,6 +13,20 @@ from typing import Any
 
 from loguru import logger
 from sqlalchemy import select, update
+
+
+def _ts(dt: datetime | None) -> str | None:
+    """将 datetime 转为带 UTC 时区标记的 ISO 8601 字符串。
+
+    SQLite + SQLAlchemy 有时会返回 naive datetime（tzinfo=None），
+    直接 isoformat() 后缺少 +00:00 后缀，导致 JS 将其解析为本地时间（偏移 8 小时）。
+    此函数确保始终输出带 +00:00 的 UTC 字符串。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.models.cron import CronJob, CronJobExecution, CronStatus
@@ -225,10 +239,10 @@ class CronManager:
             "enabled": job.enabled,
             "notify_main": job.notify_main,
             "target_session_id": job.target_session_id,
-            "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
-            "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
-            "created_at": job.created_at.isoformat() if job.created_at else None,
-            "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+            "last_run_at": _ts(job.last_run_at),
+            "next_run_at": _ts(job.next_run_at),
+            "created_at": _ts(job.created_at),
+            "updated_at": _ts(job.updated_at),
         }
 
     @staticmethod
@@ -239,8 +253,8 @@ class CronManager:
             "cron_job_name": rec.cron_job_name,
             "status": rec.status,
             "agent_name": rec.agent_name,
-            "started_at": rec.started_at.isoformat() if rec.started_at else None,
-            "finished_at": rec.finished_at.isoformat() if rec.finished_at else None,
+            "started_at": _ts(rec.started_at),
+            "finished_at": _ts(rec.finished_at),
             "result": rec.result[:500] + "..." if rec.result and len(rec.result) > 500 else rec.result,
             "error": rec.error,
         }
@@ -449,7 +463,7 @@ class CronScheduler:
                         "id": record.id,
                         "role": "assistant",
                         "content": content,
-                        "created_at": record.created_at.isoformat() if record.created_at else None,
+                        "created_at": _ts(record.created_at),
                     },
                 },
             )

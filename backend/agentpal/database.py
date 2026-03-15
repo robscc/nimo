@@ -77,3 +77,20 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
+
+
+def utc_isoformat(dt: "datetime | None") -> "str | None":
+    """将 datetime 序列化为带 UTC 标记的 ISO 8601 字符串。
+
+    SQLite + SQLAlchemy 返回的 datetime 通常是 naive（tzinfo=None），
+    直接 .isoformat() 缺少 +00:00 后缀，导致 JavaScript 将其当作本地时间解析，
+    在 UTC+8 环境下出现 8 小时偏差。
+
+    此函数统一为 naive datetime 加上 UTC tzinfo 再序列化。
+    """
+    if dt is None:
+        return None
+    from datetime import timezone as _tz
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_tz.utc)
+    return dt.isoformat()
