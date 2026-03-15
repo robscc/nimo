@@ -3,6 +3,7 @@ import ChatPage from "./pages/ChatPage";
 import TasksPage from "./pages/TasksPage";
 import ToolsPage from "./pages/ToolsPage";
 import SkillsPage from "./pages/SkillsPage";
+import CronPage from "./pages/CronPage";
 import WorkspacePage from "./pages/WorkspacePage";
 import SessionsPage from "./pages/SessionsPage";
 import DashboardPage from "./pages/DashboardPage";
@@ -17,6 +18,7 @@ export default function App() {
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/tools" element={<ToolsPage />} />
           <Route path="/skills" element={<SkillsPage />} />
+          <Route path="/cron" element={<CronPage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/workspace" element={<WorkspacePage />} />
