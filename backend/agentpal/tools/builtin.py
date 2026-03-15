@@ -533,6 +533,7 @@ def cron_cli(
     task_prompt: str = "",
     job_id: str = "",
     enabled: bool = True,
+    target_session_id: str = "",
 ) -> ToolResponse:
     """管理 AgentPal 内置定时任务的命令行工具（使用系统内部调度器，非系统 crontab）。
 
@@ -551,6 +552,10 @@ def cron_cli(
         task_prompt: 任务执行时发送给 Agent 的提示词（用于 create/update）
         job_id: 任务 ID（用于 update/delete/toggle/history）
         enabled: 是否启用（用于 toggle，默认 True）
+        target_session_id: 任务完成后将结果发送到的 session ID（可选）。
+            如果用户在某个对话中要求创建定时任务，应将当前 session_id（见 Runtime Environment）
+            作为此参数传入，这样任务结果会直接推送到当前对话界面。
+            留空则通过 MessageBus 通知主 Agent（不推送到具体对话）。
 
     Returns:
         操作结果文本
@@ -606,8 +611,13 @@ def cron_cli(
                         "schedule": schedule,
                         "task_prompt": task_prompt,
                         "enabled": enabled,
+                        "target_session_id": target_session_id or None,
                     })
                     await db.commit()
+                    session_hint = (
+                        f"\n  通知会话: {result.get('target_session_id')}"
+                        if result.get("target_session_id") else ""
+                    )
                     return (
                         f"✅ 定时任务创建成功！\n"
                         f"  名称: {result['name']}\n"
@@ -615,6 +625,7 @@ def cron_cli(
                         f"  计划: {result['schedule']}\n"
                         f"  下次执行: {result.get('next_run_at', '计算中...')}\n"
                         f"  提示词: {result['task_prompt'][:100]}"
+                        f"{session_hint}"
                     )
                 except ValueError as e:
                     return f"<error>{e}</error>"
@@ -629,8 +640,10 @@ def cron_cli(
                     update_data["schedule"] = schedule
                 if task_prompt:
                     update_data["task_prompt"] = task_prompt
+                if target_session_id:
+                    update_data["target_session_id"] = target_session_id
                 if not update_data:
-                    return "<error>update 操作至少需要提供一个要更新的字段（name/schedule/task_prompt）</error>"
+                    return "<error>update 操作至少需要提供一个要更新的字段（name/schedule/task_prompt/target_session_id）</error>"
 
                 try:
                     result = await mgr.update_job(job_id, update_data)

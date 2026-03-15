@@ -45,13 +45,15 @@ class ContextBuilder:
         ws: WorkspaceFiles,
         enabled_tools: list[str] | None = None,
         skill_prompts: list[dict[str, Any]] | None = None,
+        runtime_context: dict[str, Any] | None = None,
     ) -> str:
         """构建完整 system prompt。
 
         Args:
-            ws:            工作空间文件内容
-            enabled_tools: 当前已启用工具名称列表（可选，用于提示）
-            skill_prompts: prompt 型技能列表（可选），每项包含 name, content
+            ws:              工作空间文件内容
+            enabled_tools:   当前已启用工具名称列表（可选，用于提示）
+            skill_prompts:   prompt 型技能列表（可选），每项包含 name, content
+            runtime_context: 运行时环境信息（session_id、OS、时区等）
 
         Returns:
             拼接好的 system prompt 字符串
@@ -99,11 +101,30 @@ class ContextBuilder:
                 log = "...(较早的日志已省略)...\n\n" + log[-self.MAX_DAILY_LOG_CHARS :]
             sections.append(f"# Today's Activity Log\n\n{log}")
 
-        # 8. 当前时间
-        sections.append(
-            f"# Current Time\n\n{now.strftime('%Y-%m-%d %H:%M:%S %Z')} "
-            f"({now.strftime('%A')})"
-        )
+        # 8. 运行时环境（时间、时区、OS、session_id 等）
+        tz_name = now.strftime("%Z")
+        tz_offset = now.strftime("%z")  # e.g. +0800
+        env_lines = [
+            f"- Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} {tz_name} (UTC{tz_offset[:3]}:{tz_offset[3:]})",
+            f"- Day of week: {now.strftime('%A')}",
+            f"- Timezone: {tz_name} (UTC{tz_offset[:3]}:{tz_offset[3:]})",
+        ]
+        if runtime_context:
+            if runtime_context.get("session_id"):
+                env_lines.append(f"- Current session_id: `{runtime_context['session_id']}`")
+                env_lines.append(
+                    "  *(When creating a cron job that should notify the current conversation, "
+                    "use this session_id as target_session_id)*"
+                )
+            if runtime_context.get("os"):
+                env_lines.append(f"- Operating system: {runtime_context['os']}")
+            if runtime_context.get("python_version"):
+                env_lines.append(f"- Python version: {runtime_context['python_version']}")
+            # 追加任意额外字段
+            for key, val in runtime_context.items():
+                if key not in ("session_id", "os", "python_version") and val:
+                    env_lines.append(f"- {key}: {val}")
+        sections.append("# Runtime Environment\n\n" + "\n".join(env_lines))
 
         # 9. 可用工具（简要提示）
         if enabled_tools:
@@ -124,3 +145,4 @@ class ContextBuilder:
             )
 
         return "\n\n---\n\n".join(sections)
+
