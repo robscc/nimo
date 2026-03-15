@@ -60,6 +60,7 @@ class SessionRecord(Base):
     enabled_tools: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     enabled_skills: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     context_tokens: Mapped[int | None] = mapped_column(nullable=True)
+    tool_guard_threshold: Mapped[int | None] = mapped_column(nullable=True)
 
     __table_args__ = (
         Index("ix_session_channel_user", "channel", "user_id"),

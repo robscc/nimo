@@ -158,3 +158,21 @@ async def get_task_status(task_id: str, db: AsyncSession = Depends(get_db)):
         agent_name=task.agent_name,
         task_type=task.task_type,
     )
+
+
+# ── Tool Guard ────────────────────────────────────────────
+
+
+class ToolGuardResolveRequest(BaseModel):
+    approved: bool
+
+
+@router.post("/tool-guard/{request_id}/resolve")
+async def resolve_tool_guard(request_id: str, req: ToolGuardResolveRequest):
+    """用户确认或拒绝工具调用安全请求。"""
+    from agentpal.tools.tool_guard import ToolGuardManager
+
+    guard = ToolGuardManager.get_instance()
+    if not guard.resolve(request_id, req.approved):
+        raise HTTPException(status_code=404, detail="Guard request not found or expired")
+    return {"status": "ok", "request_id": request_id, "approved": req.approved}

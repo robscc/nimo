@@ -53,6 +53,7 @@ class SessionMeta(BaseModel):
     context_tokens: int | None
     enabled_tools: list[str] | None  # null = 跟随全局
     enabled_skills: list[str] | None  # null = 跟随全局
+    tool_guard_threshold: int | None  # null = 跟随全局
     message_count: int
     created_at: str
     updated_at: str
@@ -63,6 +64,7 @@ class SessionConfigUpdate(BaseModel):
     enabled_tools: list[str] | None = None  # null = 跟随全局
     enabled_skills: list[str] | None = None  # null = 跟随全局
     model_name: str | None = None
+    tool_guard_threshold: int | None = None  # null = 跟随全局
 
 
 class MessageOut(BaseModel):
@@ -195,6 +197,7 @@ async def get_session_meta(session_id: str, db: AsyncSession = Depends(get_db)):
         context_tokens=session.context_tokens,
         enabled_tools=session.enabled_tools,
         enabled_skills=session.enabled_skills,
+        tool_guard_threshold=session.tool_guard_threshold,
         message_count=message_count,
         created_at=utc_isoformat(session.created_at),
         updated_at=utc_isoformat(session.updated_at),
@@ -225,6 +228,8 @@ async def update_session_config(
         session.enabled_skills = req.enabled_skills
     if req.model_name is not None:
         session.model_name = req.model_name
+    if req.tool_guard_threshold is not None:
+        session.tool_guard_threshold = req.tool_guard_threshold
 
     session.updated_at = datetime.now(timezone.utc)
     await db.flush()
@@ -242,6 +247,7 @@ async def update_session_config(
         context_tokens=session.context_tokens,
         enabled_tools=session.enabled_tools,
         enabled_skills=session.enabled_skills,
+        tool_guard_threshold=session.tool_guard_threshold,
         message_count=message_count,
         created_at=utc_isoformat(session.created_at),
         updated_at=utc_isoformat(session.updated_at),

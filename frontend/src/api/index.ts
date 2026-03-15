@@ -176,6 +176,7 @@ export interface SessionMeta {
   context_tokens: number | null;
   enabled_tools: string[] | null;
   enabled_skills: string[] | null;
+  tool_guard_threshold: number | null;
   message_count: number;
   created_at: string;
   updated_at: string;
@@ -185,6 +186,7 @@ export interface SessionConfigUpdate {
   enabled_tools?: string[] | null;
   enabled_skills?: string[] | null;
   model_name?: string | null;
+  tool_guard_threshold?: number | null;
 }
 
 export interface ServiceConfig {
@@ -406,6 +408,15 @@ export interface DashboardStats {
 export async function getDashboardStats(): Promise<DashboardStats> {
   const { data } = await api.get<DashboardStats>("/dashboard/stats");
   return data;
+}
+
+// ── Tool Guard API ────────────────────────────────────────
+
+export async function resolveToolGuard(
+  requestId: string,
+  approved: boolean
+): Promise<void> {
+  await api.post(`/agent/tool-guard/${requestId}/resolve`, { approved });
 }
 
 export default api;
