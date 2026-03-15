@@ -56,6 +56,8 @@ async def run_migrations() -> None:
     migrations = [
         # cron_jobs: target_session_id (added in v0.2)
         ("cron_jobs", "target_session_id", "ALTER TABLE cron_jobs ADD COLUMN target_session_id VARCHAR(128)"),
+        # sessions: tool_guard_threshold (added for Tool Guard)
+        ("sessions", "tool_guard_threshold", "ALTER TABLE sessions ADD COLUMN tool_guard_threshold INTEGER"),
     ]
     async with engine.begin() as conn:
         for table, column, sql in migrations:

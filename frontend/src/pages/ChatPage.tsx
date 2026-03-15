@@ -5,10 +5,11 @@ import {
   Send, Trash2, Wrench, ChevronDown, ChevronRight,
   CheckCircle2, Loader2, XCircle, Paperclip, Brain,
   Info, Settings, Cpu, Puzzle, X, Smartphone,
-  Code2, Terminal, CalendarClock,
+  Code2, Terminal, CalendarClock, Shield, ShieldAlert,
+  ShieldCheck, ShieldX,
 } from "lucide-react";
 import clsx from "clsx";
-import { clearMemory, createSession, getSessions, getSessionMessages } from "../api";
+import { clearMemory, createSession, getSessions, getSessionMessages, resolveToolGuard } from "../api";
 import NimoIcon from "../components/NimoIcon";
 import SessionPanel from "../components/SessionPanel";
 import { useSessionMeta, useUpdateSessionConfig } from "../hooks/useSessionMeta";
@@ -25,13 +26,24 @@ interface ToolCallEntry {
   output?: string;
   error?: string | null;
   duration_ms?: number;
-  status: "running" | "done";
+  status: "running" | "done" | "cancelled";
 }
 
 interface FileAttachment {
   url: string;
   name: string;
   mime: string;
+}
+
+interface ToolGuardRequest {
+  requestId: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  level: number;
+  rule: string | null;
+  threshold: number;
+  description: string;
+  status: "pending" | "approved" | "rejected";
 }
 
 interface Message {
@@ -42,6 +54,7 @@ interface Message {
   toolCalls?: ToolCallEntry[];
   files?: FileAttachment[];
   streaming?: boolean;
+  guardRequest?: ToolGuardRequest;
 }
 
 // ── Thinking Bubble ────────────────────────────────────────
@@ -248,6 +261,115 @@ function PythonCodeOutput({
             )}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+// ── Tool Guard Card ─────────────────────────────────────────
+
+const LEVEL_LABELS: Record<number, { label: string; color: string; bg: string; border: string }> = {
+  0: { label: "毁灭性", color: "text-red-700", bg: "bg-red-50", border: "border-red-200" },
+  1: { label: "高危", color: "text-orange-700", bg: "bg-orange-50", border: "border-orange-200" },
+  2: { label: "中危", color: "text-amber-700", bg: "bg-amber-50", border: "border-amber-200" },
+  3: { label: "低危", color: "text-blue-700", bg: "bg-blue-50", border: "border-blue-200" },
+  4: { label: "安全", color: "text-green-700", bg: "bg-green-50", border: "border-green-200" },
+};
+
+function ToolGuardCard({
+  guard,
+  onResolve,
+}: {
+  guard: ToolGuardRequest;
+  onResolve: (requestId: string, approved: boolean) => void;
+}) {
+  const levelInfo = LEVEL_LABELS[guard.level] ?? LEVEL_LABELS[0];
+  const isPending = guard.status === "pending";
+
+  // Format the key input parameter for display
+  const inputPreview = (() => {
+    if (guard.toolName === "execute_shell_command") return guard.toolInput.command as string;
+    if (guard.toolName === "write_file" || guard.toolName === "edit_file") return guard.toolInput.file_path as string;
+    if (guard.toolName === "execute_python_code") {
+      const code = (guard.toolInput.code as string) ?? "";
+      return code.split("\n").find((l) => l.trim())?.trim().slice(0, 80) ?? "...";
+    }
+    return JSON.stringify(guard.toolInput).slice(0, 80);
+  })();
+
+  return (
+    <div className={clsx(
+      "rounded-xl border-2 text-xs overflow-hidden transition-all",
+      isPending ? `${levelInfo.border} ${levelInfo.bg}` : "border-gray-200 bg-gray-50 opacity-75",
+    )}>
+      {/* Header */}
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-black/5">
+        {isPending ? (
+          <ShieldAlert size={16} className={levelInfo.color} />
+        ) : guard.status === "approved" ? (
+          <ShieldCheck size={16} className="text-green-500" />
+        ) : (
+          <ShieldX size={16} className="text-red-500" />
+        )}
+        <span className="font-semibold text-gray-700">安全确认</span>
+        <span className={clsx(
+          "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider",
+          levelInfo.bg, levelInfo.color, levelInfo.border, "border",
+        )}>
+          Level {guard.level} · {levelInfo.label}
+        </span>
+        {!isPending && (
+          <span className={clsx(
+            "ml-auto px-2 py-0.5 rounded-full text-[10px] font-semibold",
+            guard.status === "approved" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700",
+          )}>
+            {guard.status === "approved" ? "已确认" : "已取消"}
+          </span>
+        )}
+      </div>
+
+      {/* Body */}
+      <div className="px-4 py-3 space-y-2">
+        <div className="flex items-start gap-2">
+          <span className="text-gray-500 shrink-0 w-10">工具:</span>
+          <span className="font-mono font-medium text-gray-800">{guard.toolName}</span>
+        </div>
+        <div className="flex items-start gap-2">
+          <span className="text-gray-500 shrink-0 w-10">参数:</span>
+          <pre className="font-mono text-gray-700 break-all whitespace-pre-wrap flex-1 min-w-0 bg-white/60 rounded px-2 py-1 border border-black/5">
+            {inputPreview}
+          </pre>
+        </div>
+        {guard.rule && (
+          <div className="flex items-start gap-2">
+            <span className="text-gray-500 shrink-0 w-10">规则:</span>
+            <span className="font-mono text-gray-600">{guard.rule}</span>
+          </div>
+        )}
+        <div className={clsx("text-[11px] mt-1 px-2 py-1.5 rounded-lg", levelInfo.bg)}>
+          <Shield size={11} className={clsx("inline mr-1", levelInfo.color)} />
+          此操作安全等级为 <strong>{guard.level}</strong>（{levelInfo.label}），当前会话阈值为 <strong>{guard.threshold}</strong>
+        </div>
+      </div>
+
+      {/* Actions */}
+      {isPending && (
+        <div className="flex items-center gap-3 px-4 py-3 border-t border-black/5 bg-white/50">
+          <button
+            onClick={() => onResolve(guard.requestId, true)}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-nimo-500 text-white text-xs font-semibold hover:bg-nimo-600 transition-colors shadow-sm"
+          >
+            <CheckCircle2 size={13} />
+            确认执行
+          </button>
+          <button
+            onClick={() => onResolve(guard.requestId, false)}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-gray-300 text-gray-600 text-xs font-semibold hover:bg-gray-100 transition-colors"
+          >
+            <XCircle size={13} />
+            取消
+          </button>
+        </div>
       )}
     </div>
   );
@@ -558,6 +680,54 @@ function SessionMetaPanel({
             </div>
           </div>
         )}
+
+        {/* Tool Guard threshold */}
+        <div className="space-y-2">
+          <div className="border-t border-gray-100 pt-3" />
+          <p className="text-xs font-semibold text-gray-600 flex items-center gap-1.5">
+            <Shield size={13} className="text-nimo-500" /> 安全阈值
+            <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-nimo-100 text-nimo-600">
+              {meta?.tool_guard_threshold ?? "全局"}
+            </span>
+          </p>
+          <p className="text-[10px] text-gray-400 leading-relaxed">
+            安全等级低于阈值的工具调用需用户确认（0=毁灭性 → 4=安全）
+          </p>
+          <div className="flex gap-1.5">
+            {[0, 1, 2, 3, 4].map((level) => {
+              const isActive = (meta?.tool_guard_threshold ?? null) === level;
+              const labels: Record<number, string> = { 0: "全放行", 1: "仅拦截毁灭性", 2: "拦截高危+", 3: "拦截中危+", 4: "全部拦截" };
+              return (
+                <button
+                  key={level}
+                  onClick={() =>
+                    updateConfig.mutate({ sessionId, config: { tool_guard_threshold: level } })
+                  }
+                  className={clsx(
+                    "px-2 py-1.5 rounded-lg text-[10px] font-mono font-semibold transition-all border",
+                    isActive
+                      ? "border-nimo-300 bg-nimo-100 text-nimo-700 shadow-sm"
+                      : "border-gray-200 bg-white text-gray-400 hover:border-gray-300 hover:text-gray-600"
+                  )}
+                  title={labels[level]}
+                >
+                  {level}
+                </button>
+              );
+            })}
+            {meta?.tool_guard_threshold !== null && meta?.tool_guard_threshold !== undefined && (
+              <button
+                onClick={() =>
+                  updateConfig.mutate({ sessionId, config: { tool_guard_threshold: null } })
+                }
+                className="px-2 py-1.5 rounded-lg text-[10px] border border-gray-200 bg-white text-gray-400 hover:border-gray-300 hover:text-gray-600 transition-all"
+                title="重置为全局默认"
+              >
+                重置
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -602,6 +772,15 @@ export default function ChatPage() {
   const queryClient = useQueryClient();
 
   const isReadOnly = sessionId?.startsWith("dingtalk:") ?? false;
+
+  // Tool Guard resolve handler
+  const handleGuardResolve = async (requestId: string, approved: boolean) => {
+    try {
+      await resolveToolGuard(requestId, approved);
+    } catch (err) {
+      console.error("Failed to resolve tool guard:", err);
+    }
+  };
 
   // 实时接收定时任务推送的 session 消息
   const handleRemoteMessage = useCallback(
@@ -760,6 +939,29 @@ export default function ChatPage() {
                 ...(m.files ?? []),
                 { url: ev.url as string, name: ev.name as string, mime: ev.mime as string },
               ],
+            }));
+          } else if (ev.type === "tool_guard_request") {
+            updateLast((m) => ({
+              ...m,
+              guardRequest: {
+                requestId: ev.request_id as string,
+                toolName: ev.tool_name as string,
+                toolInput: ev.tool_input as Record<string, unknown>,
+                level: ev.level as number,
+                rule: (ev.rule as string) || null,
+                threshold: ev.threshold as number,
+                description: (ev.description as string) || "",
+                status: "pending",
+              },
+            }));
+          } else if (ev.type === "tool_guard_waiting") {
+            // 心跳，不需特殊处理
+          } else if (ev.type === "tool_guard_resolved") {
+            updateLast((m) => ({
+              ...m,
+              guardRequest: m.guardRequest
+                ? { ...m.guardRequest, status: (ev.approved as boolean) ? "approved" : "rejected" }
+                : undefined,
             }));
           } else if (ev.type === "done") {
             updateLast((m) => ({ ...m, streaming: false }));
@@ -934,6 +1136,10 @@ export default function ChatPage() {
                   {/* Thinking bubble */}
                   {msg.thinking && (
                     <ThinkingBubble content={msg.thinking} streaming={msg.streamingThinking} />
+                  )}
+                  {/* Tool Guard confirmation */}
+                  {msg.guardRequest && (
+                    <ToolGuardCard guard={msg.guardRequest} onResolve={handleGuardResolve} />
                   )}
                   {/* Tool call cards */}
                   {(msg.toolCalls ?? []).map((tc) => (

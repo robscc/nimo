@@ -66,6 +66,15 @@ class PersonalAssistant(BaseAgent):
             "os": f"{platform.system()} {platform.release()} ({platform.machine()})",
             "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         }
+
+        # 注入 tool_guard_threshold 供 ContextBuilder 构建安全等级说明
+        try:
+            threshold = await self._get_guard_threshold()
+            if threshold is not None:
+                runtime_context["tool_guard_threshold"] = threshold
+        except Exception:
+            pass
+
         return self._context_builder.build_system_prompt(
             ws, enabled_tool_names, skill_prompts=skill_prompts,
             runtime_context=runtime_context,
@@ -133,6 +142,29 @@ class PersonalAssistant(BaseAgent):
             })
 
             for tool_call in tool_calls:
+                # ── Tool Guard check (non-streaming) ──────
+                from agentpal.tools.tool_guard import ToolGuardManager
+
+                guard = ToolGuardManager.get_instance()
+                session_threshold = await self._get_guard_threshold()
+                guard_result = guard.check(
+                    tool_call.get("name", ""),
+                    tool_call.get("input", {}),
+                    session_threshold,
+                )
+                if guard_result.needs_confirmation:
+                    # 非流式场景：直接拒绝（channel 场景由 channel.py 拦截处理）
+                    tc_id = tool_call.get("id", str(uuid.uuid4()))
+                    cancel_msg = (
+                        f"Tool '{tool_call.get('name', '')}' blocked by safety guard "
+                        f"(level {guard_result.level}, threshold "
+                        f"{session_threshold if session_threshold is not None else guard.default_threshold}). "
+                        f"Rule: {guard_result.rule_name or 'default'}. "
+                        f"Please confirm via the web interface or adjust the security threshold."
+                    )
+                    messages.append({"role": "tool", "tool_call_id": tc_id, "content": cancel_msg})
+                    continue
+
                 tool_msg = await self._execute_tool(toolkit, tool_call)
                 messages.append(tool_msg)
 
@@ -272,6 +304,61 @@ class PersonalAssistant(BaseAgent):
                     tc_name = tool_call.get("name", "")
                     tc_input = tool_call.get("input", {})
 
+                    # ── Tool Guard check ──────────────────────
+                    from agentpal.tools.tool_guard import ToolGuardManager
+
+                    guard = ToolGuardManager.get_instance()
+                    session_threshold = await self._get_guard_threshold()
+                    guard_result = guard.check(tc_name, tc_input, session_threshold)
+
+                    if guard_result.needs_confirmation:
+                        request_id = str(uuid.uuid4())
+                        yield {
+                            "type": "tool_guard_request",
+                            "request_id": request_id,
+                            "tool_name": tc_name,
+                            "tool_input": tc_input,
+                            "level": guard_result.level,
+                            "rule": guard_result.rule_name,
+                            "threshold": session_threshold if session_threshold is not None else guard.default_threshold,
+                            "description": guard_result.description,
+                        }
+
+                        pending = guard.create_pending(request_id, tc_name, tc_input)
+                        # 等待确认（5s 间隔发心跳，最长 5 分钟）
+                        deadline = time() + 300
+                        while time() < deadline:
+                            try:
+                                await asyncio.wait_for(pending.event.wait(), timeout=5.0)
+                                break
+                            except asyncio.TimeoutError:
+                                yield {"type": "tool_guard_waiting", "request_id": request_id}
+
+                        approved = pending.approved
+                        guard.remove_pending(request_id)
+                        yield {
+                            "type": "tool_guard_resolved",
+                            "request_id": request_id,
+                            "approved": approved,
+                        }
+
+                        if not approved:
+                            cancel_msg = "Due to insufficient security clearance, the tool call has been cancelled."
+                            messages.append(
+                                {"role": "tool", "tool_call_id": tc_id, "content": cancel_msg}
+                            )
+                            accumulated_tool_calls.append({
+                                "id": tc_id,
+                                "name": tc_name,
+                                "input": tc_input,
+                                "output": cancel_msg,
+                                "error": None,
+                                "duration_ms": 0,
+                                "status": "cancelled",
+                            })
+                            continue  # 跳过此工具，继续处理其他工具调用
+
+                    # ── 正常执行工具 ──────────────────────────
                     yield {"type": "tool_start", "id": tc_id, "name": tc_name, "input": tc_input}
 
                     output_text, error_text, duration_ms = await self._run_tool(toolkit, tool_call)
@@ -410,6 +497,24 @@ class PersonalAssistant(BaseAgent):
         )
         asyncio.create_task(sub_agent.run(task_prompt))
         return task
+
+    # ── Tool Guard 辅助 ────────────────────────────────────
+
+    async def _get_guard_threshold(self) -> int | None:
+        """读取 session 级 tool_guard_threshold，null 回退全局默认。"""
+        if self._db is None:
+            return None
+        try:
+            from sqlalchemy import select
+
+            result = await self._db.execute(
+                select(SessionRecord.tool_guard_threshold).where(
+                    SessionRecord.id == self.session_id
+                )
+            )
+            return result.scalar_one_or_none()
+        except Exception:
+            return None
 
     # ── 工具执行 ──────────────────────────────────────────
 

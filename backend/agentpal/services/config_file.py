@@ -54,6 +54,55 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "cors": {
         "origins": ["http://localhost:3000", "http://localhost:5173"],
     },
+    "tool_guard": {
+        "enabled": True,
+        "default_threshold": 2,
+        "tool_levels": {
+            "execute_shell_command": 1,
+            "write_file": 2,
+            "edit_file": 2,
+            "execute_python_code": 1,
+            "browser_use": 3,
+            "read_file": 4,
+            "get_current_time": 4,
+            "skill_cli": 4,
+            "cron_cli": 4,
+            "send_file_to_user": 4,
+        },
+        "rules": [
+            {
+                "name": "destructive_fs",
+                "tool": "execute_shell_command",
+                "pattern": r"(rm\s+-rf|rmdir|mkfs|dd\s+if=|format\s+)",
+                "level": 0,
+            },
+            {
+                "name": "remote_code_exec",
+                "tool": "execute_shell_command",
+                "pattern": r"(curl.*\|\s*(sh|bash)|wget.*\|\s*(sh|bash))",
+                "level": 0,
+            },
+            {
+                "name": "system_control",
+                "tool": "execute_shell_command",
+                "pattern": r"(shutdown|reboot|init\s+[0-6]|systemctl\s+(stop|disable))",
+                "level": 0,
+            },
+            {
+                "name": "file_delete_move",
+                "tool": "execute_shell_command",
+                "pattern": r"(\brm\b|\bmv\b|\bshred\b)",
+                "level": 1,
+            },
+            {
+                "name": "write_system_path",
+                "tool": "write_file",
+                "field": "file_path",
+                "pattern": r"^/(etc|usr|bin|sbin|boot)/",
+                "level": 0,
+            },
+        ],
+    },
 }
 
 # YAML 到 Settings 字段的映射（YAML 嵌套路径 → Settings 属性名）

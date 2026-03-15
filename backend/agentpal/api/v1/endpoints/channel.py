@@ -18,6 +18,8 @@ router = APIRouter()
 
 async def _handle_incoming(channel_name: str, payload: dict[str, Any], db: AsyncSession) -> dict:
     """公共处理逻辑：解析消息 → 调用助手 → 返回回复。"""
+    import re as _re
+
     channels = {
         "dingtalk": DingTalkChannel(),
         "feishu": FeishuChannel(),
@@ -30,6 +32,36 @@ async def _handle_incoming(channel_name: str, payload: dict[str, Any], db: Async
     incoming = await ch.parse_incoming(payload)
     if incoming is None:
         return {"status": "ignored"}
+
+    # ── Tool Guard 确认拦截 ──────────────────────────
+    guard_match = _re.match(
+        r"^(confirm|cancel|确认|取消)\s+([a-f0-9-]+)$",
+        incoming.text.strip(),
+        _re.IGNORECASE,
+    )
+    if guard_match:
+        from agentpal.tools.tool_guard import ToolGuardManager
+
+        action, request_id = guard_match.groups()
+        approved = action.lower() in ("confirm", "确认")
+        guard = ToolGuardManager.get_instance()
+        from agentpal.channels.base import OutgoingMessage
+
+        if guard.resolve(request_id, approved):
+            await ch.send(
+                OutgoingMessage(
+                    session_id=incoming.session_id,
+                    text=f"{'✅ 已确认执行' if approved else '❌ 已取消执行'} [{request_id[:8]}]",
+                )
+            )
+        else:
+            await ch.send(
+                OutgoingMessage(
+                    session_id=incoming.session_id,
+                    text=f"⚠️ 未找到确认请求 [{request_id[:8]}]，可能已过期",
+                )
+            )
+        return {"status": "ok"}
 
     settings = get_settings()
     memory = MemoryFactory.create(settings.memory_backend, db=db)

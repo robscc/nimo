@@ -131,6 +131,29 @@ class ContextBuilder:
             tools_line = ", ".join(f"`{t}`" for t in enabled_tools)
             sections.append(f"# Available Tools\n\n{tools_line}")
 
+        # 9.5 工具安全等级说明
+        try:
+            from agentpal.tools.tool_guard import ToolGuardManager
+
+            guard = ToolGuardManager.get_instance()
+            if guard.enabled:
+                threshold = guard.default_threshold
+                # 尝试从 runtime_context 获取 session 级阈值
+                if runtime_context and runtime_context.get("tool_guard_threshold") is not None:
+                    threshold = runtime_context["tool_guard_threshold"]
+                sections.append(
+                    "# Tool Security Levels\n\n"
+                    "Your tools have security levels (0 = most dangerous, 4 = safest).\n"
+                    f"Current session security threshold: {threshold}\n\n"
+                    f"- Tools with level < {threshold} will require user confirmation before execution\n"
+                    f"- Tools with level >= {threshold} execute immediately without confirmation\n\n"
+                    "When a tool call is blocked for security review, the user will decide whether to proceed.\n"
+                    "If cancelled, acknowledge the cancellation and suggest safer alternatives.\n\n"
+                    "Exercise caution with low-level tools. Prefer safer approaches when possible."
+                )
+        except Exception:
+            pass
+
         # 10. 已安装的 prompt 型技能
         if skill_prompts:
             skill_parts: list[str] = []
