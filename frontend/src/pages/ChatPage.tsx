@@ -1,11 +1,11 @@
-import { useState, useRef, useEffect } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Send, Trash2, Wrench, ChevronDown, ChevronRight,
   CheckCircle2, Loader2, XCircle, Paperclip, Brain,
   Info, Settings, Cpu, Puzzle, X, Smartphone,
-  Code2, Terminal,
+  Code2, Terminal, CalendarClock,
 } from "lucide-react";
 import clsx from "clsx";
 import { clearMemory, createSession, getSessions, getSessionMessages } from "../api";
@@ -14,6 +14,7 @@ import SessionPanel from "../components/SessionPanel";
 import { useSessionMeta, useUpdateSessionConfig } from "../hooks/useSessionMeta";
 import { useTools } from "../hooks/useTools";
 import { useSkills } from "../hooks/useSkills";
+import { useSessionEvents } from "../hooks/useSessionEvents";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -602,6 +603,23 @@ export default function ChatPage() {
 
   const isReadOnly = sessionId?.startsWith("dingtalk:") ?? false;
 
+  // 实时接收定时任务推送的 session 消息
+  const handleRemoteMessage = useCallback(
+    (event: { type: "new_message"; message: { id: string; role: string; content: string; created_at: string | null } }) => {
+      const { message } = event;
+      if (message.role !== "assistant" && message.role !== "user") return;
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: message.role as "user" | "assistant",
+          content: message.content,
+        },
+      ]);
+    },
+    []
+  );
+  useSessionEvents(sessionId, handleRemoteMessage);
+
   // 初始化：优先加载 URL 中的 session，否则加载最新 session，否则新建
   useEffect(() => {
     (async () => {
@@ -870,6 +888,15 @@ export default function ChatPage() {
           >
             <Trash2 size={18} />
           </button>
+          )}
+          {!isReadOnly && sessionId && (
+          <Link
+            to={`/cron?from_session=${encodeURIComponent(sessionId)}`}
+            className="p-2 text-gray-400 hover:text-nimo-500 hover:bg-nimo-50 rounded-lg transition-colors"
+            title="新建定时任务（通知到此会话）"
+          >
+            <CalendarClock size={18} />
+          </Link>
           )}
           {!isReadOnly && (
           <button

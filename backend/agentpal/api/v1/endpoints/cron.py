@@ -21,6 +21,7 @@ class CronJobCreate(BaseModel):
     agent_name: str | None = None
     enabled: bool = True
     notify_main: bool = True
+    target_session_id: str | None = None  # 接收通知的 session，null = MessageBus 通知主 Agent
 
 
 class CronJobUpdate(BaseModel):
@@ -30,6 +31,7 @@ class CronJobUpdate(BaseModel):
     agent_name: str | None = None
     enabled: bool | None = None
     notify_main: bool | None = None
+    target_session_id: str | None = None  # 接收通知的 session
 
 
 class CronJobToggle(BaseModel):
@@ -74,7 +76,8 @@ async def update_cron_job(
 ):
     """更新定时任务。"""
     mgr = CronManager(db)
-    update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    # exclude_unset=True：仅包含请求体中显式传入的字段，允许将字段清空为 null
+    update_data = data.model_dump(exclude_unset=True)
     try:
         result = await mgr.update_job(job_id, update_data)
     except ValueError as e:

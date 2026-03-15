@@ -13,6 +13,20 @@ from typing import Any
 
 from loguru import logger
 from sqlalchemy import select, update
+
+
+def _ts(dt: datetime | None) -> str | None:
+    """将 datetime 转为带 UTC 时区标记的 ISO 8601 字符串。
+
+    SQLite + SQLAlchemy 有时会返回 naive datetime（tzinfo=None），
+    直接 isoformat() 后缺少 +00:00 后缀，导致 JS 将其解析为本地时间（偏移 8 小时）。
+    此函数确保始终输出带 +00:00 的 UTC 字符串。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.models.cron import CronJob, CronJobExecution, CronStatus
@@ -30,8 +44,12 @@ def _compute_next_run(schedule: str, after: datetime | None = None) -> datetime 
         return None
 
     base = after or datetime.now(timezone.utc)
+    # croniter 对 timezone-aware datetime 的处理不稳定：内部会转换为本地时间，
+    # 但 get_next(datetime) 返回 naive datetime，导致 .replace(tzinfo=utc) 结果偏移。
+    # 解决方案：先剥掉 tzinfo，以 naive UTC 传入，确保输入输出都在 UTC 时间轴上。
+    base_naive = base.replace(tzinfo=None)
     try:
-        cron = croniter(schedule, base)
+        cron = croniter(schedule, base_naive)
         return cron.get_next(datetime).replace(tzinfo=timezone.utc)
     except (ValueError, KeyError) as e:
         logger.warning(f"无效的 cron 表达式 '{schedule}': {e}")
@@ -72,6 +90,7 @@ class CronManager:
             agent_name=data.get("agent_name"),
             enabled=data.get("enabled", True),
             notify_main=data.get("notify_main", True),
+            target_session_id=data.get("target_session_id"),
             next_run_at=_compute_next_run(schedule),
         )
         self._db.add(job)
@@ -91,7 +110,7 @@ class CronManager:
             job.schedule = data["schedule"]
             job.next_run_at = _compute_next_run(data["schedule"])
 
-        for key in ("name", "task_prompt", "agent_name", "enabled", "notify_main"):
+        for key in ("name", "task_prompt", "agent_name", "enabled", "notify_main", "target_session_id"):
             if key in data:
                 setattr(job, key, data[key])
 
@@ -219,10 +238,11 @@ class CronManager:
             "agent_name": job.agent_name,
             "enabled": job.enabled,
             "notify_main": job.notify_main,
-            "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
-            "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
-            "created_at": job.created_at.isoformat() if job.created_at else None,
-            "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+            "target_session_id": job.target_session_id,
+            "last_run_at": _ts(job.last_run_at),
+            "next_run_at": _ts(job.next_run_at),
+            "created_at": _ts(job.created_at),
+            "updated_at": _ts(job.updated_at),
         }
 
     @staticmethod
@@ -233,8 +253,8 @@ class CronManager:
             "cron_job_name": rec.cron_job_name,
             "status": rec.status,
             "agent_name": rec.agent_name,
-            "started_at": rec.started_at.isoformat() if rec.started_at else None,
-            "finished_at": rec.finished_at.isoformat() if rec.finished_at else None,
+            "started_at": _ts(rec.started_at),
+            "finished_at": _ts(rec.finished_at),
             "result": rec.result[:500] + "..." if rec.result and len(rec.result) > 500 else rec.result,
             "error": rec.error,
         }
@@ -296,7 +316,7 @@ class CronScheduler:
 
                 # 异步执行任务（不阻塞调度循环）
                 asyncio.create_task(
-                    self._execute_job(job.id, job.name, job.task_prompt, job.agent_name, job.notify_main)
+                    self._execute_job(job.id, job.name, job.task_prompt, job.agent_name, job.notify_main, job.target_session_id)
                 )
 
     async def _execute_job(
@@ -306,6 +326,7 @@ class CronScheduler:
         task_prompt: str,
         agent_name: str | None,
         notify_main: bool,
+        target_session_id: str | None = None,
     ) -> None:
         """执行单个定时任务。"""
         from agentpal.database import AsyncSessionLocal
@@ -331,7 +352,7 @@ class CronScheduler:
                 # 通知主 Agent
                 if notify_main:
                     await self._notify_main_agent(
-                        db, job_name, result, agent_name
+                        db, job_name, result, agent_name, target_session_id
                     )
                     await db.commit()
 
@@ -404,26 +425,62 @@ class CronScheduler:
         job_name: str,
         result: str,
         agent_name: str | None,
+        target_session_id: str | None = None,
     ) -> None:
-        """将定时任务结果通知主 Agent。"""
-        from agentpal.agents.message_bus import MessageBus
-        from agentpal.models.message import MessageType
+        """将定时任务结果通知主 Agent。
 
-        bus = MessageBus(db)
+        若指定了 target_session_id，将结果以 assistant 消息写入该 session，
+        并通过 SessionEventBus 推送实时更新；否则走 MessageBus NOTIFY 路径。
+        """
         sender = agent_name or "cron"
         content = (
             f"📋 定时任务「{job_name}」执行完成\n\n"
             f"执行者: {sender}\n"
             f"结果:\n{result[:2000]}"
         )
-        await bus.send(
-            from_agent=sender,
-            to_agent="main",
-            parent_session_id="__cron__",
-            content=content,
-            message_type=MessageType.NOTIFY,
-            metadata={"cron_job_name": job_name},
-        )
+
+        if target_session_id:
+            # 写入指定 session 的记忆，推送 SSE 实时更新
+            import uuid as _uuid
+
+            from agentpal.models.memory import MemoryRecord
+            from agentpal.services.session_event_bus import session_event_bus
+
+            record = MemoryRecord(
+                id=str(_uuid.uuid4()),
+                session_id=target_session_id,
+                role="assistant",
+                content=content,
+            )
+            db.add(record)
+            await db.flush()
+
+            await session_event_bus.publish(
+                target_session_id,
+                {
+                    "type": "new_message",
+                    "message": {
+                        "id": record.id,
+                        "role": "assistant",
+                        "content": content,
+                        "created_at": _ts(record.created_at),
+                    },
+                },
+            )
+            logger.info(f"定时任务结果已写入 session {target_session_id}")
+        else:
+            from agentpal.agents.message_bus import MessageBus
+            from agentpal.models.message import MessageType
+
+            bus = MessageBus(db)
+            await bus.send(
+                from_agent=sender,
+                to_agent="main",
+                parent_session_id="__cron__",
+                content=content,
+                message_type=MessageType.NOTIFY,
+                metadata={"cron_job_name": job_name},
+            )
 
 
 # 全局单例

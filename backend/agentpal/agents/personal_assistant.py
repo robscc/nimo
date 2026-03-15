@@ -57,9 +57,18 @@ class PersonalAssistant(BaseAgent):
         skill_prompts: list[dict] | None = None,
     ) -> str:
         """从 workspace 读取文件，动态组装 system prompt。"""
+        import platform
+        import sys
+
         ws = await self._ws_manager.load()
+        runtime_context = {
+            "session_id": self.session_id,
+            "os": f"{platform.system()} {platform.release()} ({platform.machine()})",
+            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        }
         return self._context_builder.build_system_prompt(
             ws, enabled_tool_names, skill_prompts=skill_prompts,
+            runtime_context=runtime_context,
         )
 
     # ── 核心对话（含工具调用循环）────────────────────────

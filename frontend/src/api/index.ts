@@ -296,6 +296,7 @@ export interface CronJobInfo {
   agent_name: string | null;
   enabled: boolean;
   notify_main: boolean;
+  target_session_id: string | null;
   last_run_at: string | null;
   next_run_at: string | null;
   created_at: string | null;
@@ -309,6 +310,7 @@ export interface CronJobCreate {
   agent_name?: string | null;
   enabled?: boolean;
   notify_main?: boolean;
+  target_session_id?: string | null;
 }
 
 export interface CronJobUpdate {
@@ -318,6 +320,7 @@ export interface CronJobUpdate {
   agent_name?: string | null;
   enabled?: boolean;
   notify_main?: boolean;
+  target_session_id?: string | null;
 }
 
 export interface CronExecutionInfo {

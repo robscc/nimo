@@ -1,4 +1,6 @@
 import { useState, useCallback } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import {
   CalendarClock, Plus, Trash2, Edit2, ChevronDown, ChevronRight,
   CheckCircle2, XCircle, Loader2, Clock, Bot, X, Terminal,
@@ -14,6 +16,7 @@ import {
   useCronExecutions,
   useCronExecutionDetail,
 } from "../hooks/useCron";
+import { getAllSessions } from "../api";
 import type { CronJobInfo, CronJobCreate, CronJobUpdate } from "../api";
 
 // ── Helpers ────────────────────────────────────────────────
@@ -337,6 +340,7 @@ interface FormState {
   agent_name: string;
   enabled: boolean;
   notify_main: boolean;
+  target_session_id: string; // "" means null (no session)
 }
 
 const EMPTY_FORM: FormState = {
@@ -346,6 +350,7 @@ const EMPTY_FORM: FormState = {
   agent_name: "",
   enabled: true,
   notify_main: true,
+  target_session_id: "",
 };
 
 function CronFormModal({
@@ -364,8 +369,16 @@ function CronFormModal({
     ...EMPTY_FORM,
     ...initial,
     agent_name: initial?.agent_name ?? "",
+    target_session_id: initial?.target_session_id ?? "",
   });
   const [scheduleError, setScheduleError] = useState("");
+
+  // 加载 session 列表用于 session 选择器
+  const { data: sessions = [] } = useQuery({
+    queryKey: ["sessions-for-cron"],
+    queryFn: () => getAllSessions(50),
+    staleTime: 30_000,
+  });
 
   const validateSchedule = (s: string): boolean => {
     if (s.trim().split(/\s+/).length !== 5) {
@@ -381,12 +394,13 @@ function CronFormModal({
     if (!form.name.trim() || !form.task_prompt.trim()) return;
     if (!validateSchedule(form.schedule)) return;
     onSubmit({
-      name:       form.name.trim(),
-      schedule:   form.schedule.trim(),
-      task_prompt: form.task_prompt.trim(),
-      agent_name: form.agent_name.trim() || null,
-      enabled:    form.enabled,
-      notify_main: form.notify_main,
+      name:              form.name.trim(),
+      schedule:          form.schedule.trim(),
+      task_prompt:       form.task_prompt.trim(),
+      agent_name:        form.agent_name.trim() || null,
+      enabled:           form.enabled,
+      notify_main:       form.notify_main,
+      target_session_id: form.target_session_id || null,
     });
   };
 
@@ -502,6 +516,26 @@ function CronFormModal({
             />
           </div>
 
+          {/* Target session */}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              通知到会话
+              <span className="text-gray-400 font-normal ml-1">（可选，任务完成后将结果发送到指定会话）</span>
+            </label>
+            <select
+              value={form.target_session_id}
+              onChange={(e) => set("target_session_id", e.target.value)}
+              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm outline-none focus:border-nimo-400 transition-colors bg-white text-gray-700"
+            >
+              <option value="">不指定（通过 MessageBus 通知主 Agent）</option>
+              {sessions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.title || s.id} · {s.message_count} 条消息
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* Checkboxes */}
           <div className="flex items-center gap-6 pt-1">
             <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -596,6 +630,16 @@ function CronJobCard({
                 <Bot size={10} />{job.agent_name}
               </span>
             )}
+            {job.target_session_id && (
+              <Link
+                to={`/chat?session=${encodeURIComponent(job.target_session_id)}`}
+                onClick={(e) => e.stopPropagation()}
+                className="text-xs bg-blue-50 text-blue-500 px-1.5 py-0.5 rounded flex items-center gap-0.5 hover:bg-blue-100 transition-colors"
+                title={`通知到 session: ${job.target_session_id}`}
+              >
+                <MessageSquare size={10} />会话
+              </Link>
+            )}
             {!job.enabled && (
               <span className="text-xs bg-gray-100 text-gray-400 px-1.5 py-0.5 rounded">已停用</span>
             )}
@@ -661,6 +705,10 @@ export default function CronPage() {
   const deleteJob = useDeleteCronJob();
   const toggleJob = useToggleCronJob();
 
+  // ?from_session=<id> 来自 ChatPage 的快捷跳转，自动预填 target_session_id
+  const [searchParams] = useSearchParams();
+  const fromSession = searchParams.get("from_session") ?? "";
+
   const [editingJob, setEditingJob] = useState<CronJobInfo | null>(null);
   const [showCreate,  setShowCreate]  = useState(false);
 
@@ -674,12 +722,13 @@ export default function CronPage() {
   const handleUpdate = useCallback(async (data: CronJobCreate) => {
     if (!editingJob) return;
     const patch: CronJobUpdate = {
-      name:        data.name,
-      schedule:    data.schedule,
-      task_prompt: data.task_prompt,
-      agent_name:  data.agent_name,
-      notify_main: data.notify_main,
-      enabled:     data.enabled,
+      name:              data.name,
+      schedule:          data.schedule,
+      task_prompt:       data.task_prompt,
+      agent_name:        data.agent_name,
+      notify_main:       data.notify_main,
+      enabled:           data.enabled,
+      target_session_id: data.target_session_id,
     };
     await updateJob.mutateAsync({ id: editingJob.id, data: patch });
     setEditingJob(null);
@@ -762,6 +811,7 @@ export default function CronPage() {
       {/* ── Modals ── */}
       {showCreate && (
         <CronFormModal
+          initial={{ target_session_id: fromSession }}
           onClose={() => setShowCreate(false)}
           onSubmit={handleCreate}
           submitting={createJob.isPending}
@@ -770,12 +820,13 @@ export default function CronPage() {
       {editingJob && (
         <CronFormModal
           initial={{
-            name:        editingJob.name,
-            schedule:    editingJob.schedule,
-            task_prompt: editingJob.task_prompt,
-            agent_name:  editingJob.agent_name ?? "",
-            enabled:     editingJob.enabled,
-            notify_main: editingJob.notify_main,
+            name:              editingJob.name,
+            schedule:          editingJob.schedule,
+            task_prompt:       editingJob.task_prompt,
+            agent_name:        editingJob.agent_name ?? "",
+            enabled:           editingJob.enabled,
+            notify_main:       editingJob.notify_main,
+            target_session_id: editingJob.target_session_id ?? "",
           }}
           onClose={() => setEditingJob(null)}
           onSubmit={handleUpdate}
