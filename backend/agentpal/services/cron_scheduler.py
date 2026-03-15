@@ -30,8 +30,12 @@ def _compute_next_run(schedule: str, after: datetime | None = None) -> datetime 
         return None
 
     base = after or datetime.now(timezone.utc)
+    # croniter 对 timezone-aware datetime 的处理不稳定：内部会转换为本地时间，
+    # 但 get_next(datetime) 返回 naive datetime，导致 .replace(tzinfo=utc) 结果偏移。
+    # 解决方案：先剥掉 tzinfo，以 naive UTC 传入，确保输入输出都在 UTC 时间轴上。
+    base_naive = base.replace(tzinfo=None)
     try:
-        cron = croniter(schedule, base)
+        cron = croniter(schedule, base_naive)
         return cron.get_next(datetime).replace(tzinfo=timezone.utc)
     except (ValueError, KeyError) as e:
         logger.warning(f"无效的 cron 表达式 '{schedule}': {e}")
