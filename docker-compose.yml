@@ -1,42 +1,32 @@
-version: "3.9"
-
-# 极简部署：仅 backend + frontend，存储层使用 SQLite（挂载 volume 持久化）
+# 单镜像部署：前后端一体，SQLite 持久化，挂载 ~/.nimo 配置
 
 services:
-  backend:
+  agentpal:
     build:
-      context: ./backend
+      context: .
       dockerfile: Dockerfile
-    container_name: agentpal-backend
+    container_name: agentpal
     restart: unless-stopped
     ports:
       - "${APP_PORT:-8088}:8088"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       APP_ENV: production
       DATABASE_URL: sqlite+aiosqlite:///./data/agentpal.db
+      WORKSPACE_DIR: /root/.nimo
     volumes:
-      - backend_data:/app/data
+      - agentpal_data:/app/data         # SQLite + 持久化数据
+      - agentpal_uploads:/app/uploads   # 上传文件
+      - ~/.nimo:/root/.nimo             # 配置文件（config.yaml、SOUL.md 等）
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
       interval: 30s
       timeout: 10s
+      start_period: 30s
       retries: 3
 
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: agentpal-frontend
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      VITE_API_BASE_URL: http://backend:8088
-    depends_on:
-      backend:
-        condition: service_healthy
-
 volumes:
-  backend_data:
+  agentpal_data:
+  agentpal_uploads:

@@ -17,7 +17,7 @@ import {
 interface WorkspaceEntry {
   id: string;           // 用于 API 调用的 key（"SOUL.md" etc）
   label: string;        // 显示名称
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  icon: React.ComponentType<{ size?: number | string; className?: string }>;
   readOnly?: boolean;
   group: "core" | "memory" | "canvas";
   description: string;
@@ -67,7 +67,7 @@ function SidebarGroup({
   label, icon: Icon, open, onToggle, children,
 }: {
   label: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  icon: React.ComponentType<{ size?: number | string; className?: string }>;
   open: boolean;
   onToggle: () => void;
   children: React.ReactNode;

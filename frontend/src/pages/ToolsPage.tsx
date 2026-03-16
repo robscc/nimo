@@ -8,7 +8,7 @@ import clsx from "clsx";
 import { useTools, useToggleTool, useToolLogs, type ToolLog } from "../hooks/useTools";
 
 // ── 图标映射 ──────────────────────────────────────────────
-const ICON_MAP: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
+const ICON_MAP: Record<string, React.ComponentType<{ size?: number | string; className?: string }>> = {
   Terminal, FileText, FilePlus, FileEdit, Globe, Clock, Puzzle,
 };
 
@@ -160,7 +160,7 @@ export default function ToolsPage() {
                           {tool.name}
                         </span>
                         {tool.dangerous && (
-                          <AlertTriangle size={12} className="text-amber-400 shrink-0" title="危险工具" />
+                          <span title="危险工具"><AlertTriangle size={12} className="text-amber-400 shrink-0" /></span>
                         )}
                       </div>
                       <p className="text-xs text-gray-400 mt-0.5 truncate">{tool.description}</p>
