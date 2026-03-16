@@ -65,8 +65,13 @@ install: $(VENV_DIR)
 ## ─── 开发服务 ───────────────────────────────────────────────
 
 dev:
-	@echo ">> 启动开发环境 (backend + frontend)..."
-	make -j2 backend frontend
+	@echo ">> 启动开发环境 (backend:8099 + frontend:3000)，Ctrl+C 退出..."
+	@trap 'echo ">> 正在清理进程..."; kill 0; sleep 0.5; pkill -9 -f "nimo/backend/.venv/bin/python.*multiprocessing" 2>/dev/null || true' INT TERM EXIT; \
+		(cd backend && $(abspath $(VENV_PYTHON)) -m uvicorn agentpal.main:app \
+			--reload --reload-dir agentpal \
+			--host 0.0.0.0 --port 8099) & \
+		(cd frontend && npm run dev) & \
+		wait
 
 backend: $(VENV_DIR)
 	@echo ">> 启动后端服务 (http://localhost:8099)..."

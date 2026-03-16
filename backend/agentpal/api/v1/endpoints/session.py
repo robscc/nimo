@@ -19,7 +19,7 @@ from agentpal.database import get_db, utc_isoformat
 from agentpal.memory.factory import MemoryFactory
 from agentpal.models.llm_usage import LLMCallLog
 from agentpal.models.memory import MemoryRecord
-from agentpal.models.session import SessionRecord, SessionStatus
+from agentpal.models.session import SessionRecord, SessionStatus, SubAgentTask, TaskStatus
 from agentpal.services.session_event_bus import session_event_bus
 
 router = APIRouter()
@@ -41,6 +41,7 @@ class SessionSummary(BaseModel):
     channel: str
     model_name: str | None
     message_count: int
+    sub_tasks_count: int
     created_at: str
     updated_at: str
 
@@ -122,6 +123,14 @@ async def list_sessions(
         if rec.session_id not in first_msg_map:
             first_msg_map[rec.session_id] = rec.content
 
+    # 4. 批量查 sub_tasks_count
+    sub_tasks_result = await db.execute(
+        select(SubAgentTask.parent_session_id, func.count().label("cnt"))
+        .where(SubAgentTask.parent_session_id.in_(session_ids))
+        .group_by(SubAgentTask.parent_session_id)
+    )
+    sub_tasks_map: dict[str, int] = {row.parent_session_id: row.cnt for row in sub_tasks_result}
+
     summaries = []
     for s in sessions:
         raw_title = first_msg_map.get(s.id, "")
@@ -133,6 +142,7 @@ async def list_sessions(
                 channel=s.channel,
                 model_name=s.model_name,
                 message_count=count_map.get(s.id, 0),
+                sub_tasks_count=sub_tasks_map.get(s.id, 0),
                 created_at=utc_isoformat(s.created_at),
                 updated_at=utc_isoformat(s.updated_at),
             )
@@ -267,6 +277,44 @@ async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)):
     memory = MemoryFactory.create(settings.memory_backend, db=db)
     await memory.clear(session_id)
     await db.commit()
+
+
+class SubTaskSummary(BaseModel):
+    id: str
+    sub_session_id: str
+    task_prompt: str
+    status: str
+    agent_name: str | None
+    task_type: str | None
+    created_at: str
+    finished_at: str | None
+
+
+@router.get("/{session_id}/sub-tasks", response_model=list[SubTaskSummary])
+async def list_session_sub_tasks(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """列出指定主 session 下的所有 SubAgent 任务，按创建时间倒序。"""
+    result = await db.execute(
+        select(SubAgentTask)
+        .where(SubAgentTask.parent_session_id == session_id)
+        .order_by(SubAgentTask.created_at.desc())
+    )
+    tasks = result.scalars().all()
+    return [
+        SubTaskSummary(
+            id=t.id,
+            sub_session_id=t.sub_session_id,
+            task_prompt=t.task_prompt[:120] + ("…" if len(t.task_prompt) > 120 else ""),
+            status=t.status,
+            agent_name=t.agent_name,
+            task_type=t.task_type,
+            created_at=utc_isoformat(t.created_at),
+            finished_at=utc_isoformat(t.finished_at) if t.finished_at else None,
+        )
+        for t in tasks
+    ]
 
 
 @router.get("/{session_id}/messages", response_model=list[MessageOut])

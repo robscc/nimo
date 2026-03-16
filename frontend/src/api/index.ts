@@ -32,8 +32,20 @@ export interface SessionSummary {
   channel: string;
   model_name: string | null;
   message_count: number;
+  sub_tasks_count: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface SubTaskSummary {
+  id: string;
+  sub_session_id: string;
+  task_prompt: string;
+  status: "pending" | "running" | "done" | "failed" | "cancelled";
+  agent_name: string | null;
+  task_type: string | null;
+  created_at: string;
+  finished_at: string | null;
 }
 
 export interface HistoryMessageMeta {
@@ -61,6 +73,19 @@ export interface HistoryMessage {
   meta?: HistoryMessageMeta | null;
 }
 
+export interface TaskListItem {
+  task_id: string;
+  status: "pending" | "running" | "done" | "failed" | "cancelled";
+  agent_name: string | null;
+  task_type: string | null;
+  task_prompt: string;
+  parent_session_id: string;
+  result: string | null;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
 // ── API 方法 ──────────────────────────────────────────────
 
 export async function chat(req: ChatRequest): Promise<ChatResponse> {
@@ -70,6 +95,13 @@ export async function chat(req: ChatRequest): Promise<ChatResponse> {
 
 export async function getTaskStatus(taskId: string): Promise<TaskStatusResponse> {
   const { data } = await api.get<TaskStatusResponse>(`/agent/tasks/${taskId}`);
+  return data;
+}
+
+export async function listAllSubAgentTasks(status?: string, limit = 100): Promise<TaskListItem[]> {
+  const { data } = await api.get<TaskListItem[]>("/agent/tasks", {
+    params: { ...(status ? { status } : {}), limit },
+  });
   return data;
 }
 
@@ -99,6 +131,11 @@ export async function getSessionMessages(sessionId: string): Promise<HistoryMess
 
 export async function deleteSession(sessionId: string): Promise<void> {
   await api.delete(`/sessions/${sessionId}`);
+}
+
+export async function getSessionSubTasks(sessionId: string): Promise<SubTaskSummary[]> {
+  const { data } = await api.get<SubTaskSummary[]>(`/sessions/${sessionId}/sub-tasks`);
+  return data;
 }
 
 // ── Workspace API ─────────────────────────────────────────
