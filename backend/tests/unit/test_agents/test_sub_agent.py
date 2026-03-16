@@ -21,16 +21,20 @@ from agentpal.models.session import SubAgentTask, TaskStatus
 
 def _make_task(
     task_id: str = "task-001",
+    agent_name: str | None = None,
+    task_type: str | None = None,
     priority: int = 5,
     max_retries: int = 3,
     retry_count: int = 0,
 ) -> SubAgentTask:
-    task = SubAgentTask(
+    return SubAgentTask(
         id=task_id,
         parent_session_id="parent-session",
         sub_session_id=f"sub:parent-session:{task_id}",
         task_prompt="执行测试任务",
         status=TaskStatus.PENDING,
+        agent_name=agent_name,
+        task_type=task_type,
         priority=priority,
         retry_count=retry_count,
         max_retries=max_retries,
@@ -166,6 +170,8 @@ class TestSubAgentRun:
     @pytest.mark.asyncio
     async def test_run_saves_execution_log_on_failure(self, sub_agent: SubAgent):
         """run 失败后 execution_log 同样应被保存。"""
+        # 设置 max_retries=0，使失败直接标记 FAILED 而非进入重试
+        sub_agent._task.max_retries = 0
 
         async def inject_then_fail(_prompt, **_kwargs):
             sub_agent._execution_log.append({"type": "partial", "data": "before_fail"})
@@ -578,6 +584,8 @@ class TestSubAgentCoderScenario:
     @pytest.mark.asyncio
     async def test_coder_task_failure_records_error(self, coder_agent: SubAgent):
         """coder 任务失败时，error 字段应包含异常类型和消息。"""
+        # 设置 max_retries=0，使失败直接标记 FAILED 而非进入重试
+        coder_agent._task.max_retries = 0
         with patch.object(
             coder_agent, "reply",
             new_callable=AsyncMock,
@@ -609,7 +617,7 @@ class TestSubAgentCoderScenario:
         assert "llm_response" in log_types
         assert "final_result" in log_types
 
-        user_msgs = await sub_agent.memory.get_recent(sub_agent.session_id)
+        user_msgs = await coder_agent.memory.get_recent(coder_agent.session_id)
         roles = [m.role for m in user_msgs]
         assert "user" in [str(r) for r in roles]
         assert "assistant" in [str(r) for r in roles]
