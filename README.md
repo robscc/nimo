@@ -13,12 +13,14 @@
 
 ## ✨ 特性
 
-- 🧠 **智能对话** — 基于 AgentScope 框架，支持多模型配置
+- 🧠 **智能对话** — 基于 AgentScope 框架，支持多模型配置，流式输出（SSE）
 - 📱 **多渠道接入** — DingTalk（钉钉）、飞书（Feishu/Lark）、iMessage 开箱即用
-- 🤖 **SubAgent 支持** — 异步子代理执行复杂任务，各自维护独立 Session
+- 🤖 **SubAgent 支持** — 多角色异步子代理，独立 Session 上下文，支持独立模型配置
+- 🛠️ **工具系统** — 内置 6 个工具（文件读写、Shell、浏览器、时间），可视化开关管理 + 调用日志
+- ⏰ **定时任务** — 标准 Cron 表达式调度，自动执行 + 结果通知
+- 🔌 **技能扩展** — ZIP/URL 方式安装自定义技能包
 - 🌐 **前后端分离** — React 前端 + FastAPI 后端，提供可视化管理界面
-- 🔌 **插件化渠道** — 标准化 Channel 接口，轻松扩展新的消息渠道
-- 🧪 **测试驱动** — 完整的单元测试与集成测试覆盖
+- 🧪 **测试驱动** — 195+ 单元与集成测试，E2E 覆盖核心流程
 
 ## 🏗️ 架构概览
 
@@ -33,19 +35,21 @@
 ┌───────▼──────────────▼─────────────▼────────────────────┐
 │                    FastAPI Backend                         │
 │  ┌────────────────────────────────────────┐              │
-│  │         PersonalAssistant Agent        │              │
+│  │       PersonalAssistant Agent          │              │
 │  │  ┌─────────────────────────────────┐  │              │
 │  │  │   SubAgent Pool (Async Tasks)   │  │              │
 │  │  │  [SubAgent1] [SubAgent2] ...    │  │              │
 │  │  └─────────────────────────────────┘  │              │
 │  └────────────────────────────────────────┘              │
-│  ┌──────────────┐  ┌───────────────────┐                 │
-│  │ Session Mgr  │  │   Task Manager    │                 │
-│  └──────────────┘  └───────────────────┘                 │
+│  ┌──────────────┐  ┌──────────┐  ┌──────────────────┐   │
+│  │ Session Mgr  │  │ Tool Sys │  │ Cron Scheduler   │   │
+│  └──────────────┘  └──────────┘  └──────────────────┘   │
+│                         SQLite (WAL)                      │
 └──────────────────────────────────────────────────────────┘
         │
 ┌───────▼──────────────────────────────────────────────────┐
-│              React Frontend (Dashboard)                    │
+│          React Frontend (Dashboard)                        │
+│  Chat · Sessions · Tools · Skills · Tasks · Workspace     │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -68,8 +72,8 @@ cd nimo
 make dev
 
 # 或者分别启动
-make backend   # 启动后端 (http://localhost:8088)
-make frontend  # 启动前端 (http://localhost:3000)
+make backend   # 后端 http://localhost:8088
+make frontend  # 前端 http://localhost:3000
 ```
 
 ### Docker 部署
@@ -85,26 +89,36 @@ docker-compose up -d
 
 ## ⚙️ 配置
 
-复制 `.env.example` 到 `.env` 并填写：
+支持多种配置方式（优先级从高到低）：**环境变量 > `~/.nimo/config.yaml` > `.env` > 默认值**
 
-```env
-# LLM 配置
-LLM_MODEL=qwen-max
-LLM_API_KEY=your_api_key
+推荐使用 `~/.nimo/config.yaml`：
 
-# DingTalk
-DINGTALK_APP_KEY=
-DINGTALK_APP_SECRET=
+```yaml
+llm:
+  provider: compatible      # 兼容 OpenAI 格式的 API
+  model: qwen-plus
+  api_key: your_api_key
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
 
-# 飞书
-FEISHU_APP_ID=
-FEISHU_APP_SECRET=
+# 可选：消息渠道
+dingtalk:
+  app_key: ""
+  app_secret: ""
 
-# iMessage（仅 macOS）
-IMESSAGE_ENABLED=true
+feishu:
+  app_id: ""
+  app_secret: ""
+
+imessage:
+  enabled: false  # 仅 macOS
 ```
 
-详见 [配置文档](docs/configuration.md)。
+也可使用 `.env` 文件：
+
+```env
+LLM_MODEL=qwen-plus
+LLM_API_KEY=your_api_key
+```
 
 ## 📡 渠道配置
 
@@ -116,14 +130,14 @@ IMESSAGE_ENABLED=true
 
 ## 🤖 SubAgent
 
-SubAgent 支持异步执行长时任务，每个 SubAgent 有独立的 Session 上下文：
+SubAgent 支持异步执行长时任务，每个 SubAgent 有独立的 Session 上下文和可选的独立模型配置：
 
 ```python
 from agentpal.agents import PersonalAssistant
 
 assistant = PersonalAssistant(config)
 
-# 启动一个异步子任务
+# 派遣子代理执行任务
 task = await assistant.dispatch_sub_agent(
     task="帮我分析这份报告并生成摘要",
     context={"file": "report.pdf"},
@@ -134,21 +148,51 @@ task = await assistant.dispatch_sub_agent(
 status = await assistant.get_task_status(task.id)
 ```
 
-详见 [SubAgent 设计文档](docs/sub_agent.md)。
+内置默认角色：`researcher`（研究）、`coder`（编码），支持自定义添加。
+
+## 🛠️ 工具系统
+
+内置 6 个工具，通过前端 `/tools` 页面可视化管理：
+
+| 工具 | 说明 | 默认状态 |
+|------|------|------|
+| `get_current_time` | 获取当前时间 | ✅ 开启 |
+| `read_file` | 读取文件内容 | ✅ 开启 |
+| `browser_use` | 浏览器自动化 | ✅ 开启 |
+| `write_file` | 写入文件 | ❌ 关闭 |
+| `edit_file` | 编辑文件 | ❌ 关闭 |
+| `execute_shell_command` | 执行 Shell 命令 | ❌ 关闭 |
+
+## ⏰ 定时任务
+
+使用标准 5 段 Cron 表达式创建自动化任务：
+
+```
+# 每天早上 9 点发送日报
+0 9 * * *
+
+# 每周一提醒待办
+0 9 * * 1
+```
+
+任务执行后通过消息总线向主 Agent 发送通知，执行日志完整记录。
 
 ## 🧪 测试
 
 ```bash
-# 运行所有测试
+# 运行单元 + 集成测试（195 tests）
 make test
 
-# 运行单元测试
+# 仅单元测试
 make test-unit
 
-# 运行集成测试
+# 仅集成测试
 make test-integration
 
-# 生成覆盖率报告
+# E2E 测试（需前后端运行）
+cd backend && .venv/bin/pytest tests/e2e/ -v
+
+# 覆盖率报告
 make coverage
 ```
 
@@ -158,16 +202,21 @@ make coverage
 nimo/
 ├── .github/              # GitHub Actions & 模板
 ├── backend/              # FastAPI 后端
-│   ├── agentpal/        # 核心包
-│   │   ├── agents/      # Agent 实现
-│   │   ├── channels/    # 消息渠道
-│   │   ├── api/         # REST API
-│   │   ├── models/      # 数据模型
-│   │   └── services/    # 业务服务
-│   └── tests/           # 测试套件
-├── frontend/             # React 前端
+│   ├── agentpal/
+│   │   ├── agents/       # PersonalAssistant、SubAgent、CronAgent
+│   │   ├── channels/     # DingTalk、Feishu、iMessage
+│   │   ├── api/v1/       # REST API 路由
+│   │   ├── memory/       # 记忆模块（Buffer / SQLite / Hybrid）
+│   │   ├── models/       # SQLAlchemy ORM 模型
+│   │   ├── tools/        # 工具注册与内置工具
+│   │   └── services/     # 配置服务、Cron 调度器
+│   └── tests/            # unit / integration / e2e
+├── frontend/             # React + Vite + TypeScript + Tailwind
+│   └── src/
+│       ├── pages/        # Chat、Tools、Skills、Tasks、Sessions、Workspace
+│       ├── components/   # Layout、SessionPanel
+│       └── hooks/        # useTools、useSessions、useSkills、useCron ...
 ├── docs/                 # 项目文档
-├── scripts/              # 工具脚本
 └── docker-compose.yml
 ```
 
