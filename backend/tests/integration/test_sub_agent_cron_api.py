@@ -209,3 +209,191 @@ class TestCronAPI:
         })
         assert resp.status_code == 201
         assert resp.json()["agent_name"] == "coder"
+
+
+# ── Coder SubAgent 专项集成测试 ──────────────────────────
+
+
+class TestCoderSubAgentIntegration:
+    """验证 coder SubAgent 的配置、任务类型路由和 API 安全性。"""
+
+    @pytest.mark.asyncio
+    async def test_default_coder_accepted_task_types(self, client: AsyncClient):
+        """默认 coder 应支持 code / debug / script / implement / test 任务类型。"""
+        # list 触发默认创建
+        resp = await client.get("/api/v1/sub-agents")
+        assert resp.status_code == 200
+
+        agents = resp.json()
+        coder = next(a for a in agents if a["name"] == "coder")
+
+        expected_types = {"code", "debug", "script", "implement", "test"}
+        actual_types = set(coder["accepted_task_types"])
+        assert expected_types == actual_types
+
+    @pytest.mark.asyncio
+    async def test_coder_display_name(self, client: AsyncClient):
+        """默认 coder 的 display_name 应为 '编码员'。"""
+        resp = await client.get("/api/v1/sub-agents")
+        agents = resp.json()
+        coder = next(a for a in agents if a["name"] == "coder")
+
+        assert coder["display_name"] == "编码员"
+
+    @pytest.mark.asyncio
+    async def test_create_coder_with_custom_model(self, client: AsyncClient):
+        """为 coder 配置专用编码模型，has_custom_model 应为 True。"""
+        resp = await client.post("/api/v1/sub-agents", json={
+            "name": "coder-pro",
+            "display_name": "高级编码员",
+            "role_prompt": "你是一个专注于 Python 后端开发的专家编码员。",
+            "accepted_task_types": ["code", "debug", "refactor", "test"],
+            "model_name": "qwen-coder-plus",
+            "model_provider": "compatible",
+            "model_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "max_tool_rounds": 12,
+            "timeout_seconds": 600,
+        })
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["name"] == "coder-pro"
+        assert data["has_custom_model"] is True
+        assert data["model_name"] == "qwen-coder-plus"
+        assert data["max_tool_rounds"] == 12
+        assert data["timeout_seconds"] == 600
+
+    @pytest.mark.asyncio
+    async def test_api_does_not_expose_model_api_key(self, client: AsyncClient):
+        """API 响应中不应暴露 model_api_key 字段。"""
+        await client.post("/api/v1/sub-agents", json={
+            "name": "secure-coder",
+            "model_name": "qwen-coder",
+            "model_api_key": "sk-secret-key",
+            "accepted_task_types": ["code"],
+        })
+
+        resp = await client.get("/api/v1/sub-agents/secure-coder")
+        assert resp.status_code == 200
+        data = resp.json()
+        # 敏感字段不应出现在响应中
+        assert "model_api_key" not in data
+        # 有 model_name 时 has_custom_model 应为 True
+        assert data["has_custom_model"] is True
+
+    @pytest.mark.asyncio
+    async def test_coder_without_custom_model(self, client: AsyncClient):
+        """未配置自定义模型的 coder，has_custom_model 应为 False。"""
+        await client.post("/api/v1/sub-agents", json={
+            "name": "basic-coder",
+            "accepted_task_types": ["code"],
+        })
+
+        resp = await client.get("/api/v1/sub-agents/basic-coder")
+        assert resp.status_code == 200
+        assert resp.json()["has_custom_model"] is False
+
+    @pytest.mark.asyncio
+    async def test_update_coder_model_config(self, client: AsyncClient):
+        """更新 coder 的模型配置后，has_custom_model 应变为 True。"""
+        await client.post("/api/v1/sub-agents", json={
+            "name": "upgradable-coder",
+            "accepted_task_types": ["code"],
+        })
+
+        # 初始无自定义模型
+        resp = await client.get("/api/v1/sub-agents/upgradable-coder")
+        assert resp.json()["has_custom_model"] is False
+
+        # 更新添加自定义模型
+        patch_resp = await client.patch("/api/v1/sub-agents/upgradable-coder", json={
+            "model_name": "deepseek-coder",
+        })
+        assert patch_resp.status_code == 200
+        assert patch_resp.json()["has_custom_model"] is True
+        assert patch_resp.json()["model_name"] == "deepseek-coder"
+
+    @pytest.mark.asyncio
+    async def test_coder_max_tool_rounds_configurable(self, client: AsyncClient):
+        """coder 的 max_tool_rounds 应可配置，用于控制工具调用深度。"""
+        resp = await client.post("/api/v1/sub-agents", json={
+            "name": "deep-coder",
+            "accepted_task_types": ["code", "debug"],
+            "max_tool_rounds": 20,  # 更多轮次用于复杂调试
+        })
+        assert resp.status_code == 201
+        assert resp.json()["max_tool_rounds"] == 20
+
+    @pytest.mark.asyncio
+    async def test_coder_disable_and_reenable(self, client: AsyncClient):
+        """禁用/重新启用 coder SubAgent。"""
+        await client.post("/api/v1/sub-agents", json={
+            "name": "toggle-coder",
+            "accepted_task_types": ["code"],
+        })
+
+        # 禁用
+        resp = await client.patch("/api/v1/sub-agents/toggle-coder", json={"enabled": False})
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is False
+
+        # 重新启用
+        resp = await client.patch("/api/v1/sub-agents/toggle-coder", json={"enabled": True})
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_coder_add_extra_task_types(self, client: AsyncClient):
+        """可以为 coder 追加新的任务类型（如 refactor）。"""
+        await client.post("/api/v1/sub-agents", json={
+            "name": "versatile-coder",
+            "accepted_task_types": ["code", "debug"],
+        })
+
+        resp = await client.patch("/api/v1/sub-agents/versatile-coder", json={
+            "accepted_task_types": ["code", "debug", "refactor", "optimize"],
+        })
+        assert resp.status_code == 200
+        actual = set(resp.json()["accepted_task_types"])
+        assert {"code", "debug", "refactor", "optimize"} == actual
+
+    @pytest.mark.asyncio
+    async def test_cron_coding_schedule_weekdays(self, client: AsyncClient):
+        """为 coder 创建工作日代码检查定时任务。"""
+        resp = await client.post("/api/v1/cron", json={
+            "name": "每日代码检查",
+            "schedule": "0 8 * * 1-5",
+            "task_prompt": (
+                "检查仓库的代码质量：\n"
+                "1. 运行 ruff 检查 lint 问题\n"
+                "2. 运行 pytest 确认测试通过\n"
+                "3. 汇报结果"
+            ),
+            "agent_name": "coder",
+        })
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["agent_name"] == "coder"
+        assert data["schedule"] == "0 8 * * 1-5"
+        assert data["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_cron_coding_schedule_with_custom_coder(self, client: AsyncClient):
+        """为自定义 coder-pro 创建定时编码任务，验证 agent_name 正确关联。"""
+        # 先创建 coder-pro
+        create_resp = await client.post("/api/v1/sub-agents", json={
+            "name": "coder-pro-v2",
+            "display_name": "专业编码员",
+            "accepted_task_types": ["code", "test", "refactor"],
+            "model_name": "qwen-coder-plus",
+        })
+        assert create_resp.status_code == 201
+
+        # 为 coder-pro 创建定时任务
+        cron_resp = await client.post("/api/v1/cron", json={
+            "name": "自动化测试",
+            "schedule": "0 22 * * *",
+            "task_prompt": "运行全量测试套件，生成测试报告",
+            "agent_name": "coder-pro-v2",
+        })
+        assert cron_resp.status_code == 201
+        assert cron_resp.json()["agent_name"] == "coder-pro-v2"
