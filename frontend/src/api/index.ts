@@ -256,6 +256,11 @@ export async function updateServiceConfig(
   return data;
 }
 
+export async function reloadServiceConfig(): Promise<{ message: string; llm_model: string; llm_provider: string }> {
+  const { data } = await api.post("/config/reload");
+  return data;
+}
+
 // ── SubAgent API ─────────────────────────────────────────
 
 export interface SubAgentInfo {

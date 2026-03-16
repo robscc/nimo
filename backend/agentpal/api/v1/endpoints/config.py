@@ -33,11 +33,13 @@ async def get_config():
 
 @router.put("", response_model=ConfigResponse)
 async def update_config(req: ConfigUpdateRequest):
-    """更新服务配置（合并写入 ~/.nimo/config.yaml）。"""
+    """更新服务配置（合并写入 ~/.nimo/config.yaml 并自动重载）。"""
     settings = get_settings()
     mgr = ConfigFileManager(settings.workspace_dir)
     try:
         merged = mgr.update(req.config)
+        # 清除 lru_cache，使新配置立即生效
+        get_settings.cache_clear()
         return ConfigResponse(config=merged, path=str(mgr.config_path))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"配置更新失败: {e}")
@@ -51,3 +53,15 @@ async def init_config():
     created = mgr.save_defaults()
     config = mgr.load()
     return ConfigResponse(config=config, path=str(mgr.config_path))
+
+
+@router.post("/reload")
+async def reload_config():
+    """热重载配置：清除 Settings 缓存，下次请求使用最新 config.yaml。"""
+    get_settings.cache_clear()
+    new_settings = get_settings()
+    return {
+        "message": "配置已重载",
+        "llm_model": new_settings.llm_model,
+        "llm_provider": new_settings.llm_provider,
+    }

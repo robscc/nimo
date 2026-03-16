@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { RefreshCw, Loader2 } from "lucide-react";
+import { RefreshCw, Loader2, RotateCcw } from "lucide-react";
 import clsx from "clsx";
-import { getDashboardStats, type DashboardStats } from "../api";
+import { getDashboardStats, reloadServiceConfig, type DashboardStats } from "../api";
 
 // ── 数字格式化 ──────────────────────────────────────────────
 
@@ -187,6 +188,24 @@ function ToolRankingCard({
 // ── 系统状态面板组件 ──────────────────────────────────────────
 
 function SystemStatusCard({ stats }: { stats: DashboardStats }) {
+  const [reloading, setReloading] = useState(false);
+  const [reloadResult, setReloadResult] = useState<string | null>(null);
+
+  const handleReloadConfig = async () => {
+    setReloading(true);
+    setReloadResult(null);
+    try {
+      const res = await reloadServiceConfig();
+      setReloadResult(`${res.llm_provider} / ${res.llm_model}`);
+      setTimeout(() => setReloadResult(null), 4000);
+    } catch {
+      setReloadResult("重载失败");
+      setTimeout(() => setReloadResult(null), 4000);
+    } finally {
+      setReloading(false);
+    }
+  };
+
   const items = [
     {
       icon: "🧩",
@@ -248,6 +267,35 @@ function SystemStatusCard({ stats }: { stats: DashboardStats }) {
             </div>
           </div>
         ))}
+
+        {/* 重载配置 */}
+        <div className="flex items-center justify-between rounded-xl bg-gray-50 px-4 py-3">
+          <div className="flex items-center gap-3">
+            <span className="text-lg">🔄</span>
+            <span className="text-sm font-medium text-gray-700">配置</span>
+          </div>
+          <div className="flex items-center gap-2">
+            {reloadResult && (
+              <span className={clsx(
+                "text-xs",
+                reloadResult === "重载失败" ? "text-red-500" : "text-emerald-600"
+              )}>
+                {reloadResult}
+              </span>
+            )}
+            <button
+              onClick={handleReloadConfig}
+              disabled={reloading}
+              className={clsx(
+                "flex items-center gap-1 rounded-lg border border-gray-200 px-2.5 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-white hover:text-violet-600 hover:border-violet-300",
+                reloading && "opacity-50"
+              )}
+            >
+              <RotateCcw size={12} className={clsx(reloading && "animate-spin")} />
+              重载 config.yaml
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

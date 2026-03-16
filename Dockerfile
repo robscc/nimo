@@ -9,9 +9,6 @@ RUN npm run build
 # ── Stage 2: Python 运行时（后端 + 前端静态文件）──────────────
 FROM python:3.11-slim
 
-# 是否安装 Playwright Chromium（browser_use 工具需要，镜像 +500MB）
-ARG INSTALL_PLAYWRIGHT=false
-
 WORKDIR /app
 
 # 安装 Python 依赖（利用 layer cache：先装依赖，再拷源码）
@@ -22,9 +19,19 @@ deps = tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']; \
 subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--no-cache-dir'] + deps)" \
     && pip install --no-cache-dir uvicorn[standard]
 
-# 可选：安装 Playwright Chromium + 系统依赖
+# 可选：安装 Playwright Chromium + 系统依赖（ARG 放在 pip 之后，避免缓存失效）
+ARG INSTALL_PLAYWRIGHT=false
 RUN if [ "$INSTALL_PLAYWRIGHT" = "true" ]; then \
-        playwright install --with-deps chromium; \
+        sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+        && apt-get update \
+        && apt-get install -y --no-install-recommends \
+            libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 \
+            libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
+            libcairo2 libasound2 libwayland-client0 \
+            fonts-noto-cjk fonts-freefont-ttf \
+        && rm -rf /var/lib/apt/lists/* \
+        && playwright install chromium; \
     fi
 
 # 拷贝后端源码
