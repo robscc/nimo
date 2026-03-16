@@ -112,6 +112,31 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok", "version": "0.1.0"}
 
+    # ── 生产环境：前端 SPA 静态文件（必须放在所有路由之后）──
+    _static_dir = Path(__file__).resolve().parent.parent / "static"
+    if not settings.is_dev and _static_dir.is_dir():
+        # 静态资源（JS/CSS/图片等）
+        _assets_dir = _static_dir / "assets"
+        if _assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
+
+        # SPA fallback：非 API/非静态文件的路径一律返回 index.html
+        _index_html = (_static_dir / "index.html").read_text()
+
+        from fastapi.responses import HTMLResponse
+
+        @app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)
+        async def spa_fallback(path: str):
+            # 已有的静态文件直接返回
+            file_path = _static_dir / path
+            if file_path.is_file():
+                from starlette.responses import FileResponse
+
+                return FileResponse(str(file_path))
+            return HTMLResponse(_index_html)
+
+        logger.info(f"已挂载前端静态文件: {_static_dir}")
+
     return app
 
 
