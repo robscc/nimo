@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import DateTime, Index, String, Text
+from sqlalchemy import DateTime, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -97,6 +97,12 @@ class SubAgentTask(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     meta: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
+    # ── 优先级 & 重试 ──────────────────────────────────────
+    priority: Mapped[int] = mapped_column(Integer, default=5, nullable=False, server_default="5")
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False, server_default="3")
+
     __table_args__ = (
         Index("ix_task_parent_status", "parent_session_id", "status"),
+        Index("ix_task_priority", "status", "priority"),
     )

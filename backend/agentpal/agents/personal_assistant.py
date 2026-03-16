@@ -430,6 +430,8 @@ class PersonalAssistant(BaseAgent):
         context: dict[str, Any] | None = None,
         task_type: str | None = None,
         agent_name: str | None = None,
+        priority: int = 5,
+        max_retries: int = 3,
     ) -> SubAgentTask:
         """创建并异步启动一个 SubAgent 任务。
 
@@ -444,6 +446,8 @@ class PersonalAssistant(BaseAgent):
             context:      附加上下文
             task_type:    任务类型（用于自动路由）
             agent_name:   指定 SubAgent 名称
+            priority:     优先级 1-10（10 最高），默认 5
+            max_retries:  最大重试次数 0-10，默认 3
         """
         from agentpal.agents.registry import SubAgentRegistry
         from agentpal.agents.sub_agent import SubAgent
@@ -470,6 +474,10 @@ class PersonalAssistant(BaseAgent):
             model_config = agent_def.get_model_config(self._model_config)
             max_tool_rounds = agent_def.max_tool_rounds
 
+        # Clamp priority and max_retries
+        priority = max(1, min(10, priority))
+        max_retries = max(0, min(10, max_retries))
+
         task = SubAgentTask(
             id=task_id,
             parent_session_id=self.session_id,
@@ -480,6 +488,8 @@ class PersonalAssistant(BaseAgent):
             task_type=task_type,
             execution_log=[],
             meta=context or {},
+            priority=priority,
+            max_retries=max_retries,
         )
         db.add(task)
         await db.flush()

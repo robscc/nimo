@@ -19,22 +19,21 @@ from agentpal.memory.buffer import BufferMemory
 from agentpal.models.session import SubAgentTask, TaskStatus
 
 
-# ── 辅助工厂 ─────────────────────────────────────────────────────────
-
-
 def _make_task(
     task_id: str = "task-001",
-    agent_name: str | None = None,
-    task_type: str | None = None,
+    priority: int = 5,
+    max_retries: int = 3,
+    retry_count: int = 0,
 ) -> SubAgentTask:
-    return SubAgentTask(
+    task = SubAgentTask(
         id=task_id,
         parent_session_id="parent-session",
         sub_session_id=f"sub:parent-session:{task_id}",
         task_prompt="执行测试任务",
         status=TaskStatus.PENDING,
-        agent_name=agent_name,
-        task_type=task_type,
+        priority=priority,
+        retry_count=retry_count,
+        max_retries=max_retries,
     )
 
 
@@ -123,15 +122,18 @@ class TestSubAgentRun:
 
     @pytest.mark.asyncio
     async def test_run_failure_updates_status(self, sub_agent: SubAgent):
-        """run 抛异常时状态变为 FAILED，error 包含异常类型与消息。"""
-        with patch.object(sub_agent, "reply", new_callable=AsyncMock, side_effect=RuntimeError("LLM Error")):
+        """max_retries=3 → 首次失败进入重试（status=PENDING），不直接 FAILED。"""
+        with (
+            patch.object(sub_agent, "reply", side_effect=RuntimeError("LLM Error")),
+            patch("agentpal.agents.sub_agent.asyncio.create_task") as mock_create_task,
+        ):
             result = await sub_agent.run("执行任务")
 
         assert result == ""
-        assert sub_agent._task.status == TaskStatus.FAILED
-        assert "RuntimeError" in sub_agent._task.error
-        assert "LLM Error" in sub_agent._task.error
-        assert sub_agent._task.finished_at is not None
+        # 首次失败且 retry_count < max_retries → 进入重试
+        assert sub_agent._task.status == TaskStatus.PENDING
+        assert sub_agent._task.retry_count == 1
+        mock_create_task.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_run_sets_running_before_reply(self, sub_agent: SubAgent):
@@ -606,3 +608,123 @@ class TestSubAgentCoderScenario:
         assert "user_message" in log_types
         assert "llm_response" in log_types
         assert "final_result" in log_types
+
+        user_msgs = await sub_agent.memory.get_recent(sub_agent.session_id)
+        roles = [m.role for m in user_msgs]
+        assert "user" in [str(r) for r in roles]
+        assert "assistant" in [str(r) for r in roles]
+
+
+class TestSubAgentRetry:
+    """SubAgent 自动重试逻辑。"""
+
+    @pytest.mark.asyncio
+    async def test_retry_increments_count(self, mock_db):
+        """失败时 retry_count 递增，状态重置为 PENDING。"""
+        task = _make_task(max_retries=3, retry_count=0)
+        agent = SubAgent(
+            session_id="sub:p:retry-1",
+            memory=BufferMemory(max_size=10),
+            task=task,
+            db=mock_db,
+        )
+
+        with (
+            patch.object(agent, "reply", side_effect=RuntimeError("fail")),
+            patch("agentpal.agents.sub_agent.asyncio.create_task"),
+        ):
+            await agent.run("task")
+
+        assert task.retry_count == 1
+        assert task.status == TaskStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_max_retries_zero_fails_immediately(self, mock_db):
+        """max_retries=0 时失败直接标记 FAILED，不重试。"""
+        task = _make_task(max_retries=0, retry_count=0)
+        agent = SubAgent(
+            session_id="sub:p:no-retry",
+            memory=BufferMemory(max_size=10),
+            task=task,
+            db=mock_db,
+        )
+
+        with patch.object(agent, "reply", side_effect=RuntimeError("fail")):
+            await agent.run("task")
+
+        assert task.status == TaskStatus.FAILED
+        assert task.retry_count == 0
+        assert "RuntimeError" in task.error
+
+    @pytest.mark.asyncio
+    async def test_exhausted_retries_marks_failed(self, mock_db):
+        """retry_count == max_retries 时应标记 FAILED。"""
+        task = _make_task(max_retries=2, retry_count=2)
+        agent = SubAgent(
+            session_id="sub:p:exhausted",
+            memory=BufferMemory(max_size=10),
+            task=task,
+            db=mock_db,
+        )
+
+        with patch.object(agent, "reply", side_effect=RuntimeError("fail")):
+            await agent.run("task")
+
+        assert task.status == TaskStatus.FAILED
+        assert task.retry_count == 2  # 不再递增
+
+    @pytest.mark.asyncio
+    async def test_execution_log_preserved_across_retries(self, mock_db):
+        """重试时 execution_log 应保留之前的记录。"""
+        task = _make_task(max_retries=3, retry_count=0)
+        agent = SubAgent(
+            session_id="sub:p:log-retry",
+            memory=BufferMemory(max_size=10),
+            task=task,
+            db=mock_db,
+        )
+
+        with (
+            patch.object(agent, "reply", side_effect=RuntimeError("fail")),
+            patch("agentpal.agents.sub_agent.asyncio.create_task"),
+        ):
+            await agent.run("task")
+
+        log_types = [entry["type"] for entry in task.execution_log]
+        assert "retry_scheduled" in log_types
+
+
+class TestSubAgentPriority:
+    """SubAgent 优先级字段。"""
+
+    def test_default_priority(self):
+        """默认优先级为 5。"""
+        task = _make_task()
+        assert task.priority == 5
+
+    def test_custom_priority(self):
+        """支持自定义优先级。"""
+        task = _make_task(priority=9)
+        assert task.priority == 9
+
+    def test_default_max_retries(self):
+        """默认 max_retries 为 3。"""
+        task = _make_task()
+        assert task.max_retries == 3
+
+    def test_custom_max_retries(self):
+        """支持自定义 max_retries。"""
+        task = _make_task(max_retries=0)
+        assert task.max_retries == 0
+
+    def test_priority_sorting(self):
+        """高优先级任务排在前面。"""
+        tasks = [
+            _make_task(task_id="low", priority=1),
+            _make_task(task_id="high", priority=10),
+            _make_task(task_id="mid", priority=5),
+        ]
+        sorted_tasks = sorted(tasks, key=lambda t: t.priority, reverse=True)
+        assert sorted_tasks[0].id == "high"
+        assert sorted_tasks[1].id == "mid"
+        assert sorted_tasks[2].id == "low"

@@ -7,9 +7,9 @@ from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,6 +57,8 @@ class DispatchRequest(BaseModel):
     context: dict[str, Any] | None = None
     task_type: str | None = None
     agent_name: str | None = None
+    priority: int = Field(default=5, ge=1, le=10, description="任务优先级 1-10（10 最高）")
+    max_retries: int = Field(default=3, ge=0, le=10, description="最大重试次数 0-10")
 
 
 class TaskStatusResponse(BaseModel):
@@ -66,6 +68,17 @@ class TaskStatusResponse(BaseModel):
     error: str | None
     agent_name: str | None = None
     task_type: str | None = None
+    priority: int = 5
+    retry_count: int = 0
+    max_retries: int = 3
+    created_at: str | None = None
+
+
+class TaskListResponse(BaseModel):
+    items: list[TaskStatusResponse]
+    total: int
+    limit: int
+    offset: int
 
 
 class TaskListItem(BaseModel):
@@ -145,6 +158,8 @@ async def dispatch_sub_agent(req: DispatchRequest, db: AsyncSession = Depends(ge
         context=req.context,
         task_type=req.task_type,
         agent_name=req.agent_name,
+        priority=req.priority,
+        max_retries=req.max_retries,
     )
     return TaskStatusResponse(
         task_id=task.id,
@@ -153,6 +168,10 @@ async def dispatch_sub_agent(req: DispatchRequest, db: AsyncSession = Depends(ge
         error=task.error,
         agent_name=task.agent_name,
         task_type=task.task_type,
+        priority=task.priority,
+        retry_count=task.retry_count,
+        max_retries=task.max_retries,
+        created_at=utc_isoformat(task.created_at),
     )
 
 
@@ -170,41 +189,74 @@ async def get_task_status(task_id: str, db: AsyncSession = Depends(get_db)):
         error=task.error,
         agent_name=task.agent_name,
         task_type=task.task_type,
+        priority=task.priority,
+        retry_count=task.retry_count,
+        max_retries=task.max_retries,
+        created_at=utc_isoformat(task.created_at),
     )
 
 
-@router.get("/tasks", response_model=list[TaskListItem])
+@router.get("/tasks", response_model=TaskListResponse)
 async def list_tasks(
-    status: str | None = None,
-    limit: int = 100,
+    status: str | None = Query(None, description="按状态过滤"),
+    priority_min: int | None = Query(None, ge=1, le=10, description="最低优先级"),
+    priority_max: int | None = Query(None, ge=1, le=10, description="最高优先级"),
+    parent_session_id: str | None = Query(None, description="按父会话过滤"),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    """列出所有 SubAgent 历史任务，按创建时间倒序。
+    """列出 SubAgent 任务，支持状态/优先级/分页过滤。"""
+    from sqlalchemy import func
 
-    Args:
-        status: 可选过滤状态（pending/running/done/failed/cancelled）
-        limit: 最多返回条数（默认 100）
-    """
-    stmt = select(SubAgentTask).order_by(SubAgentTask.created_at.desc()).limit(limit)
+    # 构建查询条件
+    query = select(SubAgentTask)
+    count_query = select(func.count()).select_from(SubAgentTask)
+
     if status:
-        stmt = stmt.where(SubAgentTask.status == status)
-    result = await db.execute(stmt)
+        query = query.where(SubAgentTask.status == status)
+        count_query = count_query.where(SubAgentTask.status == status)
+    if priority_min is not None:
+        query = query.where(SubAgentTask.priority >= priority_min)
+        count_query = count_query.where(SubAgentTask.priority >= priority_min)
+    if priority_max is not None:
+        query = query.where(SubAgentTask.priority <= priority_max)
+        count_query = count_query.where(SubAgentTask.priority <= priority_max)
+    if parent_session_id:
+        query = query.where(SubAgentTask.parent_session_id == parent_session_id)
+        count_query = count_query.where(SubAgentTask.parent_session_id == parent_session_id)
+
+    # 计算总数
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    # 排序：优先级高 → 创建时间新
+    query = query.order_by(
+        SubAgentTask.priority.desc(),
+        SubAgentTask.created_at.desc(),
+    ).offset(offset).limit(limit)
+
+    result = await db.execute(query)
     tasks = result.scalars().all()
-    return [
-        TaskListItem(
+
+    items = [
+        TaskStatusResponse(
             task_id=t.id,
             status=t.status,
-            agent_name=t.agent_name,
-            task_type=t.task_type,
-            task_prompt=t.task_prompt,
-            parent_session_id=t.parent_session_id,
             result=t.result,
             error=t.error,
+            agent_name=t.agent_name,
+            task_type=t.task_type,
+            priority=t.priority,
+            retry_count=t.retry_count,
+            max_retries=t.max_retries,
             created_at=utc_isoformat(t.created_at),
-            finished_at=utc_isoformat(t.finished_at) if t.finished_at else None,
         )
         for t in tasks
     ]
+
+    return TaskListResponse(items=items, total=total, limit=limit, offset=offset)
+
 
 
 # ── Tool Guard ────────────────────────────────────────────

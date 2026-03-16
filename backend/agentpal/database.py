@@ -58,6 +58,10 @@ async def run_migrations() -> None:
         ("cron_jobs", "target_session_id", "ALTER TABLE cron_jobs ADD COLUMN target_session_id VARCHAR(128)"),
         # sessions: tool_guard_threshold (added for Tool Guard)
         ("sessions", "tool_guard_threshold", "ALTER TABLE sessions ADD COLUMN tool_guard_threshold INTEGER"),
+        # sub_agent_tasks: priority / retry_count / max_retries (added for Priority Queue)
+        ("sub_agent_tasks", "priority", "ALTER TABLE sub_agent_tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 5"),
+        ("sub_agent_tasks", "retry_count", "ALTER TABLE sub_agent_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"),
+        ("sub_agent_tasks", "max_retries", "ALTER TABLE sub_agent_tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3"),
     ]
     async with engine.begin() as conn:
         for table, column, sql in migrations:

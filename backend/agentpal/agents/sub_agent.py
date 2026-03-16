@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import traceback
 import uuid
@@ -62,7 +63,10 @@ class SubAgent(BaseAgent):
     # ── 主入口 ────────────────────────────────────────────
 
     async def run(self, task_prompt: str) -> str:
-        """异步执行任务，自动更新任务状态和执行日志。"""
+        """异步执行任务，自动更新任务状态和执行日志。
+
+        失败时自动重试（指数退避），超过 max_retries 则标记 FAILED。
+        """
         await self._update_status(TaskStatus.RUNNING)
 
         # 检查是否有来自其他 Agent 的消息
@@ -76,8 +80,38 @@ class SubAgent(BaseAgent):
         except Exception as exc:  # noqa: BLE001
             error_msg = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             self._task.execution_log = self._execution_log
+
+            # ── 自动重试逻辑 ──────────────────────────────────
+            if self._task.retry_count < self._task.max_retries:
+                self._task.retry_count += 1
+                retry_count = self._task.retry_count
+                backoff = min(2 ** retry_count, 30)
+                self._log("retry_scheduled", {
+                    "retry_count": retry_count,
+                    "max_retries": self._task.max_retries,
+                    "backoff_seconds": backoff,
+                    "error": error_msg[:500],
+                })
+                logger.info(
+                    "SubAgent task {} retry {}/{} after {}s",
+                    self._task.id, retry_count, self._task.max_retries, backoff,
+                )
+                self._task.execution_log = self._execution_log
+                await self._update_status(TaskStatus.PENDING)
+                asyncio.create_task(self._retry(task_prompt, backoff))
+                return ""
+
             await self._update_status(TaskStatus.FAILED, error=error_msg)
             return ""
+
+    async def _retry(self, task_prompt: str, backoff: float) -> None:
+        """延迟后重新执行任务（指数退避）。"""
+        await asyncio.sleep(backoff)
+        self._log("retry_start", {
+            "retry_count": self._task.retry_count,
+            "max_retries": self._task.max_retries,
+        })
+        await self.run(task_prompt)
 
     async def reply(self, user_input: str, **kwargs: Any) -> str:
         """执行子任务：角色 prompt + 多轮工具调用 + 完整日志。"""
