@@ -721,7 +721,115 @@ def cron_cli(
         return _text_response(f"<error>操作失败: {e}</error>")
 
 
-# ── 10. execute_python_code ──────────────────────────────
+# ── 10. dispatch_sub_agent ───────────────────────────────
+
+
+async def dispatch_sub_agent(
+    task_prompt: str,
+    parent_session_id: str,
+    task_type: str = "",
+    agent_name: str = "",
+    wait_seconds: int = 120,
+) -> ToolResponse:
+    """将子任务委托给专业 SubAgent 执行，并等待结果返回。
+
+    Args:
+        task_prompt: 要委托执行的任务描述（越详细越好）
+        parent_session_id: 当前主 Agent 的 session_id（见系统提示 Runtime Environment）
+        task_type: 任务类型，用于自动路由到合适的 SubAgent（可选）
+                   可选值: code / debug / script / research / summarize / analyze 等
+        agent_name: 直接指定 SubAgent 名称（可选），如 "coder"、"researcher"
+                    agent_name 优先级高于 task_type
+        wait_seconds: 最长等待秒数（默认 120），超时后返回 task_id 供后续查询
+
+    Returns:
+        SubAgent 执行结果文本，超时时返回任务 ID 和当前状态
+    """
+    import asyncio
+    import uuid
+
+    from agentpal.agents.personal_assistant import _default_model_config
+    from agentpal.agents.registry import SubAgentRegistry
+    from agentpal.agents.sub_agent import SubAgent
+    from agentpal.database import AsyncSessionLocal
+    from agentpal.memory.factory import MemoryFactory
+    from agentpal.models.agent import SubAgentDefinition
+    from agentpal.models.session import SubAgentTask, TaskStatus
+
+    async def _run() -> str:
+        task_id = str(uuid.uuid4())
+        sub_session_id = f"sub:{parent_session_id}:{task_id}"
+
+        async with AsyncSessionLocal() as db:
+            # 1. 查找 SubAgent 定义（与 PersonalAssistant.dispatch_sub_agent 逻辑一致）
+            registry = SubAgentRegistry(db)
+            agent_def: SubAgentDefinition | None = None
+            role_prompt = ""
+            max_tool_rounds = 8
+            resolved_agent_name = agent_name or None
+            model_config = _default_model_config()
+
+            if agent_name:
+                agent_def = await db.get(SubAgentDefinition, agent_name)
+            elif task_type:
+                agent_def = await registry.find_agent_for_task(task_type)
+
+            if agent_def:
+                resolved_agent_name = agent_def.name
+                role_prompt = agent_def.role_prompt or ""
+                model_config = agent_def.get_model_config(model_config)
+                max_tool_rounds = agent_def.max_tool_rounds
+
+            # 2. 创建任务记录
+            task = SubAgentTask(
+                id=task_id,
+                parent_session_id=parent_session_id,
+                sub_session_id=sub_session_id,
+                task_prompt=task_prompt,
+                status=TaskStatus.PENDING,
+                agent_name=resolved_agent_name,
+                task_type=task_type or None,
+                execution_log=[],
+                meta={},
+            )
+            db.add(task)
+            await db.commit()
+
+            # 3. 运行 SubAgent（在主 event loop 内协作执行，不阻塞其他请求）
+            sub_memory = MemoryFactory.create("buffer")
+            sub_agent = SubAgent(
+                session_id=sub_session_id,
+                memory=sub_memory,
+                task=task,
+                db=db,
+                model_config=model_config,
+                role_prompt=role_prompt,
+                max_tool_rounds=max_tool_rounds,
+                parent_session_id=parent_session_id,
+            )
+            result = await sub_agent.run(task_prompt)
+            await db.commit()
+
+            agent_label = resolved_agent_name or "SubAgent"
+            if task.status == TaskStatus.DONE:
+                return f"[{agent_label} 执行完毕]\n\n{result}"
+            else:
+                error_info = f"\n\n错误: {task.error}" if task.error else ""
+                return f"[{agent_label} 执行失败]\n任务 ID: {task_id}{error_info}"
+
+    try:
+        result_text = await asyncio.wait_for(_run(), timeout=wait_seconds)
+        return _text_response(result_text)
+    except asyncio.TimeoutError:
+        return _text_response(
+            f"SubAgent 执行超时（{wait_seconds} 秒），任务仍在后台运行。\n"
+            f"可在 /tasks 页面查看进度。"
+        )
+    except Exception as e:
+        return _text_response(f"<error>SubAgent 派遣失败: {e}</error>")
+
+
+# ── 11. execute_python_code ──────────────────────────────
 
 
 def execute_python_code(
@@ -886,5 +994,12 @@ BUILTIN_TOOLS: list[dict] = [
         "description": "在独立子进程中动态执行 Python 代码，支持安装依赖包",
         "icon": "Code2",
         "dangerous": True,
+    },
+    {
+        "name": "dispatch_sub_agent",
+        "func": dispatch_sub_agent,
+        "description": "将子任务委托给专业 SubAgent（coder/researcher）执行，等待结果返回",
+        "icon": "Bot",
+        "dangerous": False,
     },
 ]

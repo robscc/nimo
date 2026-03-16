@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.agents.personal_assistant import PersonalAssistant
 from agentpal.config import get_settings
-from agentpal.database import get_db
+from agentpal.database import get_db, utc_isoformat
 from agentpal.memory.factory import MemoryFactory
 from agentpal.models.session import SessionRecord, SessionStatus, SubAgentTask
 
@@ -66,6 +66,19 @@ class TaskStatusResponse(BaseModel):
     error: str | None
     agent_name: str | None = None
     task_type: str | None = None
+
+
+class TaskListItem(BaseModel):
+    task_id: str
+    status: str
+    agent_name: str | None
+    task_type: str | None
+    task_prompt: str
+    parent_session_id: str
+    result: str | None
+    error: str | None
+    created_at: str
+    finished_at: str | None
 
 
 @router.post("/chat")
@@ -158,6 +171,40 @@ async def get_task_status(task_id: str, db: AsyncSession = Depends(get_db)):
         agent_name=task.agent_name,
         task_type=task.task_type,
     )
+
+
+@router.get("/tasks", response_model=list[TaskListItem])
+async def list_tasks(
+    status: str | None = None,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+):
+    """列出所有 SubAgent 历史任务，按创建时间倒序。
+
+    Args:
+        status: 可选过滤状态（pending/running/done/failed/cancelled）
+        limit: 最多返回条数（默认 100）
+    """
+    stmt = select(SubAgentTask).order_by(SubAgentTask.created_at.desc()).limit(limit)
+    if status:
+        stmt = stmt.where(SubAgentTask.status == status)
+    result = await db.execute(stmt)
+    tasks = result.scalars().all()
+    return [
+        TaskListItem(
+            task_id=t.id,
+            status=t.status,
+            agent_name=t.agent_name,
+            task_type=t.task_type,
+            task_prompt=t.task_prompt,
+            parent_session_id=t.parent_session_id,
+            result=t.result,
+            error=t.error,
+            created_at=utc_isoformat(t.created_at),
+            finished_at=utc_isoformat(t.finished_at) if t.finished_at else None,
+        )
+        for t in tasks
+    ]
 
 
 # ── Tool Guard ────────────────────────────────────────────

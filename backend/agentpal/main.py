@@ -43,6 +43,21 @@ async def lifespan(app: FastAPI):
         await db.commit()
     logger.info("SubAgent 默认角色初始化完成 ✅")
 
+    # 清理上次意外中断的 running 任务（服务重启后不可能自动完成）
+    from sqlalchemy import update
+
+    from agentpal.models.session import SubAgentTask, TaskStatus
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            update(SubAgentTask)
+            .where(SubAgentTask.status.in_([TaskStatus.RUNNING, TaskStatus.PENDING]))
+            .values(status=TaskStatus.FAILED, error="服务重启，任务中断")
+        )
+        if result.rowcount:
+            logger.warning(f"清理了 {result.rowcount} 个中断任务（running/pending → failed）")
+        await db.commit()
+
     # 启动 Cron 调度器
     from agentpal.services.cron_scheduler import cron_scheduler
 

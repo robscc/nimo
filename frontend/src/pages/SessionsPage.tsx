@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  MessageSquare, Trash2, Search, Cpu, Clock, Hash,
+  MessageSquare, Trash2, Search, Cpu, Hash,
   Loader2, MessagesSquare, ChevronDown, ChevronRight, ExternalLink,
+  Bot, CheckCircle2, XCircle, AlertCircle, Timer,
 } from "lucide-react";
 import clsx from "clsx";
 import { useAllSessions } from "../hooks/useSessions";
-import { deleteSession, type SessionSummary } from "../api";
+import { deleteSession, getSessionSubTasks, type SessionSummary, type SubTaskSummary } from "../api";
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -30,6 +31,90 @@ function formatDate(iso: string): string {
   });
 }
 
+// ── SubTask helpers ────────────────────────────────────────
+
+const STATUS_CONFIG = {
+  done:      { icon: CheckCircle2, color: "text-green-500",  bg: "bg-green-50",  label: "完成"   },
+  failed:    { icon: XCircle,      color: "text-red-500",    bg: "bg-red-50",    label: "失败"   },
+  running:   { icon: Loader2,      color: "text-amber-500",  bg: "bg-amber-50",  label: "执行中", spin: true },
+  pending:   { icon: Timer,        color: "text-gray-400",   bg: "bg-gray-50",   label: "等待中" },
+  cancelled: { icon: AlertCircle,  color: "text-gray-400",   bg: "bg-gray-50",   label: "已取消" },
+} as const;
+
+function SubTaskItem({ task }: { task: SubTaskSummary }) {
+  const cfg = STATUS_CONFIG[task.status as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.pending;
+  const Icon = cfg.icon;
+
+  return (
+    <div className="flex items-start gap-2.5 px-3 py-2 rounded-lg bg-white border border-gray-100 hover:border-gray-200 transition-colors">
+      {/* Status icon */}
+      <div className={clsx("mt-0.5 shrink-0", cfg.color)}>
+        <Icon size={13} className={"spin" in cfg ? "animate-spin" : undefined} />
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {/* Agent badge */}
+          {task.agent_name && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-nimo-100 text-nimo-700">
+              <Bot size={9} />
+              {task.agent_name}
+            </span>
+          )}
+          {task.task_type && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-mono">
+              {task.task_type}
+            </span>
+          )}
+          {/* Status badge */}
+          <span className={clsx("text-[10px] px-1.5 py-0.5 rounded font-medium", cfg.bg, cfg.color)}>
+            {cfg.label}
+          </span>
+          {/* Time */}
+          <span className="text-[10px] text-gray-400 ml-auto shrink-0">
+            {relativeTime(task.created_at)}
+          </span>
+        </div>
+        {/* Prompt */}
+        <p className="text-xs text-gray-600 mt-1 leading-relaxed line-clamp-2">
+          {task.task_prompt}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function SubTaskList({ sessionId }: { sessionId: string }) {
+  const { data: tasks = [], isLoading } = useQuery({
+    queryKey: ["session-sub-tasks", sessionId],
+    queryFn: () => getSessionSubTasks(sessionId),
+    staleTime: 15_000,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-1.5 py-2 text-xs text-gray-400">
+        <Loader2 size={12} className="animate-spin" /> 加载子任务…
+      </div>
+    );
+  }
+
+  if (tasks.length === 0) {
+    return <p className="text-xs text-gray-400 py-1">暂无子任务记录</p>;
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {tasks.map((t) => (
+        <SubTaskItem key={t.id} task={t} />
+      ))}
+    </div>
+  );
+}
+
+// ── SessionRow ─────────────────────────────────────────────
+
 function SessionRow({
   session,
   onOpen,
@@ -43,6 +128,7 @@ function SessionRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const isDingtalk = session.channel === "dingtalk";
+  const hasSubTasks = session.sub_tasks_count > 0;
 
   return (
     <div className={clsx(
@@ -77,6 +163,18 @@ function SessionRow({
           <p className="text-xs text-gray-400 mt-0.5">{relativeTime(session.updated_at)}</p>
         </div>
 
+        {/* Sub-tasks badge */}
+        {hasSubTasks && (
+          <span
+            className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-nimo-50 text-nimo-600 shrink-0 cursor-pointer"
+            onClick={() => setExpanded(true)}
+            title={`${session.sub_tasks_count} 个 SubAgent 子任务`}
+          >
+            <Bot size={10} />
+            {session.sub_tasks_count}
+          </span>
+        )}
+
         {/* Model badge */}
         <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 shrink-0">
           <Cpu size={10} />
@@ -99,21 +197,22 @@ function SessionRow({
             <ExternalLink size={14} />
           </button>
           {!isDingtalk && (
-          <button
-            onClick={onDelete}
-            disabled={deleting}
-            className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-40"
-            title="删除会话"
-          >
-            <Trash2 size={14} />
-          </button>
+            <button
+              onClick={onDelete}
+              disabled={deleting}
+              className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-40"
+              title="删除会话"
+            >
+              <Trash2 size={14} />
+            </button>
           )}
         </div>
       </div>
 
       {/* Expanded detail */}
       {expanded && (
-        <div className="px-4 pb-3 pt-1 border-t mx-4 mt-0">
+        <div className="px-4 pb-4 pt-1 border-t mx-4 mt-0">
+          {/* Session meta grid */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
             <div className="space-y-0.5">
               <p className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">模型</p>
@@ -136,11 +235,29 @@ function SessionRow({
             <p className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">Session ID</p>
             <p className="text-xs font-mono text-gray-500 mt-0.5 select-all">{session.id}</p>
           </div>
+
+          {/* Sub-tasks section */}
+          <div className="mt-4">
+            <div className="flex items-center gap-1.5 mb-2">
+              <Bot size={12} className="text-nimo-500" />
+              <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
+                SubAgent 子任务
+                {hasSubTasks && (
+                  <span className="ml-1.5 text-nimo-500 normal-case font-normal">
+                    ({session.sub_tasks_count})
+                  </span>
+                )}
+              </p>
+            </div>
+            <SubTaskList sessionId={session.id} />
+          </div>
         </div>
       )}
     </div>
   );
 }
+
+// ── Page ───────────────────────────────────────────────────
 
 export default function SessionsPage() {
   const navigate = useNavigate();
@@ -153,9 +270,7 @@ export default function SessionsPage() {
     !search || s.title.toLowerCase().includes(search.toLowerCase()) || s.id.includes(search)
   );
 
-  const handleOpen = (id: string) => {
-    navigate(`/chat?session=${id}`);
-  };
+  const handleOpen = (id: string) => navigate(`/chat?session=${id}`);
 
   const handleDelete = async (id: string) => {
     setDeletingId(id);
@@ -168,6 +283,7 @@ export default function SessionsPage() {
   };
 
   const totalMessages = sessions.reduce((sum, s) => sum + s.message_count, 0);
+  const totalSubTasks = sessions.reduce((sum, s) => sum + s.sub_tasks_count, 0);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -185,6 +301,11 @@ export default function SessionsPage() {
             <span className="flex items-center gap-1">
               <Hash size={12} /> {totalMessages} 条消息
             </span>
+            {totalSubTasks > 0 && (
+              <span className="flex items-center gap-1 text-nimo-500">
+                <Bot size={12} /> {totalSubTasks} 个子任务
+              </span>
+            )}
           </div>
         </div>
 
