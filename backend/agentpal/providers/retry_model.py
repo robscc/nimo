@@ -13,18 +13,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 from collections.abc import Callable
 from time import time
 from typing import Any, AsyncGenerator
 
 from agentscope.model import ChatModelBase
+from loguru import logger
 
 # 重试回调签名：(attempt, max_attempts, error_message, delay_seconds) -> None
 RetryCallback = Callable[[int, int, str, float], Any]
 
-logger = logging.getLogger(__name__)
 
 # ── 配置常量（可通过环境变量覆盖）────────────────────────────────────────
 LLM_MAX_RETRIES = int(os.getenv("AGENTPAL_LLM_MAX_RETRIES", "3"))
@@ -177,12 +176,10 @@ class RetryChatModel(ChatModelBase):
         client = getattr(self._inner, "client", None)
         if client:
             base_url = str(getattr(client, "base_url", ""))
+        req_summary = self._fmt_request(args, kwargs)
         logger.info(
-            "LLM 请求 [model=%s, stream=%s, base_url=%s]\n%s",
-            self._inner.model_name,
-            self._inner.stream,
-            base_url or "?",
-            self._fmt_request(args, kwargs),
+            f"LLM 请求 [model={self._inner.model_name}, stream={self._inner.stream},"
+            f" base_url={base_url or '?'}]\n{req_summary}",
         )
 
         for attempt in range(1, max_attempts + 1):
@@ -193,16 +190,18 @@ class RetryChatModel(ChatModelBase):
                 if isinstance(result, AsyncGenerator):
                     # 流式：用包装生成器覆盖，在中途失败时重试
                     logger.info(
-                        "LLM 响应 [model=%s, attempt=%d/%d, %.1fs] → streaming started",
-                        self._inner.model_name, attempt, max_attempts, time() - t0,
+                        f"LLM 响应 [model={self._inner.model_name},"
+                        f" attempt={attempt}/{max_attempts},"
+                        f" {time() - t0:.1f}s] → streaming started",
                     )
                     return self._wrap_stream(result, args, kwargs, attempt, max_attempts)
 
                 # ── 非流式响应日志 ──
+                resp_summary = self._fmt_response(result)
                 logger.info(
-                    "LLM 响应 [model=%s, attempt=%d/%d, %.1fs]\n%s",
-                    self._inner.model_name, attempt, max_attempts, time() - t0,
-                    self._fmt_response(result),
+                    f"LLM 响应 [model={self._inner.model_name},"
+                    f" attempt={attempt}/{max_attempts},"
+                    f" {time() - t0:.1f}s]\n{resp_summary}",
                 )
                 return result
 
@@ -217,20 +216,17 @@ class RetryChatModel(ChatModelBase):
                     cause = cause.__cause__
                 cause_info = " → ".join(cause_parts) if cause_parts else ""
                 logger.error(
-                    "LLM 错误 [model=%s, attempt=%d/%d, %.1fs] %s: %s%s",
-                    self._inner.model_name, attempt, max_attempts, elapsed,
-                    type(exc).__name__, exc,
-                    f" | cause: {cause_info}" if cause_info else "",
+                    f"LLM 错误 [model={self._inner.model_name},"
+                    f" attempt={attempt}/{max_attempts}, {elapsed:.1f}s]"
+                    f" {type(exc).__name__}: {exc}"
+                    f"{f' | cause: {cause_info}' if cause_info else ''}",
                 )
                 if not _is_retryable(exc) or attempt >= max_attempts:
                     raise
                 delay = _backoff(attempt)
                 logger.warning(
-                    "LLM 调用失败（第 %d/%d 次）：%s，%.1f 秒后重试…",
-                    attempt,
-                    max_attempts,
-                    exc,
-                    delay,
+                    f"LLM 调用失败（第 {attempt}/{max_attempts} 次）："
+                    f"{exc}，{delay:.1f} 秒后重试…",
                 )
                 self._notify_retry(attempt, max_attempts, exc, delay)
                 await asyncio.sleep(delay)
@@ -262,10 +258,10 @@ class RetryChatModel(ChatModelBase):
 
         if failed_exc is None:
             # 流式完成，打印最终响应摘要
+            resp_summary = self._fmt_response(last_chunk) if last_chunk else "(empty)"
             logger.info(
-                "LLM 流式完成 [model=%s, chunks=%d, %.1fs]\n%s",
-                self._inner.model_name, chunk_count, time() - t0,
-                self._fmt_response(last_chunk) if last_chunk else "(empty)",
+                f"LLM 流式完成 [model={self._inner.model_name},"
+                f" chunks={chunk_count}, {time() - t0:.1f}s]\n{resp_summary}",
             )
             return
 
@@ -274,11 +270,8 @@ class RetryChatModel(ChatModelBase):
 
         delay = _backoff(current_attempt)
         logger.warning(
-            "LLM 流式中断（第 %d/%d 次）：%s，%.1f 秒后重试…",
-            current_attempt,
-            max_attempts,
-            failed_exc,
-            delay,
+            f"LLM 流式中断（第 {current_attempt}/{max_attempts} 次）："
+            f"{failed_exc}，{delay:.1f} 秒后重试…",
         )
         self._notify_retry(current_attempt, max_attempts, failed_exc, delay)
         await asyncio.sleep(delay)
@@ -303,11 +296,8 @@ class RetryChatModel(ChatModelBase):
                     raise
                 retry_delay = _backoff(attempt)
                 logger.warning(
-                    "LLM 流式重试失败（第 %d/%d 次）：%s，%.1f 秒后重试…",
-                    attempt,
-                    max_attempts,
-                    retry_exc,
-                    retry_delay,
+                    f"LLM 流式重试失败（第 {attempt}/{max_attempts} 次）："
+                    f"{retry_exc}，{retry_delay:.1f} 秒后重试…",
                 )
                 self._notify_retry(attempt, max_attempts, retry_exc, retry_delay)
                 await asyncio.sleep(retry_delay)

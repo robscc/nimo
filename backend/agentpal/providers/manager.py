@@ -9,18 +9,16 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List
 
 from agentscope.model import ChatModelBase
+from loguru import logger
 
 from agentpal.providers.openai_provider import OpenAIProvider
 from agentpal.providers.provider import ModelInfo, Provider, ProviderConfig
 from agentpal.providers.retry_model import RetryCallback, RetryChatModel
-
-logger = logging.getLogger(__name__)
 
 
 # ── 内置 Provider 预设 ────────────────────────────────────────────────────
