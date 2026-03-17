@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import Callable
+from time import time
 from typing import Any, AsyncGenerator
 
 from agentscope.model import ChatModelBase
@@ -107,6 +109,60 @@ class RetryChatModel(ChatModelBase):
         if self._on_retry is not None:
             self._on_retry(attempt, max_attempts, str(exc), delay)
 
+    @staticmethod
+    def _fmt_request(args: tuple, kwargs: dict) -> str:
+        """格式化请求参数用于日志输出。"""
+        parts: list[str] = []
+        # args[0] 通常是 messages
+        if args:
+            messages = args[0]
+            if isinstance(messages, list):
+                parts.append(f"messages({len(messages)}): [")
+                for m in messages:
+                    role = m.get("role", "?") if isinstance(m, dict) else "?"
+                    content = m.get("content", "") if isinstance(m, dict) else str(m)
+                    # 截断过长内容
+                    if isinstance(content, str) and len(content) > 200:
+                        content = content[:200] + "…"
+                    tc = m.get("tool_calls") if isinstance(m, dict) else None
+                    line = f"  {{{role}: {content!r}"
+                    if tc:
+                        line += f", tool_calls: {len(tc)}"
+                    line += "}"
+                    parts.append(line)
+                parts.append("]")
+        # kwargs 里的 tools
+        tools = kwargs.get("tools")
+        if tools and isinstance(tools, list):
+            names = [t.get("function", {}).get("name", "?") if isinstance(t, dict) else "?" for t in tools]
+            parts.append(f"tools: {names}")
+        # 其他 kwargs（排除 messages/tools）
+        extra = {k: v for k, v in kwargs.items() if k not in ("tools",)}
+        if extra:
+            parts.append(f"kwargs: {extra}")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _fmt_response(result: Any) -> str:
+        """格式化响应用于日志输出。"""
+        if isinstance(result, AsyncGenerator):
+            return "<AsyncGenerator (streaming)>"
+        # agentscope ChatResponse
+        content = getattr(result, "content", None)
+        usage = getattr(result, "usage", None)
+        parts: list[str] = []
+        if content:
+            try:
+                summary = json.dumps(content, ensure_ascii=False, default=str)
+                if len(summary) > 500:
+                    summary = summary[:500] + "…"
+                parts.append(f"content: {summary}")
+            except Exception:
+                parts.append(f"content: {content!r}"[:500])
+        if usage:
+            parts.append(f"usage: {usage}")
+        return " | ".join(parts) if parts else repr(result)[:300]
+
     async def __call__(
         self,
         *args: Any,
@@ -116,17 +172,56 @@ class RetryChatModel(ChatModelBase):
         max_attempts = LLM_MAX_RETRIES + 1
         last_exc: Exception | None = None
 
+        # ── 请求日志 ──
+        base_url = ""
+        client = getattr(self._inner, "client", None)
+        if client:
+            base_url = str(getattr(client, "base_url", ""))
+        logger.info(
+            "LLM 请求 [model=%s, stream=%s, base_url=%s]\n%s",
+            self._inner.model_name,
+            self._inner.stream,
+            base_url or "?",
+            self._fmt_request(args, kwargs),
+        )
+
         for attempt in range(1, max_attempts + 1):
+            t0 = time()
             try:
                 result = await self._inner(*args, **kwargs)
 
                 if isinstance(result, AsyncGenerator):
                     # 流式：用包装生成器覆盖，在中途失败时重试
+                    logger.info(
+                        "LLM 响应 [model=%s, attempt=%d/%d, %.1fs] → streaming started",
+                        self._inner.model_name, attempt, max_attempts, time() - t0,
+                    )
                     return self._wrap_stream(result, args, kwargs, attempt, max_attempts)
+
+                # ── 非流式响应日志 ──
+                logger.info(
+                    "LLM 响应 [model=%s, attempt=%d/%d, %.1fs]\n%s",
+                    self._inner.model_name, attempt, max_attempts, time() - t0,
+                    self._fmt_response(result),
+                )
                 return result
 
             except Exception as exc:
                 last_exc = exc
+                elapsed = time() - t0
+                # 构建异常链信息
+                cause_parts: list[str] = []
+                cause = exc.__cause__
+                while cause:
+                    cause_parts.append(f"{type(cause).__name__}: {cause or '(no detail)'}")
+                    cause = cause.__cause__
+                cause_info = " → ".join(cause_parts) if cause_parts else ""
+                logger.error(
+                    "LLM 错误 [model=%s, attempt=%d/%d, %.1fs] %s: %s%s",
+                    self._inner.model_name, attempt, max_attempts, elapsed,
+                    type(exc).__name__, exc,
+                    f" | cause: {cause_info}" if cause_info else "",
+                )
                 if not _is_retryable(exc) or attempt >= max_attempts:
                     raise
                 delay = _backoff(attempt)
@@ -152,8 +247,13 @@ class RetryChatModel(ChatModelBase):
     ) -> AsyncGenerator:
         """消费流，在中途失败时从头重试整个请求。"""
         failed_exc: Exception | None = None
+        t0 = time()
+        last_chunk: Any = None
+        chunk_count = 0
         try:
             async for chunk in stream:
+                last_chunk = chunk
+                chunk_count += 1
                 yield chunk
         except Exception as exc:
             failed_exc = exc
@@ -161,6 +261,12 @@ class RetryChatModel(ChatModelBase):
             await stream.aclose()
 
         if failed_exc is None:
+            # 流式完成，打印最终响应摘要
+            logger.info(
+                "LLM 流式完成 [model=%s, chunks=%d, %.1fs]\n%s",
+                self._inner.model_name, chunk_count, time() - t0,
+                self._fmt_response(last_chunk) if last_chunk else "(empty)",
+            )
             return
 
         if not _is_retryable(failed_exc) or current_attempt >= max_attempts:
