@@ -214,11 +214,11 @@ class PersonalAssistant(BaseAgent):
             accumulated_files: list[dict[str, Any]] = []
             usage_rounds: list[tuple[int, int, int]] = []  # (round, input, output)
 
-            # 重试事件队列：回调写入 Queue，主循环实时 yield
-            retry_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+            # 重试事件列表：回调同步写入，主循环在 await 返回后 flush
+            retry_events: list[dict[str, Any]] = []
 
             def _on_retry(attempt: int, max_attempts: int, error: str, delay: float) -> None:
-                retry_queue.put_nowait({
+                retry_events.append({
                     "type": "retry",
                     "attempt": attempt,
                     "max_attempts": max_attempts,
@@ -228,51 +228,27 @@ class PersonalAssistant(BaseAgent):
 
             for round_idx in range(MAX_TOOL_ROUNDS):
                 tools_schema = toolkit.get_json_schemas() if toolkit else None
+                retry_events.clear()
                 model = _build_model(self._model_config, stream=True, on_retry=_on_retry)
 
-                # 在后台任务中执行 model()，主循环实时消费重试事件
-                model_future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
+                # stream=True → model() 返回 AsyncGenerator[ChatResponse, None]
+                # 重试期间 retry_events 会被回调填充，await 返回后统一 flush
+                response_gen = await model(messages, tools=tools_schema)
 
-                async def _run_model(
-                    _m: Any = model,
-                    _msgs: list = messages,
-                    _ts: Any = tools_schema,
-                    _fut: asyncio.Future = model_future,
-                ) -> None:
-                    try:
-                        result = await _m(_msgs, tools=_ts)
-                        _fut.set_result(result)
-                    except Exception as exc:
-                        _fut.set_exception(exc)
-
-                model_task = asyncio.create_task(_run_model())
-
-                # 等待 model() 完成，同时实时 yield 重试事件
-                while not model_future.done():
-                    try:
-                        ev = await asyncio.wait_for(retry_queue.get(), timeout=0.3)
-                        yield ev
-                    except asyncio.TimeoutError:
-                        continue
-
-                # 确保 task 完成
-                await model_task
-
-                # 刷出剩余重试事件（如有）
-                while not retry_queue.empty():
-                    yield retry_queue.get_nowait()
-
-                # 若重试全部失败，重新抛出异常（由外层 except 捕获）
-                response_gen = model_future.result()
+                # 刷出在 await model() 阶段积累的重试事件
+                for rev in retry_events:
+                    yield rev
+                retry_events.clear()
 
                 prev_thinking_len = 0
                 prev_text_len = 0
                 final_response = None
 
                 async for chunk in response_gen:
-                    # 刷出流式期间积累的重试事件
-                    while not retry_queue.empty():
-                        yield retry_queue.get_nowait()
+                    # 刷出流式期间积累的重试事件（mid-stream retry）
+                    for rev in retry_events:
+                        yield rev
+                    retry_events.clear()
 
                     final_response = chunk
                     has_tool_calls = any(
@@ -467,8 +443,8 @@ class PersonalAssistant(BaseAgent):
 
         except Exception as exc:  # noqa: BLE001
             # 刷出未发送的重试事件（重试全部失败时）
-            while not retry_queue.empty():
-                yield retry_queue.get_nowait()
+            for rev in retry_events:
+                yield rev
             yield {"type": "error", "message": str(exc)}
 
     # ── SubAgent 派遣 ─────────────────────────────────────
