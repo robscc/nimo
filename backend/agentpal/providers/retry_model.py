@@ -14,9 +14,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from typing import Any, AsyncGenerator
 
 from agentscope.model import ChatModelBase
+
+# 重试回调签名：(attempt, max_attempts, error_message, delay_seconds) -> None
+RetryCallback = Callable[[int, int, str, float], Any]
 
 logger = logging.getLogger(__name__)
 
@@ -82,14 +86,26 @@ class RetryChatModel(ChatModelBase):
             ...
     """
 
-    def __init__(self, inner: ChatModelBase) -> None:
+    def __init__(
+        self,
+        inner: ChatModelBase,
+        on_retry: RetryCallback | None = None,
+    ) -> None:
         super().__init__(model_name=inner.model_name, stream=inner.stream)
         self._inner = inner
+        self._on_retry = on_retry
 
     @property
     def inner_class(self) -> type:
         """暴露底层模型类型，供上层做 formatter 映射时使用。"""
         return self._inner.__class__
+
+    def _notify_retry(
+        self, attempt: int, max_attempts: int, exc: Exception, delay: float,
+    ) -> None:
+        """通知重试回调（如果已注册）。"""
+        if self._on_retry is not None:
+            self._on_retry(attempt, max_attempts, str(exc), delay)
 
     async def __call__(
         self,
@@ -121,6 +137,7 @@ class RetryChatModel(ChatModelBase):
                     exc,
                     delay,
                 )
+                self._notify_retry(attempt, max_attempts, exc, delay)
                 await asyncio.sleep(delay)
 
         raise last_exc  # type: ignore[misc]
@@ -157,6 +174,7 @@ class RetryChatModel(ChatModelBase):
             failed_exc,
             delay,
         )
+        self._notify_retry(current_attempt, max_attempts, failed_exc, delay)
         await asyncio.sleep(delay)
 
         for attempt in range(current_attempt + 1, max_attempts + 1):
@@ -185,4 +203,5 @@ class RetryChatModel(ChatModelBase):
                     retry_exc,
                     retry_delay,
                 )
+                self._notify_retry(attempt, max_attempts, retry_exc, retry_delay)
                 await asyncio.sleep(retry_delay)

@@ -46,6 +46,13 @@ interface ToolGuardRequest {
   status: "pending" | "approved" | "rejected";
 }
 
+interface RetryEntry {
+  attempt: number;
+  maxAttempts: number;
+  error: string;
+  delay: number;
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
@@ -55,6 +62,7 @@ interface Message {
   files?: FileAttachment[];
   streaming?: boolean;
   guardRequest?: ToolGuardRequest;
+  retries?: RetryEntry[];
 }
 
 // ── Thinking Bubble ────────────────────────────────────────
@@ -963,6 +971,19 @@ export default function ChatPage() {
                 ? { ...m.guardRequest, status: (ev.approved as boolean) ? "approved" : "rejected" }
                 : undefined,
             }));
+          } else if (ev.type === "retry") {
+            updateLast((m) => ({
+              ...m,
+              retries: [
+                ...(m.retries ?? []),
+                {
+                  attempt: ev.attempt as number,
+                  maxAttempts: ev.max_attempts as number,
+                  error: ev.error as string,
+                  delay: ev.delay as number,
+                },
+              ],
+            }));
           } else if (ev.type === "done") {
             updateLast((m) => ({ ...m, streaming: false }));
             // 刷新会话列表（更新 title 和 message_count）
@@ -1166,6 +1187,28 @@ export default function ChatPage() {
                         <Paperclip size={14} /> {f.name}
                       </a>
                     )
+                  )}
+                  {/* Retry status */}
+                  {(msg.retries ?? []).length > 0 && (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50/80 text-xs overflow-hidden">
+                      <div className="flex items-center gap-1.5 px-3 py-1.5 text-amber-700 font-medium">
+                        <Loader2 size={12} className={msg.streaming ? "animate-spin" : ""} />
+                        <span>LLM 调用重试</span>
+                      </div>
+                      <div className="px-3 pb-2 space-y-0.5">
+                        {(msg.retries ?? []).map((r, ri) => (
+                          <div key={ri} className="flex items-center gap-1.5 text-amber-600">
+                            <XCircle size={10} className="shrink-0 text-amber-500" />
+                            <span>
+                              第 {r.attempt}/{r.maxAttempts} 次失败：{r.error}
+                              {msg.streaming && ri === (msg.retries?.length ?? 0) - 1
+                                ? `，${r.delay}s 后重试…`
+                                : ""}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   )}
                   {/* Text bubble — show if has content OR still streaming */}
                   {(msg.content || msg.streaming) && (
