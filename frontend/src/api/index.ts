@@ -12,6 +12,7 @@ export interface ChatRequest {
   message: string;
   channel?: string;
   user_id?: string;
+  images?: string[];  // base64 data URI 列表（多模态图片输入）
 }
 
 export interface ChatResponse {
@@ -86,6 +87,7 @@ export interface HistoryMessageMeta {
     name: string;
     mime: string;
   }>;
+  images?: string[];  // base64 data URI 列表（用户发送的图片）
 }
 
 export interface HistoryMessage {

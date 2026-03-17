@@ -19,7 +19,7 @@ settings = get_settings()
 engine = create_async_engine(
     settings.database_url,
     echo=settings.is_dev,
-    connect_args={"check_same_thread": False, "timeout": 30},  # SQLite 专用
+    connect_args={"check_same_thread": False, "timeout": 60},  # SQLite 专用
 )
 
 
@@ -28,7 +28,7 @@ engine = create_async_engine(
 def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA busy_timeout=15000")
     cursor.close()
 
 AsyncSessionLocal = async_sessionmaker(
@@ -62,6 +62,10 @@ async def run_migrations() -> None:
         ("sub_agent_tasks", "priority", "ALTER TABLE sub_agent_tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 5"),
         ("sub_agent_tasks", "retry_count", "ALTER TABLE sub_agent_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"),
         ("sub_agent_tasks", "max_retries", "ALTER TABLE sub_agent_tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3"),
+        # sub_agent_tasks: agent_name / task_type / execution_log (added for SubAgent routing)
+        ("sub_agent_tasks", "agent_name", "ALTER TABLE sub_agent_tasks ADD COLUMN agent_name VARCHAR(64)"),
+        ("sub_agent_tasks", "task_type", "ALTER TABLE sub_agent_tasks ADD COLUMN task_type VARCHAR(64)"),
+        ("sub_agent_tasks", "execution_log", "ALTER TABLE sub_agent_tasks ADD COLUMN execution_log JSON NOT NULL DEFAULT '[]'"),
     ]
     async with engine.begin() as conn:
         for table, column, sql in migrations:
@@ -80,6 +84,20 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session
             await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def get_db_standalone() -> AsyncGenerator[AsyncSession, None]:
+    """独立短事务 session — 用于需要写操作但可能与 SSE 流并发的 endpoint。
+
+    与 get_db 不同：调用者需要自己 commit，yield 后不会自动 commit。
+    这样可以尽快释放 SQLite 写锁，避免与流式 chat 长事务冲突。
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
         except Exception:
             await session.rollback()
             raise

@@ -7,7 +7,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from agentpal.database import Base, get_db
+from agentpal.database import Base, get_db, get_db_standalone
 from agentpal.main import create_app
 from agentpal.tools.tool_guard import ToolGuardManager
 
@@ -42,6 +42,7 @@ async def test_app():
                 raise
 
     app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_db_standalone] = override_db
 
     async with AsyncClient(
         transport=ASGITransport(app=app),

@@ -132,6 +132,7 @@ class SubAgent(BaseAgent):
 
         toolkit = await self._build_toolkit()
         response = None
+        loop_exhausted = False  # 标记是否因轮次耗尽退出
 
         for round_idx in range(self._max_tool_rounds):
             # 每轮开始前检查消息
@@ -170,7 +171,11 @@ class SubAgent(BaseAgent):
             ]
 
             if not tool_calls:
-                break
+                break  # 有文字回复，正常退出
+
+            # 最后一轮仍有工具调用，标记需要强制文字总结
+            if round_idx == self._max_tool_rounds - 1:
+                loop_exhausted = True
 
             # 构建 assistant 消息
             openai_tool_calls = [
@@ -230,6 +235,31 @@ class SubAgent(BaseAgent):
                 })
 
                 messages.append({"role": "tool", "tool_call_id": tc_id, "content": output_text})
+
+        # ── 强制最终文字总结（当轮次耗尽且仍无文字回复时）──────────
+        if loop_exhausted or (response is not None and not _extract_text(response)):
+            self._log("force_summary", {"reason": "loop_exhausted" if loop_exhausted else "no_text"})
+            try:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "请根据以上工具调用的结果，给出最终的完整文字回答。"
+                        "不要再调用任何工具，直接整理并输出结论。"
+                    ),
+                })
+                model = _build_model(self._model_config)
+                if self._db is not None:
+                    try:
+                        await self._db.commit()
+                    except Exception:
+                        pass
+                response = await model(messages, tools=None)  # 禁用工具，强制文字输出
+                summary_content = [
+                    b for b in (response.content or []) if isinstance(b, dict)
+                ]
+                self._log("force_summary_response", {"content": summary_content})
+            except Exception as exc:
+                self._log("force_summary_error", {"error": str(exc)})
 
         final_text = _extract_text(response) if response else "（无响应）"
         self._log("final_result", {"text": final_text[:2000]})

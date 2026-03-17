@@ -49,6 +49,7 @@ class ChatRequest(BaseModel):
     message: str
     channel: str = "web"
     user_id: str = "anonymous"
+    images: list[str] | None = None  # base64 data URI 列表（多模态图片输入）
 
 
 class DispatchRequest(BaseModel):
@@ -113,7 +114,7 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     assistant = PersonalAssistant(session_id=req.session_id, memory=memory, db=db)
 
     async def event_stream() -> AsyncGenerator[str, None]:
-        async for event in assistant.reply_stream(req.message):
+        async for event in assistant.reply_stream(req.message, images=req.images):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
             # send_file_to_user 成功 → 额外 emit file 事件

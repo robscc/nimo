@@ -7,7 +7,8 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from agentpal.database import Base, get_db
+from agentpal.config import get_settings
+from agentpal.database import Base, get_db, get_db_standalone
 from agentpal.main import create_app
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
@@ -21,6 +22,15 @@ async def test_app(tmp_path):
 
     session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
 
+    # 清除 Settings lru_cache，让 workspace_dir 可以被覆盖
+    get_settings.cache_clear()
+    original_settings = get_settings()
+    test_workspace = str(tmp_path / ".nimo")
+
+    # 用 object.__setattr__ 强制覆盖 pydantic frozen 字段，
+    # 避免测试写入真实的 ~/.nimo/config.yaml
+    object.__setattr__(original_settings, "workspace_dir", test_workspace)
+
     app = create_app()
 
     async def override_db():
@@ -29,7 +39,11 @@ async def test_app(tmp_path):
             await session.rollback()
 
     app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_db_standalone] = override_db
     yield app
+
+    # 恢复：清除被污染的 Settings 缓存
+    get_settings.cache_clear()
     await engine.dispose()
 
 
