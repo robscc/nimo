@@ -9,6 +9,8 @@
     ├── USER.md                ← 用户画像
     ├── MEMORY.md              ← 持久化长期记忆
     ├── CONTEXT.md             ← 当前阶段补充背景（可选）
+    ├── BOOTSTRAP.md           ← 首次运行引导（完成后删除）
+    ├── HEARTBEAT.md           ← 定期心跳任务清单
     ├── memory/
     │   └── YYYY-MM-DD.md      ← 每日摘要日志
     └── canvas/                ← Agent 工作区文件
@@ -81,7 +83,10 @@ class WorkspaceManager:
         """一次性加载所有 workspace 文件，返回 WorkspaceFiles 数据类。"""
         await self.bootstrap()
 
-        agents, identity, soul, user, memory, context, today_log = await asyncio.gather(
+        (
+            agents, identity, soul, user, memory, context,
+            today_log, bootstrap_content, heartbeat,
+        ) = await asyncio.gather(
             self._read(self.root / "AGENTS.md"),
             self._read(self.root / "IDENTITY.md"),
             self._read(self.root / "SOUL.md"),
@@ -89,6 +94,8 @@ class WorkspaceManager:
             self._read(self.root / "MEMORY.md"),
             self._read(self.root / "CONTEXT.md"),
             self._read_today_log(),
+            self._read(self.root / "BOOTSTRAP.md"),
+            self._read(self.root / "HEARTBEAT.md"),
         )
 
         return WorkspaceFiles(
@@ -99,6 +106,8 @@ class WorkspaceManager:
             memory=memory,
             context=context,
             today_log=today_log,
+            bootstrap=bootstrap_content,
+            heartbeat=heartbeat,
         )
 
     # ── 读写单个文件 ──────────────────────────────────────

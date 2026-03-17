@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -280,6 +281,9 @@ class CronScheduler:
         self._task = asyncio.create_task(self._loop())
         logger.info("CronScheduler 已启动")
 
+        # 启动 heartbeat 机制
+        asyncio.create_task(self._ensure_heartbeat_job())
+
     async def stop(self) -> None:
         """停止后台调度循环。"""
         self._running = False
@@ -368,6 +372,63 @@ class CronScheduler:
                 )
                 await db.commit()
 
+    async def _ensure_heartbeat_job(self) -> None:
+        """确保 heartbeat 定时任务存在（幂等）。
+
+        读取 config 中的 heartbeat 配置，自动创建或更新内置 heartbeat cron job。
+        heartbeat 任务的 agent_name 标记为 '__heartbeat__' 以便特殊处理。
+        """
+        from agentpal.config import get_settings
+        from agentpal.database import AsyncSessionLocal
+
+        try:
+            settings = get_settings()
+            if not settings.heartbeat_enabled:
+                logger.info("Heartbeat 机制已禁用")
+                return
+
+            interval = settings.heartbeat_interval_minutes
+            # 构建 cron 表达式：每 N 分钟执行一次
+            if interval <= 0:
+                interval = 60
+            if interval < 60:
+                cron_expr = f"*/{interval} * * * *"
+            else:
+                hours = interval // 60
+                cron_expr = f"0 */{hours} * * *" if hours > 1 else "7 * * * *"
+
+            async with AsyncSessionLocal() as db:
+                # 检查是否已存在 heartbeat job
+                result = await db.execute(
+                    select(CronJob).where(CronJob.agent_name == "__heartbeat__")
+                )
+                existing = result.scalar_one_or_none()
+
+                if existing:
+                    # 更新 schedule（如果有变化）
+                    if existing.schedule != cron_expr:
+                        existing.schedule = cron_expr
+                        existing.next_run_at = _compute_next_run(cron_expr)
+                        await db.commit()
+                        logger.info(f"Heartbeat 定时任务已更新: schedule={cron_expr}")
+                else:
+                    job = CronJob(
+                        id=str(uuid.uuid4()),
+                        name="🫀 Heartbeat",
+                        schedule=cron_expr,
+                        task_prompt="执行 HEARTBEAT.md 中定义的定期检查任务。",
+                        agent_name="__heartbeat__",
+                        enabled=True,
+                        notify_main=True,
+                        next_run_at=_compute_next_run(cron_expr),
+                    )
+                    db.add(job)
+                    await db.commit()
+                    logger.info(f"Heartbeat 定时任务已创建: schedule={cron_expr}")
+
+        except Exception as e:
+            logger.error(f"Heartbeat 初始化失败: {e}")
+
     async def _run_cron_agent(
         self,
         db: AsyncSession,
@@ -378,13 +439,36 @@ class CronScheduler:
         """用 SubAgent 执行定时任务，收集完整日志。
 
         Cron 任务的上下文只加载 AGENTS.md + SOUL.md（不影响主上下文）。
+        Heartbeat 任务（agent_name == '__heartbeat__'）加载完整工作空间上下文。
         """
         from agentpal.agents.cron_agent import CronAgent
         from agentpal.agents.registry import SubAgentRegistry
         from agentpal.config import get_settings
         from agentpal.memory.factory import MemoryFactory
+        from agentpal.workspace.manager import WorkspaceManager
 
         settings = get_settings()
+        is_heartbeat = agent_name == "__heartbeat__"
+
+        # Heartbeat 任务：先读取 HEARTBEAT.md，如果没有活跃任务则跳过
+        if is_heartbeat:
+            ws_manager = WorkspaceManager(Path(settings.workspace_dir))
+            heartbeat_content = await ws_manager.read_file("HEARTBEAT.md")
+            active_lines = [
+                line for line in heartbeat_content.strip().splitlines()
+                if line.strip()
+                and not line.strip().startswith("#")
+                and not line.strip().startswith(">")
+            ]
+            if not active_lines:
+                return "Heartbeat 跳过：HEARTBEAT.md 中没有活跃任务。"
+
+            # 用实际的 heartbeat 任务内容替换 task_prompt
+            task_prompt = (
+                "请执行以下 heartbeat 定期检查任务：\n\n"
+                + "\n".join(active_lines)
+                + "\n\n请逐项执行，完成后汇总结果。"
+            )
 
         # 获取模型配置
         model_config = {
@@ -394,8 +478,8 @@ class CronScheduler:
             "base_url": settings.llm_base_url,
         }
 
-        # 如果指定了 SubAgent，使用其模型配置
-        if agent_name:
+        # 如果指定了 SubAgent（非 heartbeat），使用其模型配置
+        if agent_name and not is_heartbeat:
             registry = SubAgentRegistry(db)
             agent_def = await registry.get_agent(agent_name)
             if agent_def and agent_def.get("has_custom_model"):
@@ -415,6 +499,7 @@ class CronScheduler:
             model_config=model_config,
             execution_log=execution_log,
             db=db,
+            full_context=is_heartbeat,
         )
 
         return await agent.run(task_prompt)

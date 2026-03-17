@@ -30,6 +30,7 @@ class CronAgent(BaseAgent):
         model_config:  模型配置
         execution_log: 可变列表，用于收集完整日志
         db:            AsyncSession（读工具配置）
+        full_context:  是否加载完整工作空间上下文（heartbeat 模式需要）
     """
 
     def __init__(
@@ -39,11 +40,13 @@ class CronAgent(BaseAgent):
         model_config: dict[str, Any],
         execution_log: list[dict[str, Any]],
         db: Any = None,
+        full_context: bool = False,
     ) -> None:
         super().__init__(session_id=session_id, memory=memory)
         self._model_config = model_config
         self._execution_log = execution_log
         self._db = db
+        self._full_context = full_context
 
     async def run(self, task_prompt: str) -> str:
         """执行任务并返回结果文本，同时收集完整日志。"""
@@ -161,13 +164,31 @@ class CronAgent(BaseAgent):
         return final_text
 
     async def _build_cron_system_prompt(self) -> str:
-        """构建 cron 专用的轻量 system prompt — 只加载 AGENTS.md + SOUL.md。"""
+        """构建 cron 专用的 system prompt。
+
+        普通 cron 任务：只加载 AGENTS.md + SOUL.md（轻量）
+        Heartbeat 模式（full_context=True）：加载完整工作空间上下文（MEMORY、USER 等）
+        """
+        from agentpal.workspace.context_builder import ContextBuilder
         from agentpal.workspace.manager import WorkspaceManager
 
         settings = get_settings()
         ws_manager = WorkspaceManager(Path(settings.workspace_dir))
         ws = await ws_manager.load()
 
+        if self._full_context:
+            # Heartbeat 模式：使用 ContextBuilder 构建完整上下文
+            builder = ContextBuilder()
+            base_prompt = builder.build_system_prompt(ws)
+            return (
+                base_prompt + "\n\n---\n\n"
+                "# 任务模式 — Heartbeat\n\n"
+                "你正在执行 heartbeat 定期检查任务。请根据 HEARTBEAT.md 中的任务清单逐项执行。\n"
+                "你可以访问完整的工作空间文件（MEMORY.md、USER.md 等），用于上下文感知的检查。\n"
+                "执行完成后，你的结果将自动发送给主 Agent。"
+            )
+
+        # 普通 cron 任务：轻量上下文
         sections: list[str] = []
         if ws.soul.strip():
             sections.append(f"# Soul & Personality\n\n{ws.soul.strip()}")
