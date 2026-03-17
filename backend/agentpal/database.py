@@ -62,6 +62,10 @@ async def run_migrations() -> None:
         ("sub_agent_tasks", "priority", "ALTER TABLE sub_agent_tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 5"),
         ("sub_agent_tasks", "retry_count", "ALTER TABLE sub_agent_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"),
         ("sub_agent_tasks", "max_retries", "ALTER TABLE sub_agent_tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3"),
+        # memory_records: user_id / channel / memory_type (added in v0.3 for cross-session search)
+        ("memory_records", "user_id", "ALTER TABLE memory_records ADD COLUMN user_id VARCHAR(128)"),
+        ("memory_records", "channel", "ALTER TABLE memory_records ADD COLUMN channel VARCHAR(64)"),
+        ("memory_records", "memory_type", "ALTER TABLE memory_records ADD COLUMN memory_type VARCHAR(32) NOT NULL DEFAULT 'conversation'"),
     ]
     async with engine.begin() as conn:
         for table, column, sql in migrations:

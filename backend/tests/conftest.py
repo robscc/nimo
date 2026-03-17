@@ -61,5 +61,19 @@ async def hybrid_memory(db_session: AsyncSession) -> HybridMemory:
 # ── 消息工厂 ──────────────────────────────────────────────
 
 
-def make_msg(content: str, role: MemoryRole = MemoryRole.USER, session_id: str = "test-session") -> MemoryMessage:
-    return MemoryMessage(session_id=session_id, role=role, content=content)
+def make_msg(
+    content: str,
+    role: MemoryRole = MemoryRole.USER,
+    session_id: str = "test-session",
+    user_id: str | None = None,
+    channel: str | None = None,
+    memory_type: str = "conversation",
+) -> MemoryMessage:
+    return MemoryMessage(
+        session_id=session_id,
+        role=role,
+        content=content,
+        user_id=user_id,
+        channel=channel,
+        memory_type=memory_type,
+    )

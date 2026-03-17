@@ -12,7 +12,7 @@ import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 
-from agentpal.memory.base import BaseMemory, MemoryMessage
+from agentpal.memory.base import BaseMemory, MemoryMessage, MemoryScope
 
 
 class BufferMemory(BaseMemory):
@@ -48,6 +48,40 @@ class BufferMemory(BaseMemory):
 
     async def count(self, session_id: str) -> int:
         return len(self._store.get(session_id, deque()))
+
+    async def cross_session_search(
+        self,
+        scope: MemoryScope,
+        query: str,
+        limit: int = 10,
+    ) -> list[MemoryMessage]:
+        """跨 session 内存搜索（扫描所有缓存的 session）。
+
+        注意：BufferMemory 仅包含热缓存数据，搜索范围有限。
+        生产环境应使用 HybridMemory 或持久化后端进行跨 session 搜索。
+        """
+        scope.validate()
+
+        if scope.session_id:
+            return await self.search(scope.session_id, query, limit)
+
+        q = query.lower()
+        matched: list[MemoryMessage] = []
+
+        for session_id, msgs in self._store.items():
+            for msg in msgs:
+                # 权限过滤
+                if scope.user_id and msg.user_id != scope.user_id:
+                    continue
+                if scope.channel and msg.channel != scope.channel:
+                    continue
+                # 关键词匹配
+                if q in msg.content.lower():
+                    matched.append(msg)
+
+        # 按时间排序，取最新的 limit 条
+        matched.sort(key=lambda m: m.created_at)
+        return matched[-limit:]
 
     # ── 额外工具方法 ──────────────────────────────────────
 

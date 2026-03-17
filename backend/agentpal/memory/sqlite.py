@@ -4,6 +4,7 @@
 - 消息的持久化写入与读取
 - 支持按 session_id 隔离
 - 支持关键词搜索（SQLite LIKE）
+- 支持跨 session 搜索（基于 MemoryScope 权限）
 - 仅做存储，不含业务逻辑
 """
 
@@ -12,10 +13,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agentpal.memory.base import BaseMemory, MemoryMessage, MemoryRole
+from agentpal.memory.base import BaseMemory, MemoryMessage, MemoryRole, MemoryScope
 from agentpal.models.memory import MemoryRecord
 
 
@@ -41,6 +42,9 @@ class SQLiteMemory(BaseMemory):
             content=message.content,
             created_at=message.created_at or datetime.now(timezone.utc),
             meta=message.metadata,
+            user_id=message.user_id,
+            channel=message.channel,
+            memory_type=message.memory_type or "conversation",
         )
         self._db.add(record)
         await self._db.flush()       # 获取数据库分配的字段（如有）
@@ -84,6 +88,47 @@ class SQLiteMemory(BaseMemory):
         records = result.scalars().all()
         return [_record_to_msg(r) for r in reversed(records)]
 
+    async def cross_session_search(
+        self,
+        scope: MemoryScope,
+        query: str,
+        limit: int = 10,
+    ) -> list[MemoryMessage]:
+        """跨 session 关键词搜索，基于 MemoryScope 权限过滤。
+
+        Args:
+            scope:  查询权限范围（session_id / user_id / channel / global）
+            query:  搜索关键词
+            limit:  返回最大条数
+
+        Returns:
+            匹配的 MemoryMessage 列表（按时间升序）
+        """
+        scope.validate()
+
+        # session 级别：回退到单 session search
+        if scope.session_id:
+            return await self.search(scope.session_id, query, limit)
+
+        # 构建跨 session 查询
+        conditions = [MemoryRecord.content.like(f"%{query}%")]
+
+        if scope.user_id:
+            conditions.append(MemoryRecord.user_id == scope.user_id)
+        elif scope.channel:
+            conditions.append(MemoryRecord.channel == scope.channel)
+        # global_access: 不加额外过滤条件
+
+        stmt = (
+            select(MemoryRecord)
+            .where(*conditions)
+            .order_by(MemoryRecord.created_at.desc())
+            .limit(limit)
+        )
+        result = await self._db.execute(stmt)
+        records = result.scalars().all()
+        return [_record_to_msg(r) for r in reversed(records)]
+
     async def count(self, session_id: str) -> int:
         stmt = select(func.count()).select_from(MemoryRecord).where(
             MemoryRecord.session_id == session_id
@@ -102,4 +147,7 @@ def _record_to_msg(record: MemoryRecord) -> MemoryMessage:
         content=record.content,
         created_at=record.created_at,
         metadata=record.meta or {},
+        user_id=record.user_id,
+        channel=record.channel,
+        memory_type=record.memory_type or "conversation",
     )
