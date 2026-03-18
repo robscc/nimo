@@ -35,6 +35,7 @@ dependencies = [
     "python-multipart>=0.0.7",
     "loguru>=0.7.0",
     "croniter>=2.0.0",
+    "typer[all]>=0.12.0",
     # 渠道集成
     "dingtalk-stream>=0.24.0",
     "python-socks[asyncio]>=2.0.0",   # DingTalk Stream WebSocket SOCKS 代理支持
@@ -54,6 +55,7 @@ dev = [
 
 [project.scripts]
 agentpal = "agentpal.main:run"
+nimo = "agentpal.cli.app:app"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
