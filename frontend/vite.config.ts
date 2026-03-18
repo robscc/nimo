@@ -6,6 +6,10 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
+      "/api/v1/notifications/ws": {
+        target: process.env.VITE_API_BASE_URL || "http://localhost:8099",
+        ws: true,
+      },
       "/api": {
         target: process.env.VITE_API_BASE_URL || "http://localhost:8099",
         changeOrigin: true,

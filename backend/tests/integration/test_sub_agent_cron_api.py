@@ -7,7 +7,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from agentpal.database import Base, get_db
+from agentpal.database import Base, get_db, get_db_standalone
 from agentpal.main import create_app
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
@@ -29,6 +29,7 @@ async def test_app(tmp_path):
             await session.rollback()
 
     app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_db_standalone] = override_db
     yield app
     await engine.dispose()
 

@@ -132,6 +132,7 @@ class ContextBuilder:
             f"- Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} {tz_name} (UTC{tz_offset[:3]}:{tz_offset[3:]})",
             f"- Day of week: {now.strftime('%A')}",
             f"- Timezone: {tz_name} (UTC{tz_offset[:3]}:{tz_offset[3:]})",
+            "- Workspace directory: `~/.nimo/` (所有记忆文件必须存放在此目录下，如 `~/.nimo/USER.md`、`~/.nimo/MEMORY.md` 等)",
         ]
         if runtime_context:
             if runtime_context.get("session_id"):

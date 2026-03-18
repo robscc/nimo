@@ -15,11 +15,37 @@ from agentpal.config import get_settings
 from agentpal.database import init_db, run_migrations
 
 
+def _setup_llm_debug_logging() -> None:
+    """开发模式下启用 httpx/openai 请求级日志，桥接到 loguru。"""
+    import logging
+
+    class _LoguruHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            logger.opt(depth=6, exception=record.exc_info).log(
+                level, record.getMessage(),
+            )
+
+    # httpx 请求/响应日志
+    for name in ("httpx", "openai", "agentpal.providers"):
+        log = logging.getLogger(name)
+        log.handlers = [_LoguruHandler()]
+        log.setLevel(logging.DEBUG)
+        log.propagate = False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动/关闭生命周期钩子。"""
     settings = get_settings()
     logger.info(f"AgentPal 启动中 (env={settings.app_env})")
+
+    if settings.is_dev:
+        _setup_llm_debug_logging()
+        logger.info("已启用 LLM 请求调试日志 (httpx/openai/providers)")
     await init_db()
     await run_migrations()
     logger.info("数据库初始化完成 ✅")

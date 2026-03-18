@@ -362,6 +362,28 @@ class CronScheduler:
 
                 logger.info(f"定时任务完成: {job_name} (ID={job_id})")
 
+                # 发布 WebSocket 通知
+                try:
+                    from agentpal.services.notification_bus import (
+                        Notification,
+                        NotificationType,
+                        notification_bus,
+                    )
+
+                    await notification_bus.publish(
+                        Notification(
+                            type=NotificationType.CRON_EXECUTION_DONE,
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            payload={
+                                "job_id": job_id,
+                                "job_name": job_name,
+                                "execution_id": execution.id,
+                            },
+                        )
+                    )
+                except Exception:
+                    pass  # 通知失败不影响主流程
+
             except Exception as e:
                 logger.error(f"定时任务失败: {job_name} (ID={job_id}): {e}")
                 await mgr.finish_execution(
@@ -371,6 +393,28 @@ class CronScheduler:
                     execution_log=execution_log,
                 )
                 await db.commit()
+
+                # 发布 WebSocket 通知（失败）
+                try:
+                    from agentpal.services.notification_bus import (
+                        Notification,
+                        NotificationType,
+                        notification_bus,
+                    )
+
+                    await notification_bus.publish(
+                        Notification(
+                            type=NotificationType.CRON_EXECUTION_FAILED,
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            payload={
+                                "job_id": job_id,
+                                "job_name": job_name,
+                                "error": str(e)[:200],
+                            },
+                        )
+                    )
+                except Exception:
+                    pass  # 通知失败不影响主流程
 
     async def _ensure_heartbeat_job(self) -> None:
         """确保 heartbeat 定时任务存在（幂等）。

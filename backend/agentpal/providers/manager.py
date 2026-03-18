@@ -9,18 +9,16 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List
 
 from agentscope.model import ChatModelBase
+from loguru import logger
 
 from agentpal.providers.openai_provider import OpenAIProvider
 from agentpal.providers.provider import ModelInfo, Provider, ProviderConfig
-from agentpal.providers.retry_model import RetryChatModel
-
-logger = logging.getLogger(__name__)
+from agentpal.providers.retry_model import RetryCallback, RetryChatModel
 
 
 # ── 内置 Provider 预设 ────────────────────────────────────────────────────
@@ -227,6 +225,7 @@ class ProviderManager:
         stream: bool = False,
         api_key_override: str | None = None,
         base_url_override: str | None = None,
+        on_retry: "RetryCallback | None" = None,
     ) -> ChatModelBase:
         """构建模型实例，自动套 RetryChatModel 包装。
 
@@ -236,6 +235,7 @@ class ProviderManager:
             stream:            是否流式
             api_key_override:  优先使用此 api_key（来自 session 级配置）
             base_url_override: 优先使用此 base_url（来自 session 级配置）
+            on_retry:          重试回调，签名 (attempt, max_attempts, error, delay)
         """
         provider = self.get_provider(provider_id)
         if provider is None:
@@ -254,7 +254,7 @@ class ProviderManager:
             api_key_override=api_key_override,
             base_url_override=base_url_override,
         )
-        return RetryChatModel(inner)
+        return RetryChatModel(inner, on_retry=on_retry)
 
     # ── 连接测试 ──────────────────────────────────────────────────────────
 

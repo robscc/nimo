@@ -313,8 +313,7 @@ export default function DashboardPage() {
   } = useQuery<DashboardStats>({
     queryKey: ["dashboard-stats"],
     queryFn: getDashboardStats,
-    refetchInterval: 30_000,
-    staleTime: 10_000,
+    staleTime: 60_000,
   });
 
   const lastUpdated = dataUpdatedAt

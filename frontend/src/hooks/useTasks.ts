@@ -5,7 +5,6 @@ export function useTasks(params?: TaskListParams) {
   return useQuery<TaskListResponse>({
     queryKey: ["tasks", params],
     queryFn: () => listTasks(params),
-    refetchInterval: 5000,
-    staleTime: 3000,
+    staleTime: 30_000,
   });
 }

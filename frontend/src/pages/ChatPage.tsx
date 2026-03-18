@@ -6,7 +6,7 @@ import {
   CheckCircle2, Loader2, XCircle, Paperclip, Brain,
   Info, Settings, Cpu, Puzzle, X, Smartphone,
   Code2, Terminal, CalendarClock, Shield, ShieldAlert,
-  ShieldCheck, ShieldX,
+  ShieldCheck, ShieldX, ImagePlus,
 } from "lucide-react";
 import clsx from "clsx";
 import { clearMemory, createSession, getSessions, getSessionMessages, resolveToolGuard } from "../api";
@@ -46,15 +46,24 @@ interface ToolGuardRequest {
   status: "pending" | "approved" | "rejected";
 }
 
+interface RetryEntry {
+  attempt: number;
+  maxAttempts: number;
+  error: string;
+  delay: number;
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
+  images?: string[];  // base64 data URI 列表（用户发送的图片）
   thinking?: string;
   streamingThinking?: boolean;
   toolCalls?: ToolCallEntry[];
   files?: FileAttachment[];
   streaming?: boolean;
   guardRequest?: ToolGuardRequest;
+  retries?: RetryEntry[];
 }
 
 // ── Thinking Bubble ────────────────────────────────────────
@@ -741,6 +750,7 @@ function mapHistoryToMessages(history: Awaited<ReturnType<typeof getSessionMessa
     return {
       role: m.role as "user" | "assistant",
       content: m.content,
+      images: m.role === "user" ? meta?.images : undefined,
       thinking: meta?.thinking,
       toolCalls: meta?.tool_calls?.map((tc) => ({
         id: tc.id,
@@ -766,12 +776,78 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [pendingImages, setPendingImages] = useState<string[]>([]);
+  const [dragOver, setDragOver] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
 
   const isReadOnly = sessionId?.startsWith("dingtalk:") ?? false;
+
+  // ── 图片处理 ────────────────────────────────────────────
+  const addImageFiles = useCallback((files: File[]) => {
+    const imageFiles = files.filter((f) => f.type.startsWith("image/"));
+    if (imageFiles.length === 0) return;
+    // 限制：单张 ≤ 10MB，最多 5 张
+    const allowed = imageFiles
+      .filter((f) => f.size <= 10 * 1024 * 1024)
+      .slice(0, 5 - pendingImages.length);
+    for (const file of allowed) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setPendingImages((prev) =>
+          prev.length < 5 ? [...prev, reader.result as string] : prev
+        );
+      };
+      reader.readAsDataURL(file);
+    }
+  }, [pendingImages.length]);
+
+  const removePendingImage = (index: number) => {
+    setPendingImages((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = Array.from(e.clipboardData.items);
+    const imageItems = items.filter((item) => item.type.startsWith("image/"));
+    if (imageItems.length === 0) return;
+    e.preventDefault();
+    const files = imageItems
+      .map((item) => item.getAsFile())
+      .filter(Boolean) as File[];
+    addImageFiles(files);
+  }, [addImageFiles]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    const imageFiles = files.filter((f) => f.type.startsWith("image/"));
+    const zipFile = files.find((f) => f.name.endsWith(".zip"));
+    if (imageFiles.length > 0) {
+      addImageFiles(imageFiles);
+    } else if (zipFile) {
+      // 模拟 zip 上传：创建一个合成的 change event
+      const dt = new DataTransfer();
+      dt.items.add(zipFile);
+      if (fileInputRef.current) {
+        fileInputRef.current.files = dt.files;
+        fileInputRef.current.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    }
+  }, [addImageFiles]);
 
   // Tool Guard resolve handler
   const handleGuardResolve = async (requestId: string, approved: boolean) => {
@@ -834,6 +910,7 @@ export default function ChatPage() {
     setIsStreaming(false);
     setSessionId(id);
     setSearchParams({ session: id });
+    setPendingImages([]);
     const history = await getSessionMessages(id);
     setMessages(mapHistoryToMessages(history));
   };
@@ -844,19 +921,23 @@ export default function ChatPage() {
     setIsStreaming(false);
     setSessionId(id);
     setMessages([]);
+    setPendingImages([]);
     setSearchParams({ session: id });
     queryClient.invalidateQueries({ queryKey: ["sessions"] });
   };
 
   const sendMessage = async (text: string) => {
-    if (!text.trim() || isStreaming || !sessionId) return;
+    if ((!text.trim() && pendingImages.length === 0) || isStreaming || !sessionId) return;
+
+    const images = pendingImages.length > 0 ? [...pendingImages] : undefined;
     setInput("");
+    setPendingImages([]);
     setIsStreaming(true);
 
     // 一次性追加 user + assistant 占位消息
     setMessages((prev) => [
       ...prev,
-      { role: "user", content: text },
+      { role: "user", content: text, images },
       { role: "assistant", content: "", toolCalls: [], streaming: true },
     ]);
 
@@ -866,7 +947,12 @@ export default function ChatPage() {
       const resp = await fetch("/api/v1/agent/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, message: text, channel: "web" }),
+        body: JSON.stringify({
+          session_id: sessionId,
+          message: text,
+          channel: "web",
+          images,
+        }),
         signal: abortRef.current.signal,
       });
 
@@ -963,6 +1049,19 @@ export default function ChatPage() {
                 ? { ...m.guardRequest, status: (ev.approved as boolean) ? "approved" : "rejected" }
                 : undefined,
             }));
+          } else if (ev.type === "retry") {
+            updateLast((m) => ({
+              ...m,
+              retries: [
+                ...(m.retries ?? []),
+                {
+                  attempt: ev.attempt as number,
+                  maxAttempts: ev.max_attempts as number,
+                  error: ev.error as string,
+                  delay: ev.delay as number,
+                },
+              ],
+            }));
           } else if (ev.type === "done") {
             updateLast((m) => ({ ...m, streaming: false }));
             // 刷新会话列表（更新 title 和 message_count）
@@ -998,7 +1097,17 @@ export default function ChatPage() {
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !file.name.endsWith(".zip")) return;
+    if (!file) return;
+
+    // 图片文件 → 加入待发送列表
+    if (file.type.startsWith("image/")) {
+      addImageFiles([file]);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    // zip 文件 → 走技能包安装流程
+    if (!file.name.endsWith(".zip")) return;
 
     setMessages((prev) => [
       ...prev,
@@ -1058,6 +1167,7 @@ export default function ChatPage() {
     const { id } = await createSession();
     setSessionId(id);
     setMessages([]);
+    setPendingImages([]);
     setSearchParams({ session: id });
     queryClient.invalidateQueries({ queryKey: ["sessions"] });
   };
@@ -1167,6 +1277,28 @@ export default function ChatPage() {
                       </a>
                     )
                   )}
+                  {/* Retry status */}
+                  {(msg.retries ?? []).length > 0 && (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50/80 text-xs overflow-hidden">
+                      <div className="flex items-center gap-1.5 px-3 py-1.5 text-amber-700 font-medium">
+                        <Loader2 size={12} className={msg.streaming ? "animate-spin" : ""} />
+                        <span>LLM 调用重试</span>
+                      </div>
+                      <div className="px-3 pb-2 space-y-0.5">
+                        {(msg.retries ?? []).map((r, ri) => (
+                          <div key={ri} className="flex items-center gap-1.5 text-amber-600">
+                            <XCircle size={10} className="shrink-0 text-amber-500" />
+                            <span>
+                              第 {r.attempt}/{r.maxAttempts} 次失败：{r.error}
+                              {msg.streaming && ri === (msg.retries?.length ?? 0) - 1
+                                ? `，${r.delay}s 后重试…`
+                                : ""}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {/* Text bubble — show if has content OR still streaming */}
                   {(msg.content || msg.streaming) && (
                     <div className="bg-white border rounded-2xl px-4 py-2.5 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
@@ -1182,6 +1314,19 @@ export default function ChatPage() {
                 </div>
               ) : (
                 <div className="max-w-[70%] bg-nimo-500 text-white rounded-2xl px-4 py-2.5 text-sm leading-relaxed">
+                  {msg.images && msg.images.length > 0 && (
+                    <div className="flex gap-2 mb-2 flex-wrap">
+                      {msg.images.map((img, imgIdx) => (
+                        <img
+                          key={imgIdx}
+                          src={img}
+                          alt={`附图 ${imgIdx + 1}`}
+                          className="max-h-40 rounded-lg cursor-pointer hover:opacity-90 transition-opacity"
+                          onClick={() => window.open(img, "_blank")}
+                        />
+                      ))}
+                    </div>
+                  )}
                   {msg.content}
                 </div>
               )}
@@ -1198,16 +1343,55 @@ export default function ChatPage() {
             <span>钉钉会话（只读）— 仅供查看历史消息</span>
           </div>
         ) : (
-        <form onSubmit={handleSubmit} className="px-6 py-4 bg-white border-t flex gap-3">
+        <form
+          onSubmit={handleSubmit}
+          onPaste={handlePaste}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={clsx(
+            "px-6 py-4 bg-white border-t transition-colors",
+            dragOver && "bg-nimo-50 border-nimo-300",
+          )}
+        >
+          {/* 图片预览区域 */}
+          {pendingImages.length > 0 && (
+            <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
+              {pendingImages.map((img, i) => (
+                <div key={i} className="relative shrink-0 group">
+                  <img
+                    src={img}
+                    alt={`预览 ${i + 1}`}
+                    className="h-16 w-16 object-cover rounded-lg border border-gray-200 shadow-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removePendingImage(i)}
+                    className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full w-4 h-4 text-[10px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* 拖拽提示 */}
+          {dragOver && (
+            <div className="mb-3 flex items-center justify-center gap-2 py-3 rounded-xl border-2 border-dashed border-nimo-300 bg-nimo-50/50 text-nimo-500 text-sm">
+              <ImagePlus size={18} />
+              释放以添加图片
+            </div>
+          )}
+          <div className="flex gap-3">
           <label
             className="w-10 h-10 rounded-xl border border-gray-200 text-gray-400 hover:text-nimo-500 hover:border-nimo-300 flex items-center justify-center cursor-pointer transition-colors shrink-0"
-            title="上传技能包 (.zip)"
+            title="上传图片或技能包 (.zip)"
           >
             <Paperclip size={18} />
             <input
               ref={fileInputRef}
               type="file"
-              accept=".zip"
+              accept=".zip,image/*"
               className="hidden"
               onChange={handleFileUpload}
               disabled={isStreaming}
@@ -1216,17 +1400,18 @@ export default function ChatPage() {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="输入消息...（支持拖入 .zip 技能包）"
+            placeholder={pendingImages.length > 0 ? "添加描述文字...（可选）" : "输入消息...（支持粘贴/拖入图片）"}
             className="flex-1 rounded-xl border border-gray-200 px-4 py-2 text-sm outline-none focus:border-nimo-400 transition-colors"
             disabled={isStreaming}
           />
           <button
             type="submit"
-            disabled={isStreaming || !input.trim()}
+            disabled={isStreaming || (!input.trim() && pendingImages.length === 0)}
             className="w-10 h-10 rounded-xl bg-nimo-500 text-white flex items-center justify-center hover:bg-nimo-600 disabled:opacity-40 transition-colors"
           >
             <Send size={18} />
           </button>
+          </div>
         </form>
         )}
       </div>

@@ -33,9 +33,14 @@ class BaseAgent(ABC):
 
     # ── 记忆操作快捷方法 ──────────────────────────────────
 
-    async def _remember_user(self, content: str) -> None:
+    async def _remember_user(self, content: str, meta: dict | None = None) -> None:
         await self.memory.add(
-            MemoryMessage(session_id=self.session_id, role=MemoryRole.USER, content=content)
+            MemoryMessage(
+                session_id=self.session_id,
+                role=MemoryRole.USER,
+                content=content,
+                metadata=meta or {},
+            )
         )
 
     async def _remember_assistant(self, content: str, meta: dict | None = None) -> None:
@@ -52,3 +57,8 @@ class BaseAgent(ABC):
         """获取最近对话历史，转换为 AgentScope Msg 格式。"""
         msgs = await self.memory.get_recent(self.session_id, limit=limit)
         return [m.to_agentscope_msg() for m in msgs]
+
+    async def _get_history_with_meta(self, limit: int = 20) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        """获取最近对话历史，返回 (msg_dict, metadata) 元组列表。"""
+        msgs = await self.memory.get_recent(self.session_id, limit=limit)
+        return [(m.to_agentscope_msg(), m.metadata) for m in msgs]

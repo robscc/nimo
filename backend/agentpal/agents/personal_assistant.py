@@ -82,10 +82,10 @@ class PersonalAssistant(BaseAgent):
 
     # ── 核心对话（含工具调用循环）────────────────────────
 
-    async def reply(self, user_input: str, **kwargs: Any) -> str:
+    async def reply(self, user_input: str, images: list[str] | None = None, **kwargs: Any) -> str:
         """处理用户输入，支持多轮工具调用后返回最终回复。"""
-        await self._remember_user(user_input)
-        history = await self._get_history(limit=20)
+        await self._remember_user(user_input, meta={"images": images} if images else None)
+        history_with_meta = await self._get_history_with_meta(limit=20)
         toolkit = await self._build_active_toolkit()
 
         enabled_tool_names = _get_tool_names(toolkit)
@@ -95,8 +95,11 @@ class PersonalAssistant(BaseAgent):
         )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-        messages.extend(history[:-1])
-        messages.append({"role": "user", "content": user_input})
+        # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
+        for msg_dict, meta in history_with_meta[:-1]:
+            messages.append(_rebuild_multimodal(msg_dict, meta))
+        # 构建用户消息（支持多模态图片）
+        messages.append(_build_user_message(user_input, images))
 
         response = None
         usage_rounds: list[tuple[int, int, int]] = []  # (round, input, output)
@@ -179,7 +182,7 @@ class PersonalAssistant(BaseAgent):
         return final_text
 
     async def reply_stream(
-        self, user_input: str
+        self, user_input: str, images: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """流式对话，yield SSE 事件 dict。
 
@@ -194,8 +197,8 @@ class PersonalAssistant(BaseAgent):
             {"type": "error",      "message": "..."}
         """
         try:
-            await self._remember_user(user_input)
-            history = await self._get_history(limit=20)
+            await self._remember_user(user_input, meta={"images": images} if images else None)
+            history_with_meta = await self._get_history_with_meta(limit=20)
             toolkit = await self._build_active_toolkit()
 
             enabled_tool_names = _get_tool_names(toolkit)
@@ -205,8 +208,11 @@ class PersonalAssistant(BaseAgent):
             )
 
             messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-            messages.extend(history[:-1])
-            messages.append({"role": "user", "content": user_input})
+            # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
+            for msg_dict, meta in history_with_meta[:-1]:
+                messages.append(_rebuild_multimodal(msg_dict, meta))
+            # 构建用户消息（支持多模态图片）
+            messages.append(_build_user_message(user_input, images))
 
             final_text = ""
             accumulated_thinking = ""
@@ -214,19 +220,42 @@ class PersonalAssistant(BaseAgent):
             accumulated_files: list[dict[str, Any]] = []
             usage_rounds: list[tuple[int, int, int]] = []  # (round, input, output)
 
+            # 重试事件列表：回调同步写入，主循环在 await 返回后 flush
+            retry_events: list[dict[str, Any]] = []
+
+            def _on_retry(attempt: int, max_attempts: int, error: str, delay: float) -> None:
+                retry_events.append({
+                    "type": "retry",
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "error": error,
+                    "delay": round(delay, 1),
+                })
+
             for round_idx in range(MAX_TOOL_ROUNDS):
                 tools_schema = toolkit.get_json_schemas() if toolkit else None
-                model = _build_model(self._model_config, stream=True)
+                retry_events.clear()
+                model = _build_model(self._model_config, stream=True, on_retry=_on_retry)
 
                 # stream=True → model() 返回 AsyncGenerator[ChatResponse, None]
-                # 每个 chunk 含截至当前的累积内容（非增量），需自行计算 delta
+                # 重试期间 retry_events 会被回调填充，await 返回后统一 flush
                 response_gen = await model(messages, tools=tools_schema)
+
+                # 刷出在 await model() 阶段积累的重试事件
+                for rev in retry_events:
+                    yield rev
+                retry_events.clear()
 
                 prev_thinking_len = 0
                 prev_text_len = 0
                 final_response = None
 
                 async for chunk in response_gen:
+                    # 刷出流式期间积累的重试事件（mid-stream retry）
+                    for rev in retry_events:
+                        yield rev
+                    retry_events.clear()
+
                     final_response = chunk
                     has_tool_calls = any(
                         isinstance(b, dict) and b.get("type") == "tool_use"
@@ -419,6 +448,9 @@ class PersonalAssistant(BaseAgent):
             )
 
         except Exception as exc:  # noqa: BLE001
+            # 刷出未发送的重试事件（重试全部失败时）
+            for rev in retry_events:
+                yield rev
             yield {"type": "error", "message": str(exc)}
 
     # ── SubAgent 派遣 ─────────────────────────────────────
@@ -494,18 +526,46 @@ class PersonalAssistant(BaseAgent):
         db.add(task)
         await db.flush()
 
-        sub_memory = MemoryFactory.create("buffer")
-        sub_agent = SubAgent(
-            session_id=sub_session_id,
-            memory=sub_memory,
-            task=task,
-            db=db,
-            model_config=model_config,
-            role_prompt=role_prompt,
-            max_tool_rounds=max_tool_rounds,
-            parent_session_id=self.session_id,
-        )
-        asyncio.create_task(sub_agent.run(task_prompt))
+        # 将需要传入后台任务的参数提前快照，避免闭包引用请求级 db
+        _sub_session_id = sub_session_id
+        _task_id = task_id
+        _model_config = model_config
+        _role_prompt = role_prompt
+        _max_tool_rounds = max_tool_rounds
+        _parent_session_id = self.session_id
+
+        async def _run_sub_agent() -> None:
+            """在独立 AsyncSession 中运行 SubAgent，避免复用请求级 session。
+
+            请求级 session 会在 HTTP 响应返回后被 get_db 关闭，
+            而 SubAgent 后台任务可能还在执行 → 用已关闭的 session 会 crash 或锁死。
+            """
+            from loguru import logger as _logger
+
+            from agentpal.database import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as bg_db:
+                # 重新加载 task 到新 session 的 identity map 中
+                bg_task = await bg_db.get(SubAgentTask, _task_id)
+                if bg_task is None:
+                    _logger.error(f"SubAgent 后台任务找不到 task record: {_task_id}")
+                    return
+
+                sub_memory = MemoryFactory.create("buffer")
+                sub_agent = SubAgent(
+                    session_id=_sub_session_id,
+                    memory=sub_memory,
+                    task=bg_task,
+                    db=bg_db,
+                    model_config=_model_config,
+                    role_prompt=_role_prompt,
+                    max_tool_rounds=_max_tool_rounds,
+                    parent_session_id=_parent_session_id,
+                )
+                await sub_agent.run(task_prompt)
+                await bg_db.commit()
+
+        asyncio.create_task(_run_sub_agent())
         return task
 
     # ── Tool Guard 辅助 ────────────────────────────────────
@@ -730,6 +790,27 @@ class PersonalAssistant(BaseAgent):
 
 # ── 辅助函数 ──────────────────────────────────────────────
 
+def _build_user_message(user_input: str, images: list[str] | None = None) -> dict[str, Any]:
+    """构建用户消息，支持多模态图片（OpenAI Vision 格式）。"""
+    if images:
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_input}]
+        for img in images:
+            content.append({"type": "image_url", "image_url": {"url": img}})
+        return {"role": "user", "content": content}
+    return {"role": "user", "content": user_input}
+
+
+def _rebuild_multimodal(msg_dict: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    """如果消息有 images metadata，将 content 重建为多模态格式。"""
+    images = meta.get("images")
+    if msg_dict.get("role") == "user" and images:
+        content: list[dict[str, Any]] = [{"type": "text", "text": msg_dict["content"]}]
+        for img in images:
+            content.append({"type": "image_url", "image_url": {"url": img}})
+        msg_dict["content"] = content
+    return msg_dict
+
+
 def _get_tool_names(toolkit: Any) -> list[str]:
     """从 toolkit 中提取工具名称列表。"""
     if toolkit is None:
@@ -753,7 +834,11 @@ def _default_model_config() -> dict[str, Any]:
     }
 
 
-def _build_model(config: dict[str, Any], stream: bool = False) -> Any:
+def _build_model(
+    config: dict[str, Any],
+    stream: bool = False,
+    on_retry: Any | None = None,
+) -> Any:
     """根据 model_config 通过 ProviderManager 实例化模型（自动带重试）。
 
     config 字段：
@@ -776,6 +861,7 @@ def _build_model(config: dict[str, Any], stream: bool = False) -> Any:
         stream=stream,
         api_key_override=api_key_override,
         base_url_override=base_url_override,
+        on_retry=on_retry,
     )
 
 

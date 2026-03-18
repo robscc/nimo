@@ -19,7 +19,7 @@ settings = get_settings()
 engine = create_async_engine(
     settings.database_url,
     echo=settings.is_dev,
-    connect_args={"check_same_thread": False, "timeout": 30},  # SQLite 专用
+    connect_args={"check_same_thread": False, "timeout": 60},  # SQLite 专用
 )
 
 
@@ -28,7 +28,7 @@ engine = create_async_engine(
 def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA busy_timeout=15000")
     cursor.close()
 
 AsyncSessionLocal = async_sessionmaker(
@@ -43,9 +43,33 @@ class Base(DeclarativeBase):
 
 
 async def init_db() -> None:
-    """建表（仅在首次启动时执行）。"""
+    """建表（仅在首次启动时执行），并验证 WAL 模式生效。"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # 验证 WAL 模式确实生效
+    # event listener 在每个连接上执行 PRAGMA journal_mode=WAL，
+    # 但 journal_mode 是持久化到 DB 文件的属性，如果 DB 文件是在非 WAL 模式下
+    # 创建的，或者有其他进程占用，切换可能静默失败。这里做一次显式校验。
+    async with engine.connect() as conn:
+        result = await conn.execute(__import__("sqlalchemy").text("PRAGMA journal_mode"))
+        mode = result.scalar()
+        if mode != "wal":
+            # 强制切换（需要独占连接，create_all 后所有写事务已结束）
+            await conn.execute(__import__("sqlalchemy").text("PRAGMA journal_mode=WAL"))
+            result = await conn.execute(__import__("sqlalchemy").text("PRAGMA journal_mode"))
+            mode = result.scalar()
+        if mode != "wal":
+            import warnings
+            warnings.warn(
+                f"SQLite WAL 模式启用失败（当前: {mode}），并发读写可能导致 database locked。"
+                " 请确保没有其他进程占用数据库文件。",
+                RuntimeWarning,
+                stacklevel=1,
+            )
+        else:
+            from loguru import logger as _db_logger
+            _db_logger.info(f"SQLite journal_mode=WAL 已确认生效 ✅")
 
 
 async def run_migrations() -> None:
@@ -66,6 +90,10 @@ async def run_migrations() -> None:
         ("memory_records", "user_id", "ALTER TABLE memory_records ADD COLUMN user_id VARCHAR(128)"),
         ("memory_records", "channel", "ALTER TABLE memory_records ADD COLUMN channel VARCHAR(64)"),
         ("memory_records", "memory_type", "ALTER TABLE memory_records ADD COLUMN memory_type VARCHAR(32) NOT NULL DEFAULT 'conversation'"),
+        # sub_agent_tasks: agent_name / task_type / execution_log (added for SubAgent routing)
+        ("sub_agent_tasks", "agent_name", "ALTER TABLE sub_agent_tasks ADD COLUMN agent_name VARCHAR(64)"),
+        ("sub_agent_tasks", "task_type", "ALTER TABLE sub_agent_tasks ADD COLUMN task_type VARCHAR(64)"),
+        ("sub_agent_tasks", "execution_log", "ALTER TABLE sub_agent_tasks ADD COLUMN execution_log JSON NOT NULL DEFAULT '[]'"),
     ]
     async with engine.begin() as conn:
         for table, column, sql in migrations:
@@ -84,6 +112,20 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session
             await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def get_db_standalone() -> AsyncGenerator[AsyncSession, None]:
+    """独立短事务 session — 用于需要写操作但可能与 SSE 流并发的 endpoint。
+
+    与 get_db 不同：调用者需要自己 commit，yield 后不会自动 commit。
+    这样可以尽快释放 SQLite 写锁，避免与流式 chat 长事务冲突。
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
         except Exception:
             await session.rollback()
             raise
