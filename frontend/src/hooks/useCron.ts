@@ -61,7 +61,7 @@ export function useCronExecutions(jobId: string | undefined) {
     queryKey: ["cron-executions", jobId],
     queryFn: () => listCronExecutions(jobId!, 20),
     enabled: !!jobId,
-    refetchInterval: 10000,
+    staleTime: 30_000,
   });
 }
 
