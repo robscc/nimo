@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.config import get_settings
-from agentpal.database import get_db, utc_isoformat
+from agentpal.database import get_db, get_db_standalone, utc_isoformat
 from agentpal.memory.factory import MemoryFactory
 from agentpal.models.llm_usage import LLMCallLog
 from agentpal.models.memory import MemoryRecord
@@ -218,9 +218,12 @@ async def get_session_meta(session_id: str, db: AsyncSession = Depends(get_db)):
 async def update_session_config(
     session_id: str,
     req: SessionConfigUpdate,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_standalone),
 ):
     """更新 session 级工具/技能配置。
+
+    使用 get_db_standalone（独立短事务），避免与 SSE 流式 chat
+    的长事务冲突导致 SQLite "database is locked"。
 
     规则：
     - enabled_tools/enabled_skills 为 null → 跟随全局配置
@@ -242,7 +245,7 @@ async def update_session_config(
         session.tool_guard_threshold = req.tool_guard_threshold
 
     session.updated_at = datetime.now(timezone.utc)
-    await db.flush()
+    await db.commit()
 
     # 返回更新后的 meta
     count_result = await db.execute(
@@ -265,8 +268,11 @@ async def update_session_config(
 
 
 @router.delete("/{session_id}", status_code=204)
-async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)):
-    """将 session 标记为 archived（软删除），同时清除记忆记录。"""
+async def delete_session(session_id: str, db: AsyncSession = Depends(get_db_standalone)):
+    """将 session 标记为 archived（软删除），同时清除记忆记录。
+
+    使用 get_db_standalone 避免与 SSE 流长事务冲突。
+    """
     result = await db.execute(select(SessionRecord).where(SessionRecord.id == session_id))
     session = result.scalar_one_or_none()
     if not session:
@@ -339,11 +345,15 @@ async def get_session_messages(
 
 
 @router.delete("/{session_id}/memory")
-async def clear_session_memory(session_id: str, db: AsyncSession = Depends(get_db)):
-    """清除指定 session 的全部记忆。"""
+async def clear_session_memory(session_id: str, db: AsyncSession = Depends(get_db_standalone)):
+    """清除指定 session 的全部记忆。
+
+    使用 get_db_standalone 避免与 SSE 流长事务冲突。
+    """
     settings = get_settings()
     memory = MemoryFactory.create(settings.memory_backend, db=db)
     await memory.clear(session_id)
+    await db.commit()
     return {"status": "cleared", "session_id": session_id}
 
 

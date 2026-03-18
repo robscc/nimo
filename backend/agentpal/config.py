@@ -95,6 +95,11 @@ class Settings(BaseSettings):
     # Agent 工作空间目录，默认 ~/.nimo（可通过 WORKSPACE_DIR 环境变量覆盖）
     workspace_dir: str = str(Path.home() / ".nimo")
 
+    # ── Heartbeat ────────────────────────────────────────
+    # 心跳机制：定期读取 HEARTBEAT.md 并执行其中的任务
+    heartbeat_enabled: bool = True
+    heartbeat_interval_minutes: int = 60  # 心跳间隔（分钟），默认 1 小时
+
     # ── Skill 系统 ──────────────────────────────────────
     skills_dir: str = "./skills_data"   # 技能安装目录
 

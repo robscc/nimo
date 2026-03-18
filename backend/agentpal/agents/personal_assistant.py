@@ -82,10 +82,10 @@ class PersonalAssistant(BaseAgent):
 
     # ── 核心对话（含工具调用循环）────────────────────────
 
-    async def reply(self, user_input: str, **kwargs: Any) -> str:
+    async def reply(self, user_input: str, images: list[str] | None = None, **kwargs: Any) -> str:
         """处理用户输入，支持多轮工具调用后返回最终回复。"""
-        await self._remember_user(user_input)
-        history = await self._get_history(limit=20)
+        await self._remember_user(user_input, meta={"images": images} if images else None)
+        history_with_meta = await self._get_history_with_meta(limit=20)
         toolkit = await self._build_active_toolkit()
 
         enabled_tool_names = _get_tool_names(toolkit)
@@ -95,8 +95,11 @@ class PersonalAssistant(BaseAgent):
         )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-        messages.extend(history[:-1])
-        messages.append({"role": "user", "content": user_input})
+        # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
+        for msg_dict, meta in history_with_meta[:-1]:
+            messages.append(_rebuild_multimodal(msg_dict, meta))
+        # 构建用户消息（支持多模态图片）
+        messages.append(_build_user_message(user_input, images))
 
         response = None
         usage_rounds: list[tuple[int, int, int]] = []  # (round, input, output)
@@ -179,7 +182,7 @@ class PersonalAssistant(BaseAgent):
         return final_text
 
     async def reply_stream(
-        self, user_input: str
+        self, user_input: str, images: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """流式对话，yield SSE 事件 dict。
 
@@ -194,8 +197,8 @@ class PersonalAssistant(BaseAgent):
             {"type": "error",      "message": "..."}
         """
         try:
-            await self._remember_user(user_input)
-            history = await self._get_history(limit=20)
+            await self._remember_user(user_input, meta={"images": images} if images else None)
+            history_with_meta = await self._get_history_with_meta(limit=20)
             toolkit = await self._build_active_toolkit()
 
             enabled_tool_names = _get_tool_names(toolkit)
@@ -205,8 +208,11 @@ class PersonalAssistant(BaseAgent):
             )
 
             messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-            messages.extend(history[:-1])
-            messages.append({"role": "user", "content": user_input})
+            # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
+            for msg_dict, meta in history_with_meta[:-1]:
+                messages.append(_rebuild_multimodal(msg_dict, meta))
+            # 构建用户消息（支持多模态图片）
+            messages.append(_build_user_message(user_input, images))
 
             final_text = ""
             accumulated_thinking = ""
@@ -456,6 +462,8 @@ class PersonalAssistant(BaseAgent):
         context: dict[str, Any] | None = None,
         task_type: str | None = None,
         agent_name: str | None = None,
+        priority: int = 5,
+        max_retries: int = 3,
     ) -> SubAgentTask:
         """创建并异步启动一个 SubAgent 任务。
 
@@ -470,6 +478,8 @@ class PersonalAssistant(BaseAgent):
             context:      附加上下文
             task_type:    任务类型（用于自动路由）
             agent_name:   指定 SubAgent 名称
+            priority:     优先级 1-10（10 最高），默认 5
+            max_retries:  最大重试次数 0-10，默认 3
         """
         from agentpal.agents.registry import SubAgentRegistry
         from agentpal.agents.sub_agent import SubAgent
@@ -496,6 +506,10 @@ class PersonalAssistant(BaseAgent):
             model_config = agent_def.get_model_config(self._model_config)
             max_tool_rounds = agent_def.max_tool_rounds
 
+        # Clamp priority and max_retries
+        priority = max(1, min(10, priority))
+        max_retries = max(0, min(10, max_retries))
+
         task = SubAgentTask(
             id=task_id,
             parent_session_id=self.session_id,
@@ -506,6 +520,8 @@ class PersonalAssistant(BaseAgent):
             task_type=task_type,
             execution_log=[],
             meta=context or {},
+            priority=priority,
+            max_retries=max_retries,
         )
         db.add(task)
         await db.flush()
@@ -745,6 +761,27 @@ class PersonalAssistant(BaseAgent):
 
 
 # ── 辅助函数 ──────────────────────────────────────────────
+
+def _build_user_message(user_input: str, images: list[str] | None = None) -> dict[str, Any]:
+    """构建用户消息，支持多模态图片（OpenAI Vision 格式）。"""
+    if images:
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_input}]
+        for img in images:
+            content.append({"type": "image_url", "image_url": {"url": img}})
+        return {"role": "user", "content": content}
+    return {"role": "user", "content": user_input}
+
+
+def _rebuild_multimodal(msg_dict: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    """如果消息有 images metadata，将 content 重建为多模态格式。"""
+    images = meta.get("images")
+    if msg_dict.get("role") == "user" and images:
+        content: list[dict[str, Any]] = [{"type": "text", "text": msg_dict["content"]}]
+        for img in images:
+            content.append({"type": "image_url", "image_url": {"url": img}})
+        msg_dict["content"] = content
+    return msg_dict
+
 
 def _get_tool_names(toolkit: Any) -> list[str]:
     """从 toolkit 中提取工具名称列表。"""

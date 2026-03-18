@@ -21,6 +21,8 @@ class WorkspaceFiles:
     memory: str = ""
     context: str = ""
     today_log: str = ""
+    bootstrap: str = ""
+    heartbeat: str = ""
 
 
 class ContextBuilder:
@@ -30,14 +32,14 @@ class ContextBuilder:
     - MEMORY:    最多 3000 字符（超出从末尾截断，保留最新记忆）
     - TODAY_LOG: 最多 1500 字符（保留最近日志）
     - CONTEXT:   最多 2000 字符
-    - AGENTS:    最多 2000 字符
+    - AGENTS:    最多 4000 字符
     - SKILL_PROMPT: 每个技能最多 4000 字符
     """
 
     MAX_MEMORY_CHARS = 3000
     MAX_DAILY_LOG_CHARS = 1500
     MAX_CONTEXT_CHARS = 2000
-    MAX_AGENTS_CHARS = 2000
+    MAX_AGENTS_CHARS = 4000
     MAX_SKILL_PROMPT_CHARS = 4000
 
     def build_system_prompt(
@@ -60,6 +62,14 @@ class ContextBuilder:
         """
         now = datetime.now(timezone.utc).astimezone()
         sections: list[str] = []
+
+        # 0. Bootstrap（首次引导 — 优先级最高，存在时直接注入）
+        is_bootstrapping = bool(ws.bootstrap.strip()) and ws.bootstrap.strip() not in ("(暂无)", "(空)")
+        if is_bootstrapping:
+            sections.append(
+                "# 🚀 Bootstrap — 首次引导（优先执行）\n\n"
+                f"{ws.bootstrap.strip()}"
+            )
 
         # 1. Agent 身份
         if ws.identity.strip():
@@ -101,6 +111,20 @@ class ContextBuilder:
                 log = "...(较早的日志已省略)...\n\n" + log[-self.MAX_DAILY_LOG_CHARS :]
             sections.append(f"# Today's Activity Log\n\n{log}")
 
+        # 7.5 Heartbeat 任务清单（如果有非注释内容，注入提示）
+        if ws.heartbeat.strip():
+            # 过滤掉纯注释行，看是否有实际任务
+            active_lines = [
+                line for line in ws.heartbeat.strip().splitlines()
+                if line.strip() and not line.strip().startswith("#") and not line.strip().startswith(">")
+            ]
+            if active_lines:
+                sections.append(
+                    "# Heartbeat — 定期任务\n\n"
+                    "以下是用户配置的定期检查任务，heartbeat 机制会自动执行：\n\n"
+                    + "\n".join(active_lines)
+                )
+
         # 8. 运行时环境（时间、时区、OS、session_id 等）
         tz_name = now.strftime("%Z")
         tz_offset = now.strftime("%z")  # e.g. +0800
@@ -108,6 +132,7 @@ class ContextBuilder:
             f"- Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} {tz_name} (UTC{tz_offset[:3]}:{tz_offset[3:]})",
             f"- Day of week: {now.strftime('%A')}",
             f"- Timezone: {tz_name} (UTC{tz_offset[:3]}:{tz_offset[3:]})",
+            "- Workspace directory: `~/.nimo/` (所有记忆文件必须存放在此目录下，如 `~/.nimo/USER.md`、`~/.nimo/MEMORY.md` 等)",
         ]
         if runtime_context:
             if runtime_context.get("session_id"):

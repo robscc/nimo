@@ -7,7 +7,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from agentpal.database import Base, get_db
+from agentpal.database import Base, get_db, get_db_standalone
 from agentpal.main import create_app
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
@@ -29,6 +29,7 @@ async def test_app(tmp_path):
             await session.rollback()
 
     app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_db_standalone] = override_db
     yield app
     await engine.dispose()
 
@@ -397,3 +398,126 @@ class TestCoderSubAgentIntegration:
         })
         assert cron_resp.status_code == 201
         assert cron_resp.json()["agent_name"] == "coder-pro-v2"
+
+
+# ── Task List API ────────────────────────────────────────
+
+
+class TestTaskListAPI:
+    """GET /api/v1/agent/tasks 列表端点测试。"""
+
+    async def _create_task(
+        self,
+        client: AsyncClient,
+        test_app,
+        *,
+        priority: int = 5,
+        max_retries: int = 3,
+        status: str = "pending",
+        parent_session_id: str = "test-session",
+    ) -> str:
+        """直接向 DB 插入任务，返回 task_id。"""
+        import uuid
+        from datetime import datetime, timezone
+
+        from agentpal.database import get_db
+        from agentpal.models.session import SubAgentTask
+
+        task_id = str(uuid.uuid4())
+        override_db = test_app.dependency_overrides[get_db]
+
+        # 获取 db session
+        async for db in override_db():
+            task = SubAgentTask(
+                id=task_id,
+                parent_session_id=parent_session_id,
+                sub_session_id=f"sub:{parent_session_id}:{task_id}",
+                task_prompt="测试任务",
+                status=status,
+                priority=priority,
+                max_retries=max_retries,
+                execution_log=[],
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(task)
+            await db.commit()
+            break
+
+        return task_id
+
+    @pytest.mark.asyncio
+    async def test_empty_list(self, client: AsyncClient):
+        """空列表返回 200 和空 items。"""
+        resp = await client.get("/api/v1/agent/tasks")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["items"] == []
+        assert data["total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_list_returns_tasks(self, client: AsyncClient, test_app):
+        """插入任务后列表应返回。"""
+        task_id = await self._create_task(client, test_app, priority=7)
+
+        resp = await client.get("/api/v1/agent/tasks")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+        task_ids = [t["task_id"] for t in data["items"]]
+        assert task_id in task_ids
+        # 验证新字段
+        task = next(t for t in data["items"] if t["task_id"] == task_id)
+        assert task["priority"] == 7
+        assert task["retry_count"] == 0
+        assert task["max_retries"] == 3
+
+    @pytest.mark.asyncio
+    async def test_status_filter(self, client: AsyncClient, test_app):
+        """按状态过滤。"""
+        await self._create_task(client, test_app, status="done")
+        await self._create_task(client, test_app, status="failed")
+
+        resp = await client.get("/api/v1/agent/tasks", params={"status": "done"})
+        assert resp.status_code == 200
+        data = resp.json()
+        for item in data["items"]:
+            assert item["status"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_priority_filter(self, client: AsyncClient, test_app):
+        """按优先级范围过滤。"""
+        await self._create_task(client, test_app, priority=2)
+        await self._create_task(client, test_app, priority=8)
+
+        resp = await client.get("/api/v1/agent/tasks", params={"priority_min": 7})
+        assert resp.status_code == 200
+        data = resp.json()
+        for item in data["items"]:
+            assert item["priority"] >= 7
+
+    @pytest.mark.asyncio
+    async def test_pagination(self, client: AsyncClient, test_app):
+        """分页参数生效。"""
+        for i in range(5):
+            await self._create_task(client, test_app, priority=i + 1)
+
+        resp = await client.get("/api/v1/agent/tasks", params={"limit": 2, "offset": 0})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 2
+        assert data["total"] >= 5
+        assert data["limit"] == 2
+        assert data["offset"] == 0
+
+    @pytest.mark.asyncio
+    async def test_task_detail_has_new_fields(self, client: AsyncClient, test_app):
+        """GET /agent/tasks/{id} 应返回新字段。"""
+        task_id = await self._create_task(client, test_app, priority=9, max_retries=5)
+
+        resp = await client.get(f"/api/v1/agent/tasks/{task_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["priority"] == 9
+        assert data["max_retries"] == 5
+        assert data["retry_count"] == 0
+        assert "created_at" in data

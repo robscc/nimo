@@ -9,6 +9,8 @@
     ├── USER.md                ← 用户画像
     ├── MEMORY.md              ← 持久化长期记忆
     ├── CONTEXT.md             ← 当前阶段补充背景（可选）
+    ├── BOOTSTRAP.md           ← 首次运行引导（完成后删除）
+    ├── HEARTBEAT.md           ← 定期心跳任务清单
     ├── memory/
     │   └── YYYY-MM-DD.md      ← 每日摘要日志
     └── canvas/                ← Agent 工作区文件
@@ -25,6 +27,9 @@ from loguru import logger
 
 from agentpal.workspace.context_builder import WorkspaceFiles
 from agentpal.workspace.defaults import DEFAULT_FILES, EDITABLE_FILES
+
+# 迁移版本标记，每次 defaults.py 有重大更新时递增
+_MIGRATION_VERSION = 2
 
 
 class WorkspaceManager:
@@ -54,11 +59,16 @@ class WorkspaceManager:
         flag = self.root / self._BOOTSTRAP_FLAG
         if flag.exists():
             self._bootstrapped = True
+            # 检查是否需要迁移
+            await self._migrate_if_needed()
             return False
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._create_dirs_sync)
         await loop.run_in_executor(None, self._write_defaults_sync)
+        # 写入当前迁移版本
+        version_file = self.root / ".migration_version"
+        version_file.write_text(str(_MIGRATION_VERSION), encoding="utf-8")
         flag.write_text("1", encoding="utf-8")
         self._bootstrapped = True
         logger.info(f"WorkspaceManager: 工作空间初始化完成 → {self.root}")
@@ -75,13 +85,64 @@ class WorkspaceManager:
             if not path.exists():
                 path.write_text(content, encoding="utf-8")
 
+    # ── 迁移 ──────────────────────────────────────────────
+
+    async def _migrate_if_needed(self) -> None:
+        """检查迁移版本，必要时执行增量迁移。"""
+        version_file = self.root / ".migration_version"
+        current = 0
+        if version_file.exists():
+            try:
+                current = int(version_file.read_text(encoding="utf-8").strip())
+            except (ValueError, OSError):
+                current = 0
+
+        if current >= _MIGRATION_VERSION:
+            return
+
+        loop = asyncio.get_event_loop()
+
+        # Migration v1 → v2: 给 AGENTS.md 追加「记忆策略」section（含路径规则）
+        if current < 2:
+            await loop.run_in_executor(None, self._migrate_v2_agents_memory_strategy)
+
+        # 写入最新版本号
+        version_file.write_text(str(_MIGRATION_VERSION), encoding="utf-8")
+        logger.info(f"WorkspaceManager: 迁移完成 v{current} → v{_MIGRATION_VERSION}")
+
+    def _migrate_v2_agents_memory_strategy(self) -> None:
+        """v2 迁移：如果 AGENTS.md 没有「记忆策略」section，从 defaults 追加。"""
+        agents_path = self.root / "AGENTS.md"
+        if not agents_path.exists():
+            return
+
+        content = agents_path.read_text(encoding="utf-8")
+        if "## 记忆策略" in content:
+            return  # 已包含，跳过
+
+        # 从 DEFAULT_AGENTS_MD 中提取「## 记忆策略」及之后的内容追加
+        from agentpal.workspace.defaults import DEFAULT_AGENTS_MD
+
+        marker = "## 记忆策略"
+        idx = DEFAULT_AGENTS_MD.find(marker)
+        if idx < 0:
+            return
+
+        memory_section = DEFAULT_AGENTS_MD[idx:]
+        updated = content.rstrip() + "\n\n" + memory_section
+        agents_path.write_text(updated, encoding="utf-8")
+        logger.info("Migration v2: 已向 AGENTS.md 追加「记忆策略」section")
+
     # ── 读取所有 workspace 文件 ───────────────────────────
 
     async def load(self) -> WorkspaceFiles:
         """一次性加载所有 workspace 文件，返回 WorkspaceFiles 数据类。"""
         await self.bootstrap()
 
-        agents, identity, soul, user, memory, context, today_log = await asyncio.gather(
+        (
+            agents, identity, soul, user, memory, context,
+            today_log, bootstrap_content, heartbeat,
+        ) = await asyncio.gather(
             self._read(self.root / "AGENTS.md"),
             self._read(self.root / "IDENTITY.md"),
             self._read(self.root / "SOUL.md"),
@@ -89,6 +150,8 @@ class WorkspaceManager:
             self._read(self.root / "MEMORY.md"),
             self._read(self.root / "CONTEXT.md"),
             self._read_today_log(),
+            self._read(self.root / "BOOTSTRAP.md"),
+            self._read(self.root / "HEARTBEAT.md"),
         )
 
         return WorkspaceFiles(
@@ -99,6 +162,8 @@ class WorkspaceManager:
             memory=memory,
             context=context,
             today_log=today_log,
+            bootstrap=bootstrap_content,
+            heartbeat=heartbeat,
         )
 
     # ── 读写单个文件 ──────────────────────────────────────

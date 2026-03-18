@@ -12,6 +12,7 @@ export interface ChatRequest {
   message: string;
   channel?: string;
   user_id?: string;
+  images?: string[];  // base64 data URI 列表（多模态图片输入）
 }
 
 export interface ChatResponse {
@@ -24,6 +25,28 @@ export interface TaskStatusResponse {
   status: "pending" | "running" | "done" | "failed" | "cancelled";
   result: string | null;
   error: string | null;
+  agent_name: string | null;
+  task_type: string | null;
+  priority: number;
+  retry_count: number;
+  max_retries: number;
+  created_at: string | null;
+}
+
+export interface TaskListParams {
+  status?: string;
+  priority_min?: number;
+  priority_max?: number;
+  parent_session_id?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface TaskListResponse {
+  items: TaskStatusResponse[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export interface SessionSummary {
@@ -64,6 +87,7 @@ export interface HistoryMessageMeta {
     name: string;
     mime: string;
   }>;
+  images?: string[];  // base64 data URI 列表（用户发送的图片）
 }
 
 export interface HistoryMessage {
@@ -98,10 +122,8 @@ export async function getTaskStatus(taskId: string): Promise<TaskStatusResponse>
   return data;
 }
 
-export async function listAllSubAgentTasks(status?: string, limit = 100): Promise<TaskListItem[]> {
-  const { data } = await api.get<TaskListItem[]>("/agent/tasks", {
-    params: { ...(status ? { status } : {}), limit },
-  });
+export async function listTasks(params?: TaskListParams): Promise<TaskListResponse> {
+  const { data } = await api.get<TaskListResponse>("/agent/tasks", { params });
   return data;
 }
 
