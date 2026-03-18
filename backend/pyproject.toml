@@ -39,6 +39,8 @@ dependencies = [
     "dingtalk-stream>=0.24.0",
     "python-socks[asyncio]>=2.0.0",   # DingTalk Stream WebSocket SOCKS 代理支持
     "lark-oapi>=1.2.0",
+    # 沙箱
+    "docker>=7.0.0",
 ]
 
 [project.optional-dependencies]

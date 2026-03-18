@@ -117,6 +117,11 @@ class Settings(BaseSettings):
 
     imessage_enabled: bool = False
 
+    # ── Sandbox (Docker 沙箱) ──────────────────────────────
+    sandbox_enabled: bool = False           # 总开关
+    sandbox_image: str = "python:3.11-slim" # 默认 Docker 镜像
+    sandbox_memory_limit: str = "512m"      # 容器内存限制
+
     # ── 日志 ──────────────────────────────────────────────
     log_level: str = "INFO"
 

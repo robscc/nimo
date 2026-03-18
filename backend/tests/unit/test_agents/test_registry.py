@@ -45,7 +45,7 @@ class TestSubAgentRegistry:
         await registry.ensure_defaults()
 
         agents = await registry.list_agents()
-        assert len(agents) == 2
+        assert len(agents) == 3
 
     @pytest.mark.asyncio
     async def test_create_agent(self, db: AsyncSession):
@@ -133,13 +133,15 @@ class TestSubAgentRegistry:
         await registry.ensure_defaults()
 
         enabled = await registry.get_enabled_agents()
-        assert len(enabled) == 2
+        assert len(enabled) == 3
 
         # 禁用一个
         await registry.update_agent("coder", {"enabled": False})
         enabled = await registry.get_enabled_agents()
-        assert len(enabled) == 1
-        assert enabled[0].name == "researcher"
+        assert len(enabled) == 2
+        enabled_names = {a.name for a in enabled}
+        assert "researcher" in enabled_names
+        assert "sandbox" in enabled_names
 
 
 class TestSubAgentDefinitionModel:

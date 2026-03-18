@@ -71,6 +71,17 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # 清理过期沙箱容器（72 小时）
+    try:
+        from agentpal.sandbox.manager import SandboxManager
+
+        sandbox_mgr = SandboxManager()
+        cleaned = await sandbox_mgr.cleanup_stale(max_age_hours=72)
+        if cleaned:
+            logger.info(f"已清理 {cleaned} 个过期沙箱容器")
+    except Exception as e:
+        logger.debug(f"沙箱容器清理跳过: {e}")
+
     # 停止 DingTalk Stream 客户端
     await dingtalk_stream_worker.stop()
 

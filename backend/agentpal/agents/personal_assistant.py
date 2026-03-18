@@ -501,16 +501,33 @@ class PersonalAssistant(BaseAgent):
         await db.flush()
 
         sub_memory = MemoryFactory.create("buffer")
-        sub_agent = SubAgent(
-            session_id=sub_session_id,
-            memory=sub_memory,
-            task=task,
-            db=db,
-            model_config=model_config,
-            role_prompt=role_prompt,
-            max_tool_rounds=max_tool_rounds,
-            parent_session_id=self.session_id,
-        )
+
+        # 检测 sandbox 类型
+        if agent_def and agent_def.sandbox_config is not None:
+            from agentpal.agents.sandbox_agent import SandboxAgent
+
+            sub_agent = SandboxAgent(
+                session_id=sub_session_id,
+                memory=sub_memory,
+                task=task,
+                db=db,
+                model_config=model_config,
+                role_prompt=role_prompt,
+                max_tool_rounds=max_tool_rounds,
+                parent_session_id=self.session_id,
+                sandbox_config=agent_def.sandbox_config,
+            )
+        else:
+            sub_agent = SubAgent(
+                session_id=sub_session_id,
+                memory=sub_memory,
+                task=task,
+                db=db,
+                model_config=model_config,
+                role_prompt=role_prompt,
+                max_tool_rounds=max_tool_rounds,
+                parent_session_id=self.session_id,
+            )
         asyncio.create_task(sub_agent.run(task_prompt))
         return task
 

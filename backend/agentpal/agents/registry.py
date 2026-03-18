@@ -41,6 +41,21 @@ DEFAULT_SUB_AGENTS: list[dict[str, Any]] = [
         "max_tool_rounds": 8,
         "timeout_seconds": 120,
     },
+    {
+        "name": "sandbox",
+        "display_name": "沙箱执行员",
+        "role_prompt": (
+            "你是一个在隔离 Docker 沙箱中执行任务的代理。你的职责是：\n"
+            "- 在安全隔离环境中执行命令和脚本\n"
+            "- 系统分析和性能评估\n"
+            "- 实验性代码运行和基准测试\n"
+            "- 安装和测试任何所需的软件包\n\n"
+            "工作原则：充分利用沙箱的隔离特性，大胆实验，将结果保存到 /workspace/ 目录。"
+        ),
+        "accepted_task_types": ["sandbox", "system_analysis", "experiment", "benchmark"],
+        "max_tool_rounds": 12,
+        "timeout_seconds": 600,
+    },
 ]
 
 
@@ -55,7 +70,14 @@ class SubAgentRegistry:
         for defn in DEFAULT_SUB_AGENTS:
             existing = await self._db.get(SubAgentDefinition, defn["name"])
             if existing is None:
-                record = SubAgentDefinition(**defn)
+                # sandbox 类型需要额外写入 sandbox_config
+                sandbox_config = None
+                if defn["name"] == "sandbox":
+                    sandbox_config = {
+                        "image": "python:3.11-slim",
+                        "memory_limit": "512m",
+                    }
+                record = SubAgentDefinition(**defn, sandbox_config=sandbox_config)
                 self._db.add(record)
                 logger.info(f"创建默认 SubAgent 定义: {defn['name']}")
         await self._db.flush()
@@ -95,6 +117,7 @@ class SubAgentRegistry:
             max_tool_rounds=data.get("max_tool_rounds", 8),
             timeout_seconds=data.get("timeout_seconds", 300),
             enabled=data.get("enabled", True),
+            sandbox_config=data.get("sandbox_config"),
         )
         self._db.add(record)
         await self._db.flush()
@@ -110,7 +133,7 @@ class SubAgentRegistry:
         updatable = [
             "display_name", "role_prompt", "accepted_task_types",
             "model_name", "model_provider", "model_api_key", "model_base_url",
-            "max_tool_rounds", "timeout_seconds", "enabled",
+            "max_tool_rounds", "timeout_seconds", "enabled", "sandbox_config",
         ]
         for key in updatable:
             if key in data:
@@ -169,6 +192,7 @@ class SubAgentRegistry:
             "max_tool_rounds": record.max_tool_rounds,
             "timeout_seconds": record.timeout_seconds,
             "enabled": record.enabled,
+            "sandbox_config": record.sandbox_config,
             "created_at": record.created_at.isoformat() if record.created_at else None,
             "updated_at": record.updated_at.isoformat() if record.updated_at else None,
         }

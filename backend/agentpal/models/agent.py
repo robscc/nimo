@@ -44,6 +44,7 @@ class SubAgentDefinition(Base):
     model_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     max_tool_rounds: Mapped[int] = mapped_column(nullable=False, default=8)
     timeout_seconds: Mapped[int] = mapped_column(nullable=False, default=300)
+    sandbox_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

@@ -66,6 +66,8 @@ async def run_migrations() -> None:
         ("sub_agent_tasks", "agent_name", "ALTER TABLE sub_agent_tasks ADD COLUMN agent_name VARCHAR(64)"),
         ("sub_agent_tasks", "task_type", "ALTER TABLE sub_agent_tasks ADD COLUMN task_type VARCHAR(64)"),
         ("sub_agent_tasks", "execution_log", "ALTER TABLE sub_agent_tasks ADD COLUMN execution_log JSON NOT NULL DEFAULT '[]'"),
+        # sub_agent_definitions: sandbox_config (added for Sandbox SubAgent)
+        ("sub_agent_definitions", "sandbox_config", "ALTER TABLE sub_agent_definitions ADD COLUMN sandbox_config JSON"),
     ]
     async with engine.begin() as conn:
         for table, column, sql in migrations:
