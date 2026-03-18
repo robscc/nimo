@@ -378,6 +378,34 @@ class SubAgent(BaseAgent):
         except Exception:
             pass
 
+        # 任务终态时发布 WebSocket 通知
+        if status in (TaskStatus.DONE, TaskStatus.FAILED):
+            try:
+                from agentpal.services.notification_bus import (
+                    Notification,
+                    NotificationType,
+                    notification_bus,
+                )
+
+                ntype = (
+                    NotificationType.SUBAGENT_TASK_DONE
+                    if status == TaskStatus.DONE
+                    else NotificationType.SUBAGENT_TASK_FAILED
+                )
+                await notification_bus.publish(
+                    Notification(
+                        type=ntype,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        payload={
+                            "task_id": self._task.id,
+                            "agent_name": self._task.agent_name,
+                            "status": status.value,
+                        },
+                    )
+                )
+            except Exception:
+                pass  # 通知失败不影响主流程
+
     def _log(self, event_type: str, data: dict[str, Any]) -> None:
         """向执行日志追加一条记录。"""
         self._execution_log.append({
