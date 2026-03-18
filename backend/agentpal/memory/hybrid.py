@@ -11,7 +11,8 @@
 │    ├─ Buffer 有足够数据 → 直接返回              │
 │    └─ Buffer 不足      → 从 SQLite 补全        │
 │                                              │
-│  搜索 search()  → SQLite LIKE / FTS           │
+│  搜索 search()         → SQLite LIKE / FTS    │
+│  跨 session 搜索       → SQLite 跨 session 查询│
 └──────────────────────────────────────────────┘
 
 Session 首次访问时，会从 SQLite 预热 BufferMemory，
@@ -20,7 +21,7 @@ Session 首次访问时，会从 SQLite 预热 BufferMemory，
 
 from __future__ import annotations
 
-from agentpal.memory.base import BaseMemory, MemoryMessage
+from agentpal.memory.base import BaseMemory, MemoryMessage, MemoryScope
 from agentpal.memory.buffer import BufferMemory
 from agentpal.memory.sqlite import SQLiteMemory
 
@@ -77,6 +78,15 @@ class HybridMemory(BaseMemory):
     ) -> list[MemoryMessage]:
         # 全文检索走 SQLite（未来可替换为 FTS5 / 向量检索）
         return await self._persistent.search(session_id, query, limit)
+
+    async def cross_session_search(
+        self,
+        scope: MemoryScope,
+        query: str,
+        limit: int = 10,
+    ) -> list[MemoryMessage]:
+        """跨 session 搜索，代理到 SQLite 持久化层。"""
+        return await self._persistent.cross_session_search(scope, query, limit)
 
     async def count(self, session_id: str) -> int:
         return await self._persistent.count(session_id)

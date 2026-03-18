@@ -87,9 +87,21 @@ class Settings(BaseSettings):
     # buffer: 纯内存滑动窗口
     # sqlite: 仅持久化
     # hybrid: buffer + sqlite（默认，推荐）
-    memory_backend: Literal["buffer", "sqlite", "hybrid"] = "hybrid"
+    # mem0:   mem0 语义记忆（需 pip install mem0ai）
+    # reme:   ReMe 记忆管理（需 pip install reme-memory 或启动 ReMe server）
+    memory_backend: Literal["buffer", "sqlite", "hybrid", "mem0", "reme"] = "hybrid"
     memory_buffer_size: int = 30      # BufferMemory 最大条数
     memory_sqlite_limit: int = 200    # SQLite 每次查询上限
+
+    # ── mem0 配置（memory_backend="mem0" 时生效）───────────
+    memory_mem0_config: dict[str, Any] | None = None   # mem0 完整配置字典
+    memory_mem0_infer: bool = False  # 是否启用 LLM 自动事实提取
+
+    # ── ReMe 配置（memory_backend="reme" 时生效）──────────
+    memory_reme_server_url: str | None = None   # ReMe 服务端 URL
+    memory_reme_agent_name: str = "AgentPal"    # ReMe Agent 名称
+    memory_reme_model_config: dict[str, Any] | None = None
+    memory_reme_embedding_config: dict[str, Any] | None = None
 
     # ── Workspace ─────────────────────────────────────────
     # Agent 工作空间目录，默认 ~/.nimo（可通过 WORKSPACE_DIR 环境变量覆盖）

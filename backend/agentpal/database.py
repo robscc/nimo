@@ -86,6 +86,10 @@ async def run_migrations() -> None:
         ("sub_agent_tasks", "priority", "ALTER TABLE sub_agent_tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 5"),
         ("sub_agent_tasks", "retry_count", "ALTER TABLE sub_agent_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"),
         ("sub_agent_tasks", "max_retries", "ALTER TABLE sub_agent_tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3"),
+        # memory_records: user_id / channel / memory_type (added in v0.3 for cross-session search)
+        ("memory_records", "user_id", "ALTER TABLE memory_records ADD COLUMN user_id VARCHAR(128)"),
+        ("memory_records", "channel", "ALTER TABLE memory_records ADD COLUMN channel VARCHAR(64)"),
+        ("memory_records", "memory_type", "ALTER TABLE memory_records ADD COLUMN memory_type VARCHAR(32) NOT NULL DEFAULT 'conversation'"),
         # sub_agent_tasks: agent_name / task_type / execution_log (added for SubAgent routing)
         ("sub_agent_tasks", "agent_name", "ALTER TABLE sub_agent_tasks ADD COLUMN agent_name VARCHAR(64)"),
         ("sub_agent_tasks", "task_type", "ALTER TABLE sub_agent_tasks ADD COLUMN task_type VARCHAR(64)"),

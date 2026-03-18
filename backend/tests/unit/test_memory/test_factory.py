@@ -48,3 +48,32 @@ class TestMemoryFactory:
         mock_db = MagicMock()
         mem = MemoryFactory.create(None, db=mock_db)
         assert isinstance(mem, HybridMemory)
+
+    def test_create_mem0(self):
+        """创建 mem0 后端。"""
+        from agentpal.memory.mem0_adapter import Mem0Memory
+
+        mem = MemoryFactory.create("mem0")
+        assert isinstance(mem, Mem0Memory)
+
+    def test_create_mem0_with_config(self):
+        """创建 mem0 后端（带配置）。"""
+        from agentpal.memory.mem0_adapter import Mem0Memory
+
+        config = {"llm": {"provider": "openai"}}
+        mem = MemoryFactory.create("mem0", mem0_config=config)
+        assert isinstance(mem, Mem0Memory)
+
+    def test_create_reme(self):
+        """创建 ReMe 后端。"""
+        from agentpal.memory.reme_adapter import ReMeMemory
+
+        mem = MemoryFactory.create("reme")
+        assert isinstance(mem, ReMeMemory)
+
+    def test_create_reme_with_server_url(self):
+        """创建 ReMe 后端（带 server URL）。"""
+        from agentpal.memory.reme_adapter import ReMeMemory
+
+        mem = MemoryFactory.create("reme", reme_server_url="http://localhost:8080")
+        assert isinstance(mem, ReMeMemory)
