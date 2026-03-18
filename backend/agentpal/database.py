@@ -43,9 +43,33 @@ class Base(DeclarativeBase):
 
 
 async def init_db() -> None:
-    """建表（仅在首次启动时执行）。"""
+    """建表（仅在首次启动时执行），并验证 WAL 模式生效。"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # 验证 WAL 模式确实生效
+    # event listener 在每个连接上执行 PRAGMA journal_mode=WAL，
+    # 但 journal_mode 是持久化到 DB 文件的属性，如果 DB 文件是在非 WAL 模式下
+    # 创建的，或者有其他进程占用，切换可能静默失败。这里做一次显式校验。
+    async with engine.connect() as conn:
+        result = await conn.execute(__import__("sqlalchemy").text("PRAGMA journal_mode"))
+        mode = result.scalar()
+        if mode != "wal":
+            # 强制切换（需要独占连接，create_all 后所有写事务已结束）
+            await conn.execute(__import__("sqlalchemy").text("PRAGMA journal_mode=WAL"))
+            result = await conn.execute(__import__("sqlalchemy").text("PRAGMA journal_mode"))
+            mode = result.scalar()
+        if mode != "wal":
+            import warnings
+            warnings.warn(
+                f"SQLite WAL 模式启用失败（当前: {mode}），并发读写可能导致 database locked。"
+                " 请确保没有其他进程占用数据库文件。",
+                RuntimeWarning,
+                stacklevel=1,
+            )
+        else:
+            from loguru import logger as _db_logger
+            _db_logger.info(f"SQLite journal_mode=WAL 已确认生效 ✅")
 
 
 async def run_migrations() -> None:

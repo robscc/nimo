@@ -526,18 +526,46 @@ class PersonalAssistant(BaseAgent):
         db.add(task)
         await db.flush()
 
-        sub_memory = MemoryFactory.create("buffer")
-        sub_agent = SubAgent(
-            session_id=sub_session_id,
-            memory=sub_memory,
-            task=task,
-            db=db,
-            model_config=model_config,
-            role_prompt=role_prompt,
-            max_tool_rounds=max_tool_rounds,
-            parent_session_id=self.session_id,
-        )
-        asyncio.create_task(sub_agent.run(task_prompt))
+        # 将需要传入后台任务的参数提前快照，避免闭包引用请求级 db
+        _sub_session_id = sub_session_id
+        _task_id = task_id
+        _model_config = model_config
+        _role_prompt = role_prompt
+        _max_tool_rounds = max_tool_rounds
+        _parent_session_id = self.session_id
+
+        async def _run_sub_agent() -> None:
+            """在独立 AsyncSession 中运行 SubAgent，避免复用请求级 session。
+
+            请求级 session 会在 HTTP 响应返回后被 get_db 关闭，
+            而 SubAgent 后台任务可能还在执行 → 用已关闭的 session 会 crash 或锁死。
+            """
+            from loguru import logger as _logger
+
+            from agentpal.database import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as bg_db:
+                # 重新加载 task 到新 session 的 identity map 中
+                bg_task = await bg_db.get(SubAgentTask, _task_id)
+                if bg_task is None:
+                    _logger.error(f"SubAgent 后台任务找不到 task record: {_task_id}")
+                    return
+
+                sub_memory = MemoryFactory.create("buffer")
+                sub_agent = SubAgent(
+                    session_id=_sub_session_id,
+                    memory=sub_memory,
+                    task=bg_task,
+                    db=bg_db,
+                    model_config=_model_config,
+                    role_prompt=_role_prompt,
+                    max_tool_rounds=_max_tool_rounds,
+                    parent_session_id=_parent_session_id,
+                )
+                await sub_agent.run(task_prompt)
+                await bg_db.commit()
+
+        asyncio.create_task(_run_sub_agent())
         return task
 
     # ── Tool Guard 辅助 ────────────────────────────────────
