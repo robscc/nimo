@@ -730,6 +730,9 @@ async def dispatch_sub_agent(
     task_type: str = "",
     agent_name: str = "",
     wait_seconds: int = 120,
+    blocking: bool = False,
+    runtime_type: str = "internal",
+    runtime_config: dict[str, Any] | None = None,
 ) -> ToolResponse:
     """将子任务委托给专业 SubAgent 执行，并等待结果返回。
 
@@ -750,11 +753,11 @@ async def dispatch_sub_agent(
 
     from agentpal.agents.personal_assistant import _default_model_config
     from agentpal.agents.registry import SubAgentRegistry
-    from agentpal.agents.sub_agent import SubAgent
     from agentpal.database import AsyncSessionLocal
-    from agentpal.memory.factory import MemoryFactory
     from agentpal.models.agent import SubAgentDefinition
     from agentpal.models.session import SubAgentTask, TaskStatus
+    from agentpal.runtimes.base import ExecutionResult, RuntimeConfig
+    from agentpal.runtimes.registry import get_runtime
 
     async def _run() -> str:
         task_id = str(uuid.uuid4())
@@ -790,32 +793,75 @@ async def dispatch_sub_agent(
                 agent_name=resolved_agent_name,
                 task_type=task_type or None,
                 execution_log=[],
-                meta={},
+                meta={"blocking": blocking, "wait_seconds": wait_seconds},
             )
             db.add(task)
             await db.commit()
 
-            # 3. 运行 SubAgent（在主 event loop 内协作执行，不阻塞其他请求）
-            sub_memory = MemoryFactory.create("buffer")
-            sub_agent = SubAgent(
-                session_id=sub_session_id,
-                memory=sub_memory,
-                task=task,
-                db=db,
-                model_config=model_config,
-                role_prompt=role_prompt,
-                max_tool_rounds=max_tool_rounds,
-                parent_session_id=parent_session_id,
-            )
-            result = await sub_agent.run(task_prompt)
-            await db.commit()
+            # 3. 构建运行时配置
+            rt_config_data = {
+                "runtime_type": runtime_type,
+                "model_config": model_config,
+                "max_tool_rounds": max_tool_rounds,
+                "timeout_seconds": float(wait_seconds),
+            }
+            if runtime_config:
+                rt_config_data["extra"] = runtime_config
 
-            agent_label = resolved_agent_name or "SubAgent"
-            if task.status == TaskStatus.DONE:
-                return f"[{agent_label} 执行完毕]\n\n{result}"
-            else:
-                error_info = f"\n\n错误: {task.error}" if task.error else ""
-                return f"[{agent_label} 执行失败]\n任务 ID: {task_id}{error_info}"
+            rt_config = RuntimeConfig(**rt_config_data)
+
+            # 4. 获取运行时实例并使用其执行任务
+            runtime = get_runtime(
+                runtime_type=runtime_type,
+                session_id=sub_session_id,
+                config=rt_config,
+                db=db,
+                parent_session_id=parent_session_id,
+                task=task,
+            )
+
+            try:
+                # 初始化运行时
+                await runtime._initialize()
+
+                if blocking:
+                    # Blocking mode: execute and wait for completion
+                    result: ExecutionResult = await runtime.execute(task_prompt)
+
+                    # 从数据库重新加载最新状态
+                    await db.refresh(task)
+
+                    agent_label = resolved_agent_name or "SubAgent"
+                    if result.success and task.status == TaskStatus.DONE:
+                        return f"[{agent_label}] DONE\n\n{result.output}"
+                    elif task.status == TaskStatus.INPUT_REQUIRED:
+                        question = task.meta.get("input_request", {}).get("question", "需要您的输入")
+                        return f"[{agent_label}] INPUT_REQUIRED\n任务 ID: {task_id}\n问题：{question}\n\n请提供所需输入以继续执行。"
+                    else:
+                        error_detail = f"\n\n错误：{task.error}" if task.error else (f"\n\n错误：{result.error}" if result.error else "")
+                        return f"[{agent_label}] FAILED\n任务 ID: {task_id}{error_detail}"
+                else:
+                    # Non-blocking mode: start background task and return immediately
+                    async def run_in_background():
+                        try:
+                            await runtime.execute(task_prompt)
+                        except Exception as e:
+                            task.status = TaskStatus.FAILED
+                            task.error = str(e)
+                            await db.commit()
+
+                    asyncio.create_task(run_in_background())
+
+                    return (
+                        f"[SubAgent] STARTED\n"
+                        f"任务 ID: {task_id}\n"
+                        f"执行者：{resolved_agent_name or 'Auto'}\n"
+                        f"状态：{TaskStatus.RUNNING.value}\n\n"
+                        f"任务正在后台运行，可在 /tasks 页面查看进度。"
+                    )
+            finally:
+                # 清理运行时资源
+                await runtime._cleanup()
 
     try:
         result_text = await asyncio.wait_for(_run(), timeout=wait_seconds)
@@ -998,8 +1044,121 @@ BUILTIN_TOOLS: list[dict] = [
     {
         "name": "dispatch_sub_agent",
         "func": dispatch_sub_agent,
-        "description": "将子任务委托给专业 SubAgent（coder/researcher）执行，等待结果返回",
+        "description": "将子任务委托给专业 SubAgent（coder/researcher）执行，支持阻塞/非阻塞模式",
         "icon": "Bot",
         "dangerous": False,
     },
 ]
+
+# ── 12. produce_artifact ──────────────────────────────────
+
+
+def produce_artifact(
+    name: str,
+    content: str | None = None,
+    artifact_type: str = "text",
+    file_path: str | None = None,
+    mime_type: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> ToolResponse:
+    """创建任务产出物（代码文件、报告、图表等）。
+
+    SubAgent 使用此工具将执行过程中的中间产物或最终成果保存下来，
+    供用户查看和下载。
+
+    Args:
+        name: 产出物名称（例如："analysis_report.md"、"generated_code.py"）
+        content: 文本内容（text 类型时使用）
+        artifact_type: 产出物类型：file/text/image/data（默认"text"）
+        file_path: 文件路径（file 类型时使用，可以是绝对路径或相对于工作空间的相对路径）
+        mime_type: MIME 类型（例如："text/markdown"、"image/png"、"application/json"）
+        extra: 额外元数据（JSON 对象）
+
+    Returns:
+        产出物创建结果，包括 artifact_id 和访问路径
+
+    Example:
+        # 创建文本报
+        produce_artifact(
+            name="analysis_report.md",
+            content="# Analysis Report\\n\\n...",
+            artifact_type="text",
+            mime_type="text/markdown"
+        )
+
+        # 保存文件
+        produce_artifact(
+            name="generated_script.py",
+            file_path="/path/to/script.py",
+            artifact_type="file",
+            mime_type="text/x-python"
+        )
+    """
+    import uuid
+
+    from agentpal.database import get_sync_db
+    from agentpal.models.session import TaskArtifact
+
+    try:
+        # 获取当前任务 ID（从系统环境变量或线程上下文）
+        import os
+
+        task_id = os.environ.get("AGENTPAL_CURRENT_TASK_ID")
+        if not task_id:
+            return _text_response("<error>无法获取当前任务 ID，请在 dispatch_sub_agent 回调中使用此工具</error>")
+
+        # 确定 artifact_type 和 mime_type
+        if artifact_type == "text" and not mime_type:
+            mime_type = "text/plain"
+        elif artifact_type == "file" and not mime_type and file_path:
+            mime_type, _ = mimetypes.guess_type(file_path)
+
+        # 计算文件大小
+        size_bytes = None
+        if content:
+            size_bytes = len(content.encode("utf-8"))
+        elif file_path:
+            p = Path(file_path).expanduser()
+            if p.exists():
+                size_bytes = p.stat().st_size
+
+        # 保存到数据库
+        artifact_id = str(uuid.uuid4())
+        with get_sync_db() as db:
+            artifact = TaskArtifact(
+                id=artifact_id,
+                task_id=task_id,
+                name=name,
+                artifact_type=artifact_type,
+                content=content,
+                file_path=file_path,
+                mime_type=mime_type,
+                size_bytes=size_bytes,
+                extra=extra or {},
+            )
+            db.add(artifact)
+            db.commit()
+
+        # 发射事件
+        import asyncio
+
+        from agentpal.services.task_event_bus import task_event_bus
+
+        asyncio.create_task(
+            task_event_bus.emit(
+                task_id,
+                "task.artifact_created",
+                {"artifact_id": artifact_id, "name": name, "type": artifact_type},
+                f"已创建产出物：{name}",
+            )
+        )
+
+        return _text_response(
+            f"[产出物已创建]\n名称：{name}\nID: {artifact_id}\n类型：{artifact_type}\n大小：{size_bytes or 0} 字节"
+        )
+
+    except Exception as e:
+        return _text_response(f"<error>产出物创建失败：{e}</error>")
+
+
+

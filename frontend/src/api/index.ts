@@ -27,6 +27,7 @@ export interface TaskStatusResponse {
   error: string | null;
   agent_name: string | null;
   task_type: string | null;
+  task_prompt: string | null;
   priority: number;
   retry_count: number;
   max_retries: number;
@@ -64,11 +65,21 @@ export interface SubTaskSummary {
   id: string;
   sub_session_id: string;
   task_prompt: string;
-  status: "pending" | "running" | "done" | "failed" | "cancelled";
+  status: "pending" | "running" | "done" | "failed" | "cancelled" | "input_required";
   agent_name: string | null;
   task_type: string | null;
   created_at: string;
   finished_at: string | null;
+}
+
+export interface TaskArtifact {
+  id: string;
+  task_id: string;
+  artifact_type: string;
+  content: string;
+  title: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
 }
 
 export interface HistoryMessageMeta {
@@ -157,6 +168,11 @@ export async function deleteSession(sessionId: string): Promise<void> {
 
 export async function getSessionSubTasks(sessionId: string): Promise<SubTaskSummary[]> {
   const { data } = await api.get<SubTaskSummary[]>(`/sessions/${sessionId}/sub-tasks`);
+  return data;
+}
+
+export async function getTaskArtifacts(taskId: string): Promise<TaskArtifact[]> {
+  const { data } = await api.get<TaskArtifact[]>(`/agent/tasks/${taskId}/artifacts`);
   return data;
 }
 
@@ -481,6 +497,13 @@ export async function resolveToolGuard(
   approved: boolean
 ): Promise<void> {
   await api.post(`/agent/tool-guard/${requestId}/resolve`, { approved });
+}
+
+// ── Task Cancel API ────────────────────────────────────────
+
+export async function cancelTask(taskId: string, reason?: string): Promise<{ task_id: string; status: string; message: string }> {
+  const { data } = await api.post(`/tasks/${taskId}/cancel`, { reason });
+  return data;
 }
 
 export default api;

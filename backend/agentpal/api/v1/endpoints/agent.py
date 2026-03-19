@@ -60,6 +60,8 @@ class DispatchRequest(BaseModel):
     agent_name: str | None = None
     priority: int = Field(default=5, ge=1, le=10, description="任务优先级 1-10（10 最高）")
     max_retries: int = Field(default=3, ge=0, le=10, description="最大重试次数 0-10")
+    blocking: bool = Field(default=False, description="是否阻塞等待任务完成")
+    wait_seconds: int = Field(default=120, ge=0, description="阻塞模式下的最大等待时间（秒）")
 
 
 class TaskStatusResponse(BaseModel):
@@ -149,31 +151,76 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
 
 @router.post("/dispatch", response_model=TaskStatusResponse)
 async def dispatch_sub_agent(req: DispatchRequest, db: AsyncSession = Depends(get_db)):
-    """派遣 SubAgent 异步执行任务。"""
+    """派遣 SubAgent 异步执行任务。
+
+    支持两种模式：
+    - 非阻塞模式（blocking=False）：立即返回任务 ID 和初始状态
+    - 阻塞模式（blocking=True）：等待任务完成后返回最终结果
+    """
     settings = get_settings()
     memory = MemoryFactory.create(settings.memory_backend, db=db)
     assistant = PersonalAssistant(session_id=req.parent_session_id, memory=memory, db=db)
-    task = await assistant.dispatch_sub_agent(
-        task_prompt=req.task_prompt,
-        db=db,
-        context=req.context,
-        task_type=req.task_type,
-        agent_name=req.agent_name,
-        priority=req.priority,
-        max_retries=req.max_retries,
-    )
-    return TaskStatusResponse(
-        task_id=task.id,
-        status=task.status,
-        result=task.result,
-        error=task.error,
-        agent_name=task.agent_name,
-        task_type=task.task_type,
-        priority=task.priority,
-        retry_count=task.retry_count,
-        max_retries=task.max_retries,
-        created_at=utc_isoformat(task.created_at),
-    )
+
+    if req.blocking:
+        # 阻塞模式：使用工具层面的 dispatch_sub_agent
+        from agentpal.tools.builtin import dispatch_sub_agent as builtin_dispatch
+
+        result_text = await builtin_dispatch(
+            task_prompt=req.task_prompt,
+            parent_session_id=req.parent_session_id,
+            task_type=req.task_type or "",
+            agent_name=req.agent_name or "",
+            wait_seconds=req.wait_seconds,
+            blocking=True,
+        )
+
+        # 从数据库获取最新的 task 记录
+        from sqlalchemy import select
+        from agentpal.models.agent import SubAgentTask
+
+        result = await db.execute(
+            select(SubAgentTask)
+            .where(SubAgentTask.parent_session_id == req.parent_session_id)
+            .order_by(SubAgentTask.created_at.desc())
+            .limit(1)
+        )
+        task = result.scalars().first()
+
+        return TaskStatusResponse(
+            task_id=task.id if task else "unknown",
+            status=task.status.value if task else "unknown",
+            result=result_text,
+            error=getattr(task, "error", None),
+            agent_name=getattr(task, "agent_name", None),
+            task_type=getattr(task, "task_type", None),
+            priority=getattr(task, "priority", 5),
+            retry_count=getattr(task, "retry_count", 0),
+            max_retries=getattr(task, "max_retries", 3),
+            created_at=utc_isoformat(task.created_at) if task else None,
+        )
+    else:
+        # 非阻塞模式：立即返回
+        task = await assistant.dispatch_sub_agent(
+            task_prompt=req.task_prompt,
+            db=db,
+            context=req.context,
+            task_type=req.task_type,
+            agent_name=req.agent_name,
+            priority=req.priority,
+            max_retries=req.max_retries,
+        )
+        return TaskStatusResponse(
+            task_id=task.id,
+            status=task.status,
+            result=task.result,
+            error=task.error,
+            agent_name=task.agent_name,
+            task_type=task.task_type,
+            priority=task.priority,
+            retry_count=task.retry_count,
+            max_retries=task.max_retries,
+            created_at=utc_isoformat(task.created_at),
+        )
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatusResponse)

@@ -4,11 +4,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   MessageSquare, Trash2, Search, Cpu, Hash,
   Loader2, MessagesSquare, ChevronDown, ChevronRight, ExternalLink,
-  Bot, CheckCircle2, XCircle, AlertCircle, Timer,
+  Bot, CheckCircle2, XCircle, AlertCircle, Timer, Square,
 } from "lucide-react";
 import clsx from "clsx";
 import { useAllSessions } from "../hooks/useSessions";
-import { deleteSession, getSessionSubTasks, type SessionSummary, type SubTaskSummary } from "../api";
+import { deleteSession, getSessionSubTasks, cancelTask, type SessionSummary, type SubTaskSummary } from "../api";
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -41,9 +41,10 @@ const STATUS_CONFIG = {
   cancelled: { icon: AlertCircle,  color: "text-gray-400",   bg: "bg-gray-50",   label: "已取消" },
 } as const;
 
-function SubTaskItem({ task }: { task: SubTaskSummary }) {
+function SubTaskItem({ task, onCancel }: { task: SubTaskSummary; onCancel?: (taskId: string) => void }) {
   const cfg = STATUS_CONFIG[task.status as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.pending;
   const Icon = cfg.icon;
+  const isCancellable = task.status === "running" || task.status === "pending" || task.status === "input_required";
 
   return (
     <div className="flex items-start gap-2.5 px-3 py-2 rounded-lg bg-white border border-gray-100 hover:border-gray-200 transition-colors">
@@ -81,11 +82,22 @@ function SubTaskItem({ task }: { task: SubTaskSummary }) {
           {task.task_prompt}
         </p>
       </div>
+
+      {/* Cancel button */}
+      {isCancellable && onCancel && (
+        <button
+          onClick={() => onCancel(task.id)}
+          className="ml-1 p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+          title="取消任务"
+        >
+          <Square size={12} />
+        </button>
+      )}
     </div>
   );
 }
 
-function SubTaskList({ sessionId }: { sessionId: string }) {
+function SubTaskList({ sessionId, onCancel }: { sessionId: string; onCancel?: (taskId: string) => void }) {
   const { data: tasks = [], isLoading } = useQuery({
     queryKey: ["session-sub-tasks", sessionId],
     queryFn: () => getSessionSubTasks(sessionId),
@@ -107,7 +119,7 @@ function SubTaskList({ sessionId }: { sessionId: string }) {
   return (
     <div className="space-y-1.5">
       {tasks.map((t) => (
-        <SubTaskItem key={t.id} task={t} />
+        <SubTaskItem key={t.id} task={t} onCancel={onCancel} />
       ))}
     </div>
   );
@@ -127,8 +139,26 @@ function SessionRow({
   deleting: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const queryClient = useQueryClient();
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
   const isDingtalk = session.channel === "dingtalk";
   const hasSubTasks = session.sub_tasks_count > 0;
+
+  const handleCancelTask = async (taskId: string) => {
+    if (!confirm("确定要取消此任务吗？")) return;
+    setCancellingId(taskId);
+    try {
+      await cancelTask(taskId);
+      // Refresh session list and sub-tasks
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["session-sub-tasks", session.id] });
+    } catch (err) {
+      console.error("Failed to cancel task:", err);
+      alert("取消任务失败，请重试");
+    } finally {
+      setCancellingId(null);
+    }
+  };
 
   return (
     <div className={clsx(
@@ -249,7 +279,7 @@ function SessionRow({
                 )}
               </p>
             </div>
-            <SubTaskList sessionId={session.id} />
+            <SubTaskList sessionId={session.id} onCancel={handleCancelTask} />
           </div>
         </div>
       )}

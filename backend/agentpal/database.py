@@ -94,6 +94,15 @@ async def run_migrations() -> None:
         ("sub_agent_tasks", "agent_name", "ALTER TABLE sub_agent_tasks ADD COLUMN agent_name VARCHAR(64)"),
         ("sub_agent_tasks", "task_type", "ALTER TABLE sub_agent_tasks ADD COLUMN task_type VARCHAR(64)"),
         ("sub_agent_tasks", "execution_log", "ALTER TABLE sub_agent_tasks ADD COLUMN execution_log JSON NOT NULL DEFAULT '[]'"),
+        # sub_agent_tasks: input_prompt / input_response / progress_pct / progress_message / started_at / completed_at (added for bidirectional comm)
+        ("sub_agent_tasks", "input_prompt", "ALTER TABLE sub_agent_tasks ADD COLUMN input_prompt TEXT"),
+        ("sub_agent_tasks", "input_response", "ALTER TABLE sub_agent_tasks ADD COLUMN input_response TEXT"),
+        ("sub_agent_tasks", "progress_pct", "ALTER TABLE sub_agent_tasks ADD COLUMN progress_pct INTEGER DEFAULT 0"),
+        ("sub_agent_tasks", "progress_message", "ALTER TABLE sub_agent_tasks ADD COLUMN progress_message TEXT"),
+        ("sub_agent_tasks", "started_at", "ALTER TABLE sub_agent_tasks ADD COLUMN started_at DATETIME"),
+        ("sub_agent_tasks", "completed_at", "ALTER TABLE sub_agent_tasks ADD COLUMN completed_at DATETIME"),
+        # Phase 6: Rename metadata to extra in task_artifacts (metadata is reserved)
+        ("task_artifacts", "extra", "ALTER TABLE task_artifacts ADD COLUMN extra JSON"),
     ]
     async with engine.begin() as conn:
         for table, column, sql in migrations:
@@ -104,6 +113,11 @@ async def run_migrations() -> None:
             existing_cols = {row[1] for row in result.fetchall()}
             if column not in existing_cols:
                 await conn.execute(__import__("sqlalchemy").text(sql))
+
+        # 创建新表（task_artifacts, task_events）
+        from agentpal.models.session import TaskArtifact, TaskEvent
+        await conn.run_sync(TaskArtifact.metadata.create_all)
+        await conn.run_sync(TaskEvent.metadata.create_all)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

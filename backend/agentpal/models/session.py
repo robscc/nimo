@@ -24,6 +24,8 @@ class TaskStatus(StrEnum):
     DONE = "done"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INPUT_REQUIRED = "input-required"  # 需要用户提供输入
+    PAUSED = "paused"  # 暂停状态
 
 
 class SessionRecord(Base):
@@ -77,6 +79,12 @@ class SubAgentTask(Base):
     - agent_name:     执行此任务的 SubAgent 角色名
     - task_type:      任务类型（用于 SubAgent 角色路由）
     - execution_log:  完整执行日志（LLM 对话 + 工具调用）
+    - input_prompt:   请求用户输入时的提示语（INPUT_REQUIRED 状态时使用）
+    - input_response: 用户提供的输入内容
+    - progress_pct:   进度百分比（0-100）
+    - progress_message: 进度描述信息
+    - started_at:     实际开始执行时间
+    - completed_at:   执行完成时间（无论成功失败）
     """
 
     __tablename__ = "sub_agent_tasks"
@@ -102,7 +110,93 @@ class SubAgentTask(Base):
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False, server_default="3")
 
+    # ── Input-Required 协议 ───────────────────────────────
+    input_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── 进度跟踪 ──────────────────────────────────────────
+    progress_pct: Mapped[int | None] = mapped_column(Integer, nullable=True, server_default="0")
+    progress_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── 时间戳 ────────────────────────────────────────────
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     __table_args__ = (
         Index("ix_task_parent_status", "parent_session_id", "status"),
         Index("ix_task_priority", "status", "priority"),
+    )
+
+
+class TaskArtifact(Base):
+    """SubAgent 任务产出物。
+
+    SubAgent 在执行过程中可以产生多个中间产物或最终产物，
+    例如：生成的代码文件、分析报告、图表等。
+
+    字段说明：
+    - task_id:        关联的任务 ID
+    - name:           产出物名称（例如："analysis_report.md"）
+    - artifact_type:  产出物类型：file/text/image/data
+    - content:        文本内容（text 类型时使用）
+    - file_path:      文件路径（file 类型时使用）
+    - mime_type:      MIME 类型（image/png, text/markdown 等）
+    - size_bytes:     文件大小（字节）
+    - extra:          额外元数据
+    """
+
+    __tablename__ = "task_artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    artifact_type: Mapped[str] = mapped_column(String(32), nullable=False)  # file/text/image/data
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    extra: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        Index("ix_artifact_task", "task_id", "created_at"),
+    )
+
+
+class TaskEvent(Base):
+    """SubAgent 任务事件日志。
+
+    记录 SubAgent 执行过程中的关键事件，用于：
+    - 实时进度推送（SSE）
+    - 调试和审计
+    - 前端时间线展示
+
+    事件类型：
+    - task.started: 任务开始执行
+    - task.progress: 进度更新
+    - task.input_required: 请求用户输入
+    - task.artifact_created: 产出物生成
+    - task.completed: 任务完成
+    - task.failed: 任务失败
+    - task.cancelled: 任务取消
+    - tool.start: 工具调用开始
+    - tool.complete: 工具调用完成
+    - llm.message: LLM 消息
+    """
+
+    __tablename__ = "task_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+    __table_args__ = (
+        Index("ix_event_task_created", "task_id", "created_at"),
     )

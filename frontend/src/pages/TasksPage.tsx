@@ -8,8 +8,12 @@ import {
   ChevronLeft,
   ChevronRight,
   Filter,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { useTasks } from "../hooks/useTasks";
+import { useTaskArtifacts } from "../hooks/useTaskArtifacts";
+import { TaskArtifactViewer } from "../components/TaskArtifactViewer";
 import type { TaskStatusResponse, TaskListParams } from "../api";
 
 const STATUS_CONFIG: Record<
@@ -70,6 +74,8 @@ function RetryBadge({ retryCount, maxRetries }: { retryCount: number; maxRetries
 }
 
 function TaskCard({ task }: { task: TaskStatusResponse }) {
+  const [expanded, setExpanded] = useState(false);
+  const { data: artifacts } = useTaskArtifacts(expanded ? task.task_id : null);
   const cfg = STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
   const Icon = cfg.icon;
 
@@ -114,6 +120,45 @@ function TaskCard({ task }: { task: TaskStatusResponse }) {
       )}
       {task.error && (
         <p className="text-sm text-red-600 line-clamp-2 bg-red-50 rounded p-2">{task.error}</p>
+      )}
+
+      {/* 展开/收起按钮 */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1 mt-3 text-xs text-gray-500 hover:text-gray-700"
+      >
+        {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        {expanded ? "收起详情" : "查看详情"}
+      </button>
+
+      {/* 展开内容 */}
+      {expanded && (
+        <div className="mt-3 pt-3 border-t space-y-3">
+          {/* 完整 Prompt */}
+          <div>
+            <div className="text-xs font-medium text-gray-600 mb-1">任务描述</div>
+            <div className="text-sm text-gray-700 bg-gray-50 rounded p-2">{task.task_prompt}</div>
+          </div>
+
+          {/* 错误信息（如果有） */}
+          {task.error && (
+            <div>
+              <div className="text-xs font-medium text-red-600 mb-1">错误信息</div>
+              <pre className="text-xs text-red-700 bg-red-50 rounded p-2 overflow-x-auto">
+                {task.error}
+              </pre>
+            </div>
+          )}
+
+          {/* 产出物列表 */}
+          <div>
+            {artifacts ? (
+              <TaskArtifactViewer artifacts={artifacts} />
+            ) : (
+              <div className="text-center py-4 text-gray-400 text-sm">加载中...</div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
