@@ -55,11 +55,24 @@ class SubAgentDefinition(Base):
     )
 
     def get_model_config(self, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
-        """获取此 SubAgent 的模型配置，缺失字段从 fallback 继承。"""
-        fb = fallback or {}
+        """获取此 SubAgent 的模型配置，缺失字段从 fallback 继承。
+
+        当 fallback 为 None 时，自动从 config.yaml 读取全局 LLM 配置作为默认值。
+        """
+        if fallback is None:
+            from agentpal.services.config_file import ConfigFileManager
+
+            cfg = ConfigFileManager().load()
+            llm = cfg.get("llm", {})
+            fallback = {
+                "provider": llm.get("provider", "dashscope"),
+                "model_name": llm.get("model", "qwen-max"),
+                "api_key": llm.get("api_key", ""),
+                "base_url": llm.get("base_url", ""),
+            }
         return {
-            "provider": self.model_provider or fb.get("provider", "compatible"),
-            "model_name": self.model_name or fb.get("model_name", ""),
-            "api_key": self.model_api_key or fb.get("api_key", ""),
-            "base_url": self.model_base_url or fb.get("base_url", ""),
+            "provider": self.model_provider or fallback.get("provider", "compatible"),
+            "model_name": self.model_name or fallback.get("model_name", ""),
+            "api_key": self.model_api_key or fallback.get("api_key", ""),
+            "base_url": self.model_base_url or fallback.get("base_url", ""),
         }

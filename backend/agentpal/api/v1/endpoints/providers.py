@@ -2,12 +2,14 @@
 
 路由：
     GET    /api/v1/providers                  列出所有 Provider（api_key 打码）
-    PATCH  /api/v1/providers/{id}             更新 Provider 配置（api_key / base_url）
+    PATCH  /api/v1/providers/{id}             更新 Provider 配置（base_url / generate_kwargs）
     POST   /api/v1/providers/{id}/test        测试 Provider 连通性
     GET    /api/v1/providers/{id}/models      查看 Provider 模型列表
     POST   /api/v1/providers/{id}/models/fetch  从 API 动态拉取模型列表
     POST   /api/v1/providers                  添加自定义 Provider
     DELETE /api/v1/providers/{id}             删除自定义 Provider
+
+注意：api_key 统一在 config.yaml 中管理，不再通过 Provider PATCH 接口设置。
 """
 
 from __future__ import annotations
@@ -26,10 +28,10 @@ router = APIRouter()
 # ── Request / Response 模型 ──────────────────────────────────────────────
 
 class ProviderUpdateRequest(BaseModel):
-    api_key: Optional[str] = None
     base_url: Optional[str] = None
     name: Optional[str] = None
     generate_kwargs: Optional[Dict[str, Any]] = None
+    # api_key 不再通过 Provider 管理，统一在 config.yaml 中配置
 
 
 class ProviderCreateRequest(BaseModel):

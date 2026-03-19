@@ -61,8 +61,8 @@ async def client(test_app):
 
 class TestSessionMetaAPI:
     @pytest.mark.asyncio
-    async def test_create_session_with_model_name(self, client: AsyncClient):
-        """创建的 session 应包含默认 model_name。"""
+    async def test_create_session_returns_model_from_config(self, client: AsyncClient):
+        """创建的 session，model_name 应来自 config.yaml（不再持久化到 DB）。"""
         resp = await client.post("/api/v1/sessions", params={"channel": "web"})
         assert resp.status_code == 201
         session_id = resp.json()["id"]
@@ -73,7 +73,7 @@ class TestSessionMetaAPI:
         meta = resp.json()
         assert meta["id"] == session_id
         assert meta["message_count"] == 0
-        # model_name 应来自 Settings 默认值
+        # model_name 应来自 config.yaml 动态读取（非 DB 持久化值）
         assert meta["model_name"] is not None
 
     @pytest.mark.asyncio
