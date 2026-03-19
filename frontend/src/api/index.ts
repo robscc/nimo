@@ -263,7 +263,7 @@ export interface SessionMeta {
 export interface SessionConfigUpdate {
   enabled_tools?: string[] | null;
   enabled_skills?: string[] | null;
-  model_name?: string | null;
+  // model_name 不再通过 Session 配置，统一从 config.yaml 读取
   tool_guard_threshold?: number | null;
 }
 

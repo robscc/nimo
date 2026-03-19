@@ -25,6 +25,14 @@ from agentpal.services.session_event_bus import session_event_bus
 router = APIRouter()
 
 
+def _current_model_name() -> str:
+    """从 config.yaml 动态读取当前 LLM 模型名。"""
+    from agentpal.services.config_file import ConfigFileManager
+
+    cfg = ConfigFileManager().load()
+    return cfg.get("llm", {}).get("model", "qwen-max")
+
+
 # ── Response Models ────────────────────────────────────────
 
 
@@ -64,7 +72,7 @@ class SessionConfigUpdate(BaseModel):
     """Session 级工具/技能配置更新请求。"""
     enabled_tools: list[str] | None = None  # null = 跟随全局
     enabled_skills: list[str] | None = None  # null = 跟随全局
-    model_name: str | None = None
+    # model_name 不再通过 Session 配置，统一从 config.yaml 读取
     tool_guard_threshold: int | None = None  # null = 跟随全局
 
 
@@ -132,6 +140,7 @@ async def list_sessions(
     sub_tasks_map: dict[str, int] = {row.parent_session_id: row.cnt for row in sub_tasks_result}
 
     summaries = []
+    current_model = _current_model_name()
     for s in sessions:
         raw_title = first_msg_map.get(s.id, "")
         title = raw_title[:30] + ("…" if len(raw_title) > 30 else "") if raw_title else "新对话"
@@ -140,7 +149,7 @@ async def list_sessions(
                 id=s.id,
                 title=title,
                 channel=s.channel,
-                model_name=s.model_name,
+                model_name=current_model,
                 message_count=count_map.get(s.id, 0),
                 sub_tasks_count=sub_tasks_map.get(s.id, 0),
                 created_at=utc_isoformat(s.created_at),
@@ -156,14 +165,13 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
 ):
     """创建新 session，返回 id。"""
-    settings = get_settings()
     session_id = f"{channel}:{uuid.uuid4()}"
     now = datetime.now(timezone.utc)
     session = SessionRecord(
         id=session_id,
         channel=channel,
         status=SessionStatus.ACTIVE,
-        model_name=settings.llm_model,
+        # model_name 不再持久化到 DB，统一从 config.yaml 读取
         created_at=now,
         updated_at=now,
     )
@@ -203,7 +211,7 @@ async def get_session_meta(session_id: str, db: AsyncSession = Depends(get_db)):
     return SessionMeta(
         id=session.id,
         channel=session.channel,
-        model_name=session.model_name,
+        model_name=_current_model_name(),
         context_tokens=session.context_tokens,
         enabled_tools=session.enabled_tools,
         enabled_skills=session.enabled_skills,
@@ -239,8 +247,6 @@ async def update_session_config(
         session.enabled_tools = req.enabled_tools
     if req.enabled_skills is not None:
         session.enabled_skills = req.enabled_skills
-    if req.model_name is not None:
-        session.model_name = req.model_name
     if req.tool_guard_threshold is not None:
         session.tool_guard_threshold = req.tool_guard_threshold
 
@@ -256,7 +262,7 @@ async def update_session_config(
     return SessionMeta(
         id=session.id,
         channel=session.channel,
-        model_name=session.model_name,
+        model_name=_current_model_name(),
         context_tokens=session.context_tokens,
         enabled_tools=session.enabled_tools,
         enabled_skills=session.enabled_skills,

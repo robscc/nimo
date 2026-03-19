@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -174,3 +176,24 @@ class TestSubAgentDefinitionModel:
         }
         config = defn.get_model_config(fallback)
         assert config == fallback
+
+    @pytest.mark.asyncio
+    async def test_get_model_config_no_fallback_reads_config_yaml(self, db: AsyncSession):
+        """未传 fallback 时应自动从 config.yaml 读取。"""
+        defn = SubAgentDefinition(name="test")
+
+        fake_config = {
+            "llm": {
+                "provider": "compatible",
+                "model": "qwen3.5-plus",
+                "api_key": "sk-from-yaml",
+                "base_url": "https://example.com/v1",
+            }
+        }
+        with patch("agentpal.services.config_file.ConfigFileManager.load", return_value=fake_config):
+            config = defn.get_model_config()  # 无 fallback
+
+        assert config["provider"] == "compatible"
+        assert config["model_name"] == "qwen3.5-plus"
+        assert config["api_key"] == "sk-from-yaml"
+        assert config["base_url"] == "https://example.com/v1"

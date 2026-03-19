@@ -2,7 +2,8 @@
 
 职责：
 - 维护内置 + 自定义 Provider 的注册表
-- 将 Provider 配置（api_key、base_url 等）持久化到 ~/.nimo/providers/
+- 将 Provider 配置（base_url、extra_models、generate_kwargs）持久化到 ~/.nimo/providers/
+- api_key 统一从 config.yaml 读取，不持久化到 JSON 文件
 - 提供统一入口 get_chat_model() 创建模型实例（自动套 RetryChatModel）
 """
 
@@ -131,13 +132,14 @@ class ProviderManager:
             self._builtins[p.id] = p
 
     def _load_from_storage(self) -> None:
-        """从磁盘恢复保存过的 api_key / base_url / extra_models 等。"""
-        # 内置：只覆盖用户修改过的字段
+        """从磁盘恢复保存过的 base_url / extra_models / generate_kwargs。
+
+        注意：api_key 不再从 JSON 恢复，统一从 config.yaml 读取。
+        """
+        # 内置：只覆盖用户修改过的字段（不含 api_key）
         for pid, provider in self._builtins.items():
             saved = self._load_json(self._builtin_dir / f"{pid}.json")
             if saved:
-                if saved.get("api_key"):
-                    provider.api_key = saved["api_key"]
                 if not provider.freeze_url and saved.get("base_url"):
                     provider.base_url = saved["base_url"]
                 if isinstance(saved.get("generate_kwargs"), dict):
@@ -229,14 +231,22 @@ class ProviderManager:
     ) -> ChatModelBase:
         """构建模型实例，自动套 RetryChatModel 包装。
 
+        api_key 优先级：api_key_override（来自 SubAgent 级配置）
+                       > config.yaml 中的 llm.api_key
+                       > Provider 自身的 api_key（通常为空）
+
         Args:
             provider_id:       Provider ID（如 "dashscope"、"compatible"）
             model_id:          模型 ID（如 "qwen-max"）
             stream:            是否流式
-            api_key_override:  优先使用此 api_key（来自 session 级配置）
-            base_url_override: 优先使用此 base_url（来自 session 级配置）
+            api_key_override:  优先使用此 api_key（来自 SubAgent 级配置）
+            base_url_override: 优先使用此 base_url（来自 SubAgent 级配置）
             on_retry:          重试回调，签名 (attempt, max_attempts, error, delay)
         """
+        # 如果没有显式 override，从 config.yaml 读取 api_key 作为全局默认
+        if not api_key_override:
+            api_key_override = self._get_config_yaml_api_key()
+
         provider = self.get_provider(provider_id)
         if provider is None:
             # fallback：动态构建一个 OpenAIProvider
@@ -256,6 +266,18 @@ class ProviderManager:
         )
         return RetryChatModel(inner, on_retry=on_retry)
 
+    @staticmethod
+    def _get_config_yaml_api_key() -> str | None:
+        """从 config.yaml 读取 llm.api_key。"""
+        try:
+            from agentpal.services.config_file import ConfigFileManager
+
+            cfg = ConfigFileManager().load()
+            key = cfg.get("llm", {}).get("api_key", "")
+            return key if key else None
+        except Exception:
+            return None
+
     # ── 连接测试 ──────────────────────────────────────────────────────────
 
     async def test_connection(self, provider_id: str) -> tuple[bool, str]:
@@ -267,10 +289,13 @@ class ProviderManager:
     # ── 持久化工具 ────────────────────────────────────────────────────────
 
     def _save_provider(self, provider: Provider, is_builtin: bool) -> None:
+        """持久化 Provider 配置，但 **不写入 api_key**（密钥统一在 config.yaml）。"""
         path = (self._builtin_dir if is_builtin else self._custom_dir) / f"{provider.id}.json"
         try:
+            data = provider.model_dump()
+            data.pop("api_key", None)  # 不持久化 api_key
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(provider.model_dump(), f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
             os.chmod(path, 0o600)
         except Exception as exc:
             logger.warning("保存 Provider '%s' 失败：%s", provider.id, exc)

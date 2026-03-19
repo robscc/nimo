@@ -64,6 +64,14 @@ class OpenAIProvider(Provider):
         api_key = api_key_override or self.api_key
         base_url = base_url_override or self.base_url
 
+        # Fail fast：需要 API key 但未配置时，给出明确错误而非等到 401
+        if self.require_api_key and not api_key:
+            raise ValueError(
+                f"Provider '{self.id}' 需要 API key 但未配置。"
+                f" 请在 ~/.nimo/config.yaml 的 llm.api_key 中设置，"
+                f" 或通过前端「设置」页面为 Provider '{self.name}' 配置 API key。"
+            )
+
         client_kwargs: dict = {}
         if base_url:
             client_kwargs["base_url"] = base_url

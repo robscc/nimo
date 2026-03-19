@@ -847,12 +847,19 @@ def _get_tool_names(toolkit: Any) -> list[str]:
 
 
 def _default_model_config() -> dict[str, Any]:
-    settings = get_settings()
+    """每次调用都从 config.yaml 读取 LLM 配置（不走缓存）。
+
+    这样修改 config.yaml 后无需重启即可生效。
+    """
+    from agentpal.services.config_file import ConfigFileManager
+
+    cfg = ConfigFileManager().load()
+    llm = cfg.get("llm", {})
     return {
-        "provider": settings.llm_provider,
-        "model_name": settings.llm_model,
-        "api_key": settings.llm_api_key,
-        "base_url": settings.llm_base_url,
+        "provider": llm.get("provider", "dashscope"),
+        "model_name": llm.get("model", "qwen-max"),
+        "api_key": llm.get("api_key", ""),
+        "base_url": llm.get("base_url", ""),
     }
 
 

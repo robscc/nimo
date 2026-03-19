@@ -29,7 +29,9 @@ class TestProviderManager:
 
     def test_list_providers_masked(self, tmp_path):
         mgr = self._mgr(tmp_path)
-        mgr.update_provider("openai", {"api_key": "sk-secret12345"})
+        # api_key 不再通过 Provider 持久化，手动设置到内存中测试 masking
+        provider = mgr.get_provider("openai")
+        provider.api_key = "sk-secret12345"
         infos = mgr.list_providers(masked=True)
         openai_info = next(p for p in infos if p.id == "openai")
         assert "secret" not in openai_info.api_key
@@ -37,19 +39,23 @@ class TestProviderManager:
 
     def test_list_providers_unmasked(self, tmp_path):
         mgr = self._mgr(tmp_path)
-        mgr.update_provider("openai", {"api_key": "sk-abc"})
+        # api_key 不再通过 Provider 持久化，手动设置到内存中测试
+        provider = mgr.get_provider("openai")
+        provider.api_key = "sk-abc"
         infos = mgr.list_providers(masked=False)
         openai_info = next(p for p in infos if p.id == "openai")
         assert openai_info.api_key == "sk-abc"
 
-    def test_update_provider_persists(self, tmp_path):
+    def test_update_provider_persists_without_api_key(self, tmp_path):
+        """Provider 持久化不再包含 api_key。"""
         mgr = self._mgr(tmp_path)
-        mgr.update_provider("dashscope", {"api_key": "sk-testkey"})
+        mgr.update_provider("dashscope", {"generate_kwargs": {"temperature": 0.5}})
 
-        # 重新创建，验证从磁盘恢复
+        # 重新创建，验证从磁盘恢复 generate_kwargs 但不恢复 api_key
         mgr2 = ProviderManager(storage_dir=tmp_path)
         p = mgr2.get_provider("dashscope")
-        assert p.api_key == "sk-testkey"
+        assert p.api_key == ""  # api_key 不从 JSON 恢复
+        assert p.generate_kwargs.get("temperature") == 0.5
 
     def test_update_nonexistent_provider_returns_false(self, tmp_path):
         mgr = self._mgr(tmp_path)
@@ -75,8 +81,19 @@ class TestProviderManager:
 
     def test_get_chat_model_unknown_provider_fallback(self, tmp_path):
         mgr = self._mgr(tmp_path)
-        model = mgr.get_chat_model("unknown-xyz", "some-model", stream=False)
+        model = mgr.get_chat_model(
+            "unknown-xyz", "some-model", stream=False,
+            api_key_override="sk-dummy", base_url_override="http://localhost/v1",
+        )
         assert isinstance(model, RetryChatModel)  # 不抛异常，优雅 fallback
+
+    def test_get_chat_model_missing_api_key_raises(self, tmp_path):
+        """Provider 需要 API key 但 config.yaml 也没有时应 fail fast。"""
+        mgr = self._mgr(tmp_path)
+        # 确保 _get_config_yaml_api_key 返回 None（没有 config.yaml）
+        with patch.object(ProviderManager, "_get_config_yaml_api_key", return_value=None):
+            with pytest.raises(ValueError, match="需要 API key"):
+                mgr.get_chat_model("dashscope", "qwen-max", stream=False)
 
     @pytest.mark.asyncio
     async def test_add_and_remove_custom_provider(self, tmp_path):

@@ -514,13 +514,10 @@ class CronScheduler:
                 + "\n\n请逐项执行，完成后汇总结果。"
             )
 
-        # 获取模型配置
-        model_config = {
-            "provider": settings.llm_provider,
-            "model_name": settings.llm_model,
-            "api_key": settings.llm_api_key,
-            "base_url": settings.llm_base_url,
-        }
+        # 获取模型配置（每次从 config.yaml 读取）
+        from agentpal.agents.personal_assistant import _default_model_config
+
+        model_config = _default_model_config()
 
         # 如果指定了 SubAgent（非 heartbeat），使用其模型配置
         if agent_name and not is_heartbeat:
