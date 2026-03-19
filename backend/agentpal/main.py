@@ -90,6 +90,19 @@ async def lifespan(app: FastAPI):
     await cron_scheduler.start()
     logger.info("Cron 调度器已启动 ✅")
 
+    # 启动 ZMQ AgentDaemonManager
+    from agentpal.zmq_bus.manager import AgentDaemonManager
+
+    zmq_manager = AgentDaemonManager(
+        router_addr=settings.zmq_router_addr,
+        events_addr=settings.zmq_events_addr,
+        pa_idle_timeout=settings.zmq_pa_idle_timeout,
+        sub_idle_timeout=settings.zmq_sub_idle_timeout,
+    )
+    await zmq_manager.start()
+    app.state.zmq_manager = zmq_manager
+    logger.info("ZMQ AgentDaemonManager 已启动 ✅")
+
     # 启动 DingTalk Stream 客户端（dingtalk_enabled=True 时才真正启动）
     from agentpal.channels.dingtalk_stream_worker import dingtalk_stream_worker
 
@@ -99,6 +112,11 @@ async def lifespan(app: FastAPI):
 
     # 停止 DingTalk Stream 客户端
     await dingtalk_stream_worker.stop()
+
+    # 停止 ZMQ AgentDaemonManager
+    if hasattr(app, "state") and hasattr(app.state, "zmq_manager"):
+        await app.state.zmq_manager.stop()
+        logger.info("ZMQ AgentDaemonManager 已停止")
 
     # 停止 Cron 调度器
     await cron_scheduler.stop()

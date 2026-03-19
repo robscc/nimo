@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -21,6 +22,11 @@ from agentpal.memory.factory import MemoryFactory
 from agentpal.models.session import SessionRecord, SessionStatus, SubAgentTask
 
 router = APIRouter()
+
+
+def _get_zmq_manager(request: Request) -> Any:
+    """从 app.state 获取 ZMQ manager（如果可用）。"""
+    return getattr(request.app.state, "zmq_manager", None)
 
 
 async def _ensure_session(db: AsyncSession, session_id: str, channel: str) -> None:
@@ -98,8 +104,11 @@ class TaskListItem(BaseModel):
 
 
 @router.post("/chat")
-async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
+async def chat(req: ChatRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """主助手流式对话接口（SSE）。
+
+    优先使用 ZMQ 桥接模式（通过 AgentDaemonManager），
+    ZMQ 不可用时回退到直接调用 PersonalAssistant。
 
     返回 text/event-stream，每个事件为::
 
@@ -111,6 +120,92 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     """
     await _ensure_session(db, req.session_id, req.channel)
 
+    zmq_manager = _get_zmq_manager(request)
+
+    if zmq_manager is not None:
+        # ── ZMQ 桥接模式 ──────────────────────────────────
+        return await _chat_via_zmq(req, zmq_manager)
+    else:
+        # ── 直接调用模式（回退）──────────────────────────
+        return await _chat_direct(req, db)
+
+
+async def _chat_via_zmq(req: ChatRequest, zmq_manager: Any) -> StreamingResponse:
+    """通过 ZMQ 桥接的 SSE 流式对话。
+
+    流程：
+    1. ensure_pa_daemon(session_id) → 确保 PA daemon 运行中
+    2. 生成 msg_id = uuid4()
+    3. 创建 EventSubscriber(topic="session:{session_id}", filter_msg_id=msg_id)
+    4. 发送 CHAT_REQUEST envelope 到 pa:{session_id}
+    5. EventSubscriber 异步迭代 → yield SSE events
+    6. 收到 done/error → 关闭 SUB socket
+    """
+    from agentpal.zmq_bus.protocol import Envelope, MessageType
+
+    session_id = req.session_id
+    msg_id = str(uuid.uuid4())
+
+    # 1. 确保 PA daemon 运行
+    await zmq_manager.ensure_pa_daemon(session_id)
+
+    # 2. 创建事件订阅者
+    subscriber = zmq_manager.create_event_subscriber(
+        topic=f"session:{session_id}",
+        filter_msg_id=msg_id,
+    )
+
+    # 3. 发送 CHAT_REQUEST
+    envelope = Envelope(
+        msg_id=msg_id,
+        msg_type=MessageType.CHAT_REQUEST,
+        source="api:chat",
+        target=f"pa:{session_id}",
+        session_id=session_id,
+        payload={
+            "message": req.message,
+            "images": req.images,
+            "channel": req.channel,
+            "user_id": req.user_id,
+        },
+    )
+    await zmq_manager.send_to_agent(f"pa:{session_id}", envelope)
+
+    # 4. 订阅事件 → SSE 流
+    async def event_stream() -> AsyncGenerator[str, None]:
+        try:
+            async with subscriber:
+                async for event in subscriber:
+                    # 过滤掉内部字段
+                    event_clean = {k: v for k, v in event.items() if not k.startswith("_")}
+                    event_type = event_clean.get("type", "")
+
+                    # 跳过 heartbeat（SSE 保活由注释行处理）
+                    if event_type == "heartbeat":
+                        yield ": heartbeat\n\n"
+                        continue
+
+                    yield f"data: {json.dumps(event_clean, ensure_ascii=False)}\n\n"
+
+                    # done 或 error → 结束
+                    if event_type in ("done", "error"):
+                        return
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+async def _chat_direct(req: ChatRequest, db: AsyncSession) -> StreamingResponse:
+    """直接调用 PersonalAssistant 的 SSE 流式对话（ZMQ 不可用时回退）。"""
     settings = get_settings()
     memory = MemoryFactory.create(settings.memory_backend, db=db)
     assistant = PersonalAssistant(session_id=req.session_id, memory=memory, db=db)
@@ -150,13 +245,109 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/dispatch", response_model=TaskStatusResponse)
-async def dispatch_sub_agent(req: DispatchRequest, db: AsyncSession = Depends(get_db)):
+async def dispatch_sub_agent(req: DispatchRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """派遣 SubAgent 异步执行任务。
+
+    优先通过 ZMQ 派遣（AgentDaemonManager），不可用时回退到直接模式。
 
     支持两种模式：
     - 非阻塞模式（blocking=False）：立即返回任务 ID 和初始状态
     - 阻塞模式（blocking=True）：等待任务完成后返回最终结果
     """
+    zmq_manager = _get_zmq_manager(request)
+
+    if zmq_manager is not None and not req.blocking:
+        # ── ZMQ 非阻塞派遣 ──────────────────────────────
+        return await _dispatch_via_zmq(req, zmq_manager, db)
+    else:
+        # ── 直接模式（阻塞模式或 ZMQ 不可用）───────────
+        return await _dispatch_direct(req, db)
+
+
+async def _dispatch_via_zmq(req: DispatchRequest, zmq_manager: Any, db: AsyncSession) -> TaskStatusResponse:
+    """通过 ZMQ 非阻塞派遣 SubAgent。"""
+    from agentpal.agents.registry import SubAgentRegistry
+    from agentpal.models.agent import SubAgentDefinition
+
+    settings = get_settings()
+    parent_session_id = req.parent_session_id
+    task_id = str(uuid.uuid4())
+    agent_name = req.agent_name
+    task_type = req.task_type
+    role_prompt = ""
+    model_config = {
+        "provider": settings.llm_provider,
+        "model_name": settings.llm_model,
+        "api_key": settings.llm_api_key,
+        "base_url": settings.llm_base_url,
+    }
+    max_tool_rounds = 8
+
+    # 查找合适的 SubAgent 定义
+    registry = SubAgentRegistry(db)
+    agent_def: SubAgentDefinition | None = None
+
+    if agent_name:
+        agent_def = await db.get(SubAgentDefinition, agent_name)
+    elif task_type:
+        agent_def = await registry.find_agent_for_task(task_type)
+
+    if agent_def:
+        agent_name = agent_def.name
+        role_prompt = agent_def.role_prompt or ""
+        model_config = agent_def.get_model_config(model_config)
+        max_tool_rounds = agent_def.max_tool_rounds
+
+    # Clamp priority and max_retries
+    priority = max(1, min(10, req.priority))
+    max_retries = max(0, min(10, req.max_retries))
+
+    # 创建 SubAgentTask 记录
+    from agentpal.models.session import TaskStatus
+
+    task = SubAgentTask(
+        id=task_id,
+        parent_session_id=parent_session_id,
+        sub_session_id=f"sub:{parent_session_id}:{task_id}",
+        task_prompt=req.task_prompt,
+        status=TaskStatus.PENDING,
+        agent_name=agent_name,
+        task_type=task_type,
+        execution_log=[],
+        meta=req.context or {},
+        priority=priority,
+        max_retries=max_retries,
+    )
+    db.add(task)
+    await db.commit()
+
+    # 通过 ZMQ 创建 SubAgent daemon 并派遣任务
+    await zmq_manager.create_sub_daemon(
+        agent_name=agent_name or "default",
+        task_id=task_id,
+        task_prompt=req.task_prompt,
+        parent_session_id=parent_session_id,
+        model_config=model_config,
+        role_prompt=role_prompt,
+        max_tool_rounds=max_tool_rounds,
+    )
+
+    return TaskStatusResponse(
+        task_id=task.id,
+        status=task.status,
+        result=task.result,
+        error=task.error,
+        agent_name=task.agent_name,
+        task_type=task.task_type,
+        priority=task.priority,
+        retry_count=task.retry_count,
+        max_retries=task.max_retries,
+        created_at=utc_isoformat(task.created_at),
+    )
+
+
+async def _dispatch_direct(req: DispatchRequest, db: AsyncSession) -> TaskStatusResponse:
+    """直接派遣 SubAgent（阻塞模式或 ZMQ 不可用）。"""
     settings = get_settings()
     memory = MemoryFactory.create(settings.memory_backend, db=db)
     assistant = PersonalAssistant(session_id=req.parent_session_id, memory=memory, db=db)
@@ -175,13 +366,12 @@ async def dispatch_sub_agent(req: DispatchRequest, db: AsyncSession = Depends(ge
         )
 
         # 从数据库获取最新的 task 记录
-        from sqlalchemy import select
-        from agentpal.models.agent import SubAgentTask
+        from agentpal.models.agent import SubAgentTask as AgentSubTask
 
         result = await db.execute(
-            select(SubAgentTask)
-            .where(SubAgentTask.parent_session_id == req.parent_session_id)
-            .order_by(SubAgentTask.created_at.desc())
+            select(AgentSubTask)
+            .where(AgentSubTask.parent_session_id == req.parent_session_id)
+            .order_by(AgentSubTask.created_at.desc())
             .limit(1)
         )
         task = result.scalars().first()

@@ -136,6 +136,12 @@ class Settings(BaseSettings):
     # ── CORS ─────────────────────────────────────────────
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
+    # ── ZMQ 消息总线 ─────────────────────────────────────
+    zmq_router_addr: str = "inproc://agent-router"   # ROUTER socket 地址
+    zmq_events_addr: str = "inproc://agent-events"   # PUB/SUB 事件 broker 地址
+    zmq_pa_idle_timeout: int = 1800   # PA daemon 空闲回收超时（秒），默认 30 分钟
+    zmq_sub_idle_timeout: int = 300   # SubAgent daemon 空闲回收超时（秒），默认 5 分钟
+
     @property
     def is_dev(self) -> bool:
         return self.app_env == "development"
