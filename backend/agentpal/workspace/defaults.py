@@ -34,7 +34,6 @@ DEFAULT_AGENTS_MD = """\
 - `USER.md` 的完整路径是 `~/.nimo/USER.md`
 - `MEMORY.md` 的完整路径是 `~/.nimo/MEMORY.md`
 - `AGENTS.md` 的完整路径是 `~/.nimo/AGENTS.md`
-- 每日日志路径是 `~/.nimo/memory/YYYY-MM-DD.md`
 - 调用 `edit_file` / `write_file` 时，**必须使用 `~/.nimo/` 前缀**
 
 **禁止**：在用户的代码项目目录下创建 user_profile.md 或类似文件来存储用户信息。
@@ -43,7 +42,7 @@ DEFAULT_AGENTS_MD = """\
 
 - **记忆有限** — 想记住什么就写到文件里
 - "脑子记"不会在会话重启后保留，保存到文件中非常重要
-- 当有人说"记住这个"（或类似的话）→ 用 `edit_file` 更新 `~/.nimo/MEMORY.md` 或 `~/.nimo/memory/YYYY-MM-DD.md`
+- 当有人说"记住这个"（或类似的话）→ 用 `edit_file` 更新 `~/.nimo/MEMORY.md`
 - 当你学到教训 → 更新 `~/.nimo/AGENTS.md`、`~/.nimo/MEMORY.md` 或相关文件
 - 当你犯了错 → 记下来，让未来的你避免重蹈覆辙
 - **写下来 远比 用脑子记住 更好**
@@ -53,7 +52,7 @@ DEFAULT_AGENTS_MD = """\
 对话中发现有价值的信息时，**先记下来，再回答问题**：
 
 - 用户提到的个人信息（名字、偏好、习惯、工作方式）→ 更新 `~/.nimo/USER.md`
-- 对话中做出的重要决策或结论 → 记录到 `~/.nimo/memory/YYYY-MM-DD.md`
+- 对话中做出的重要决策或结论 → 追加到 `~/.nimo/MEMORY.md`（用 `edit_file` 在文件末尾追加，**不要用 `write_file` 覆盖**）
 - 发现的项目上下文、技术细节、工作流程 → 写入 `~/.nimo/MEMORY.md` 或相关文件
 - 用户表达的喜好或不满 → 更新 `~/.nimo/USER.md`
 - 工具相关的本地配置（路径、端口、密钥位置等）→ 更新 `~/.nimo/MEMORY.md` 的「工具设置」section
@@ -61,11 +60,20 @@ DEFAULT_AGENTS_MD = """\
 
 **关键原则：** 不要总是等用户说"记住这个"。如果信息对未来有价值，主动记录。先记录，再回答 — 这样即使会话中断，信息也不会丢失。
 
+**写入 MEMORY.md 的正确方式（追加，不覆盖）：**
+```
+edit_file(
+    file_path="~/.nimo/MEMORY.md",
+    old_text="## 历史约定\n- (空)",
+    new_text="## 历史约定\n- (空)\n\n<!-- 新记录 -->\n- 你学到的内容..."
+)
+```
+
 ### 🔍 回答前先检索
 
 回答关于过往工作、决策、日期、人员、偏好或待办的问题前：
 1. 先读 `~/.nimo/MEMORY.md` 查看长期记忆
-2. 如需查看每日记录，读 `~/.nimo/memory/YYYY-MM-DD.md`
+2. 如需查看用户偏好，读 `~/.nimo/USER.md`
 
 ## 安全
 
