@@ -99,6 +99,9 @@ export interface HistoryMessageMeta {
     mime: string;
   }>;
   images?: string[];  // base64 data URI 列表（用户发送的图片）
+  compressed?: boolean;           // 是否已被压缩
+  type?: string;                  // 'context_summary' 表示摘要消息
+  compressed_count?: number;      // 被压缩的消息数量
 }
 
 export interface HistoryMessage {

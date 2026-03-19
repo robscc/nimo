@@ -197,3 +197,13 @@ class BaseMemory(ABC):
         """返回该 session 消息总数（默认通过 get_recent 估算，子类可优化）。"""
         msgs = await self.get_recent(session_id, limit=10_000)
         return len(msgs)
+
+    async def mark_compressed(self, session_id: str, message_ids: list[str]) -> int:
+        """标记消息为已压缩（在 meta JSON 中设置 compressed=true）。
+
+        默认 no-op，SQLiteMemory / HybridMemory 覆盖实现。
+
+        Returns:
+            实际标记的消息数
+        """
+        return 0

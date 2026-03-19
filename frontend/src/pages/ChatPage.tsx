@@ -64,6 +64,9 @@ interface Message {
   streaming?: boolean;
   guardRequest?: ToolGuardRequest;
   retries?: RetryEntry[];
+  compressed?: boolean;         // 旧消息，灰色/半透明
+  isContextSummary?: boolean;   // 摘要分隔线
+  compressedCount?: number;     // 压缩了几条
 }
 
 // ── Thinking Bubble ────────────────────────────────────────
@@ -762,6 +765,9 @@ function mapHistoryToMessages(history: Awaited<ReturnType<typeof getSessionMessa
         status: "done" as const,
       })),
       files: meta?.files,
+      compressed: meta?.compressed ?? false,
+      isContextSummary: meta?.type === "context_summary",
+      compressedCount: meta?.compressed_count,
     };
   });
 }
@@ -1237,9 +1243,28 @@ export default function ChatPage() {
           )}
 
           {messages.map((msg, i) => (
+            msg.isContextSummary ? (
+              /* ── 摘要分隔线卡片 ─────────────────────── */
+              <div key={i} className="flex justify-center my-3">
+                <div className="max-w-[80%] w-full rounded-lg border border-dashed border-gray-300 bg-gray-50/60 px-4 py-3">
+                  <div className="flex items-center gap-2 text-xs text-gray-400 font-medium mb-1.5">
+                    <span className="flex-1 border-t border-gray-200" />
+                    <span className="shrink-0">📦 以上 {msg.compressedCount ?? "?"} 条已压缩为摘要</span>
+                    <span className="flex-1 border-t border-gray-200" />
+                  </div>
+                  <div className="text-xs text-gray-500 leading-relaxed whitespace-pre-wrap">
+                    {msg.content}
+                  </div>
+                </div>
+              </div>
+            ) : (
             <div
               key={i}
-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+              className={clsx(
+                "flex",
+                msg.role === "user" ? "justify-end" : "justify-start",
+                msg.compressed && "opacity-50",
+              )}
             >
               {msg.role === "assistant" ? (
                 <div className="max-w-[75%] space-y-1.5 min-w-0">
@@ -1331,6 +1356,7 @@ export default function ChatPage() {
                 </div>
               )}
             </div>
+            )
           ))}
 
           <div ref={bottomRef} />

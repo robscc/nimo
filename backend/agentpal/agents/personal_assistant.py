@@ -699,6 +699,28 @@ class PersonalAssistant(BaseAgent):
         except Exception as exc:
             logger.warning("_record_turn_usage: 更新 context_tokens 失败 session={} err={}", self.session_id, exc)
 
+        # 读回 context_tokens，触发 token 压缩检查
+        try:
+            result = await self._db.execute(
+                text("SELECT context_tokens FROM sessions WHERE id = :sid"),
+                {"sid": self.session_id},
+            )
+            row = result.first()
+            if row and row[0]:
+                context_tokens = int(row[0])
+                settings = get_settings()
+                await self._memory_writer.maybe_compress(
+                    session_id=self.session_id,
+                    memory=self.memory,
+                    ws_manager=self._ws_manager,
+                    model_config=self._model_config,
+                    context_tokens=context_tokens,
+                    context_window=settings.llm_context_window,
+                    db=self._db,
+                )
+        except Exception as exc:
+            logger.warning("_record_turn_usage: maybe_compress 检查失败 session={} err={}", self.session_id, exc)
+
     async def _load_prompt_skills(self) -> list[dict[str, Any]]:
         """加载已启用的 prompt 型技能内容，用于注入 system prompt。"""
         if self._db is None:
