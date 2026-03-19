@@ -120,6 +120,29 @@ class TestMaybeCompress:
             mock_asyncio.create_task.assert_not_called()
 
 
+def _patch_compress_bg_memory(sqlite_memory: SQLiteMemory):
+    """返回 patch 上下文：让 _compress 内部创建的 bg_memory 指向测试的 sqlite_memory。
+
+    _compress 会做 `async with AsyncSessionLocal() as bg_db` 然后
+    `MemoryFactory.create("sqlite", db=bg_db)` —— 这里我们替换 MemoryFactory.create
+    使其直接返回测试 fixture 的 sqlite_memory。
+    """
+    mock_bg_db = AsyncMock()
+
+    mock_session_ctx = AsyncMock()
+    mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_bg_db)
+    mock_session_ctx.__aexit__ = AsyncMock(return_value=None)
+
+    return (
+        patch("agentpal.database.AsyncSessionLocal", return_value=mock_session_ctx),
+        patch(
+            "agentpal.memory.factory.MemoryFactory.create",
+            return_value=sqlite_memory,
+        ),
+        mock_bg_db,
+    )
+
+
 class TestCompress:
     """_compress() 核心压缩逻辑测试（需要 DB fixture）。"""
 
@@ -157,6 +180,8 @@ class TestCompress:
         mock_response.content = [{"type": "text", "text": "【对话摘要】测试摘要内容"}]
         mock_response.usage = None
 
+        patch_session, patch_factory, mock_bg_db = _patch_compress_bg_memory(sqlite_memory)
+
         # Mock _flush 以避免实际 LLM 调用
         with (
             patch(
@@ -168,13 +193,9 @@ class TestCompress:
                 return_value="【对话摘要】测试摘要内容",
             ),
             patch.object(writer, "_flush", new_callable=AsyncMock),
-            patch("agentpal.database.AsyncSessionLocal") as mock_session_cls,
+            patch_session,
+            patch_factory,
         ):
-            # Mock AsyncSessionLocal context manager
-            mock_bg_db = AsyncMock()
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_bg_db)
-            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=None)
-
             MemoryWriter._active_compressions.add("test-session")
             await writer._compress("test-session", sqlite_memory, mock_ws_manager, model_config)
 
@@ -206,6 +227,8 @@ class TestCompress:
         mock_response.content = [{"type": "text", "text": "【对话摘要】关于项目部署的讨论"}]
         mock_response.usage = None
 
+        patch_session, patch_factory, mock_bg_db = _patch_compress_bg_memory(sqlite_memory)
+
         with (
             patch(
                 "agentpal.agents.personal_assistant._build_model",
@@ -216,12 +239,9 @@ class TestCompress:
                 return_value="【对话摘要】关于项目部署的讨论",
             ),
             patch.object(writer, "_flush", new_callable=AsyncMock),
-            patch("agentpal.database.AsyncSessionLocal") as mock_session_cls,
+            patch_session,
+            patch_factory,
         ):
-            mock_bg_db = AsyncMock()
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_bg_db)
-            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=None)
-
             MemoryWriter._active_compressions.add("test-session")
             await writer._compress("test-session", sqlite_memory, mock_ws_manager, model_config)
 
@@ -246,6 +266,8 @@ class TestCompress:
         mock_response.content = [{"type": "text", "text": "【对话摘要】测试"}]
         mock_response.usage = None
 
+        patch_session, patch_factory, mock_bg_db = _patch_compress_bg_memory(sqlite_memory)
+
         with (
             patch(
                 "agentpal.agents.personal_assistant._build_model",
@@ -256,12 +278,9 @@ class TestCompress:
                 return_value="【对话摘要】测试",
             ),
             patch.object(writer, "_flush", new_callable=AsyncMock),
-            patch("agentpal.database.AsyncSessionLocal") as mock_session_cls,
+            patch_session,
+            patch_factory,
         ):
-            mock_bg_db = AsyncMock()
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_bg_db)
-            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=None)
-
             MemoryWriter._active_compressions.add("test-session")
             await writer._compress("test-session", sqlite_memory, mock_ws_manager, model_config)
 
@@ -311,6 +330,8 @@ class TestCompress:
         mock_response.content = [{"type": "text", "text": "【对话摘要】测试"}]
         mock_response.usage = None
 
+        patch_session, patch_factory, mock_bg_db = _patch_compress_bg_memory(sqlite_memory)
+
         with (
             patch(
                 "agentpal.agents.personal_assistant._build_model",
@@ -321,12 +342,9 @@ class TestCompress:
                 return_value="【对话摘要】测试",
             ),
             patch.object(writer, "_flush", new_callable=AsyncMock),
-            patch("agentpal.database.AsyncSessionLocal") as mock_session_cls,
+            patch_session,
+            patch_factory,
         ):
-            mock_bg_db = AsyncMock()
-            mock_session_cls.return_value.__aenter__ = AsyncMock(return_value=mock_bg_db)
-            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=None)
-
             MemoryWriter._active_compressions.add("test-session")
             await writer._compress("test-session", sqlite_memory, mock_ws_manager, model_config)
 

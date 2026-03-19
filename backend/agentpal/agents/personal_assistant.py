@@ -85,6 +85,9 @@ class PersonalAssistant(BaseAgent):
     async def reply(self, user_input: str, images: list[str] | None = None, **kwargs: Any) -> str:
         """处理用户输入，支持多轮工具调用后返回最终回复。"""
         await self._remember_user(user_input, meta={"images": images} if images else None)
+        # 防御性 commit：确保 user 消息持久化（防止 StreamingResponse 生命周期 bug）
+        if self._db is not None:
+            await self._db.commit()
         history_with_meta = await self._get_history_with_meta(limit=20)
         toolkit = await self._build_active_toolkit()
 
@@ -175,6 +178,9 @@ class PersonalAssistant(BaseAgent):
         await self._remember_assistant(final_text)
         # 写 token 用量日志 + 更新 session.context_tokens
         await self._record_turn_usage(usage_rounds)
+        # 防御性 commit：确保 assistant 消息 + 用量持久化
+        if self._db is not None:
+            await self._db.commit()
         # 触发记忆压缩（后台异步，不阻塞）
         await self._memory_writer.maybe_flush(
             self.session_id, self.memory, self._ws_manager, self._model_config
@@ -198,6 +204,9 @@ class PersonalAssistant(BaseAgent):
         """
         try:
             await self._remember_user(user_input, meta={"images": images} if images else None)
+            # 防御性 commit：确保 user 消息持久化（防止 StreamingResponse 生命周期 bug）
+            if self._db is not None:
+                await self._db.commit()
             history_with_meta = await self._get_history_with_meta(limit=20)
             toolkit = await self._build_active_toolkit()
 
@@ -440,6 +449,9 @@ class PersonalAssistant(BaseAgent):
             await self._remember_assistant(final_text, meta=meta or None)
             # 写 token 用量日志 + 更新 session.context_tokens
             await self._record_turn_usage(usage_rounds)
+            # 防御性 commit：确保 assistant 消息 + 用量持久化（防止 StreamingResponse 生命周期 bug）
+            if self._db is not None:
+                await self._db.commit()
             yield {"type": "done"}
 
             # 触发记忆压缩（后台异步，不阻塞 SSE）
