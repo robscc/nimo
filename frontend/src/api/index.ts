@@ -172,7 +172,7 @@ export async function getSessionSubTasks(sessionId: string): Promise<SubTaskSumm
 }
 
 export async function getTaskArtifacts(taskId: string): Promise<TaskArtifact[]> {
-  const { data } = await api.get<TaskArtifact[]>(`/agent/tasks/${taskId}/artifacts`);
+  const { data } = await api.get<TaskArtifact[]>(`/tasks/${taskId}/artifacts`);
   return data;
 }
 

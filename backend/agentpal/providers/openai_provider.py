@@ -20,12 +20,14 @@ class OpenAIProvider(Provider):
     """
 
     def _client(self, timeout: float = 5):
+        import httpx
         from openai import AsyncOpenAI
 
         return AsyncOpenAI(
             base_url=self.base_url or None,
             api_key=self.api_key or "sk-dummy",
             timeout=timeout,
+            http_client=httpx.AsyncClient(transport=httpx.AsyncHTTPTransport()),
         )
 
     async def check_connection(self, timeout: float = 5) -> tuple[bool, str]:
@@ -65,6 +67,9 @@ class OpenAIProvider(Provider):
         client_kwargs: dict = {}
         if base_url:
             client_kwargs["base_url"] = base_url
+        # 禁用系统代理（macOS 系统代理可能不可用），直连内网/自定义端点
+        import httpx
+        client_kwargs["http_client"] = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport())
 
         return OpenAIChatModel(
             model_name=model_id,

@@ -75,7 +75,7 @@ function RetryBadge({ retryCount, maxRetries }: { retryCount: number; maxRetries
 
 function TaskCard({ task }: { task: TaskStatusResponse }) {
   const [expanded, setExpanded] = useState(false);
-  const { data: artifacts } = useTaskArtifacts(expanded ? task.task_id : null);
+  const { data: artifacts, isLoading: artifactsLoading } = useTaskArtifacts(expanded ? task.task_id : null);
   const cfg = STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
   const Icon = cfg.icon;
 
@@ -152,10 +152,10 @@ function TaskCard({ task }: { task: TaskStatusResponse }) {
 
           {/* 产出物列表 */}
           <div>
-            {artifacts ? (
-              <TaskArtifactViewer artifacts={artifacts} />
-            ) : (
+            {artifactsLoading ? (
               <div className="text-center py-4 text-gray-400 text-sm">加载中...</div>
+            ) : (
+              <TaskArtifactViewer artifacts={artifacts ?? []} />
             )}
           </div>
         </div>

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -219,7 +220,7 @@ class ArtifactCreate(BaseModel):
 
 
 @router.post("/artifacts", response_model=dict[str, str], tags=["artifacts"])
-async def create_artifact(request: ArtifactCreate, db: AsyncSession = Depends(get_async_db)) -> dict[str, str]:
+async def create_artifact(request: ArtifactCreate, db: AsyncSession = Depends(get_db)) -> dict[str, str]:
     """为任务创建产出物（代码、报告、图表等）。"""
     import uuid
 
@@ -255,7 +256,7 @@ async def create_artifact(request: ArtifactCreate, db: AsyncSession = Depends(ge
 
 
 @router.get("/{task_id}/artifacts", response_model=list[dict[str, Any]], tags=["artifacts"])
-async def list_artifacts(task_id: str, db: AsyncSession = Depends(get_async_db)) -> list[dict[str, Any]]:
+async def list_artifacts(task_id: str, db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
     """获取任务的所有产出物列表。"""
     from sqlalchemy import select
 
@@ -278,7 +279,7 @@ async def list_artifacts(task_id: str, db: AsyncSession = Depends(get_async_db))
 
 
 @router.get("/artifacts/{artifact_id}", response_model=dict[str, Any], tags=["artifacts"])
-async def get_artifact(artifact_id: str, db: AsyncSession = Depends(get_async_db)) -> dict[str, Any]:
+async def get_artifact(artifact_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     """获取单个产出物的详细内容。"""
     from sqlalchemy import select
 
@@ -319,7 +320,7 @@ class CancelTaskRequest(BaseModel):
 async def cancel_task(
     task_id: str,
     request: CancelTaskRequest | None = None,
-    db: AsyncSession = Depends(get_async_db),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """取消正在运行的 SubAgent 任务。"""
     from sqlalchemy import select

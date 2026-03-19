@@ -1,4 +1,5 @@
-.PHONY: help venv install dev backend frontend test test-unit test-integration coverage lint format clean docker-build docker-up docker-down
+.PHONY: help venv install dev backend frontend test test-unit test-integration coverage lint format clean \
+       docker-build docker-build-amd64 docker-up docker-down docker-save docker-deploy
 
 ## ─── 变量 ─────────────────────────────────────────────────
 # 可通过 make PYTHON=python3.13 覆盖
@@ -7,6 +8,13 @@ VENV_DIR     := backend/.venv
 VENV_BIN     := $(VENV_DIR)/bin
 VENV_PYTHON  := $(VENV_BIN)/python
 VENV_PIP     := $(VENV_BIN)/pip
+
+# Docker
+DOCKER       ?= podman
+IMAGE_NAME   ?= nimo-agentpal
+IMAGE_TAG    ?= latest
+PLAYWRIGHT   ?= true
+EXPORT_DIR   ?= /tmp
 
 ## 默认目标
 help:
@@ -33,9 +41,18 @@ help:
 	@echo "  make format        格式化代码 (Ruff + Black)"
 	@echo ""
 	@echo "Docker:"
-	@echo "  make docker-build  构建 Docker 镜像"
-	@echo "  make docker-up     启动 Docker 服务"
-	@echo "  make docker-down   停止 Docker 服务"
+	@echo "  make docker-build       构建本机架构镜像 (默认带 Playwright)"
+	@echo "  make docker-build-amd64 交叉编译 linux/amd64 镜像"
+	@echo "  make docker-up          启动 Docker 服务"
+	@echo "  make docker-down        停止 Docker 服务"
+	@echo "  make docker-save        导出 amd64 镜像为 tar"
+	@echo "  make docker-deploy      构建 + 导出 amd64 镜像 (一步到位)"
+	@echo ""
+	@echo "  可选变量:"
+	@echo "    PLAYWRIGHT=false      不安装 Playwright"
+	@echo "    DOCKER=docker         使用 Docker 而非 Podman"
+	@echo "    IMAGE_TAG=v1.0        自定义镜像 tag"
+	@echo "    EXPORT_DIR=./dist     自定义导出目录"
 	@echo ""
 	@echo "  make clean         清理临时文件"
 
@@ -57,7 +74,7 @@ venv-clean:  ## 删除 venv
 
 install: $(VENV_DIR)
 	@echo ">> 安装 Python 依赖..."
-	cd backend && $(abspath $(VENV_PIP)) install -e ".[dev]"
+	cd backend && $(abspath $(VENV_PYTHON)) -m pip install -e ".[dev]"
 	@echo ">> 安装前端依赖..."
 	cd frontend && npm install
 	@echo ">> 安装完成 ✅"
@@ -119,17 +136,38 @@ format: $(VENV_DIR)
 
 ## ─── Docker ─────────────────────────────────────────────────
 
-docker-build:
-	docker-compose build
+docker-build:  ## 构建本机架构镜像（默认带 Playwright）
+	@echo ">> 构建本机架构镜像 (PLAYWRIGHT=$(PLAYWRIGHT))..."
+	$(DOCKER) build \
+		--build-arg INSTALL_PLAYWRIGHT=$(PLAYWRIGHT) \
+		-t $(IMAGE_NAME):$(IMAGE_TAG) .
+	@echo ">> 构建完成: $(IMAGE_NAME):$(IMAGE_TAG) ✅"
 
-docker-up:
-	docker-compose up -d
-	@echo ">> 服务已启动:"
-	@echo "   后端: http://localhost:8088"
-	@echo "   前端: http://localhost:3000"
+docker-build-amd64:  ## 交叉编译 linux/amd64 镜像（Mac ARM → 服务器）
+	@echo ">> 交叉编译 linux/amd64 镜像 (PLAYWRIGHT=$(PLAYWRIGHT))..."
+	$(DOCKER) build \
+		--platform linux/amd64 \
+		--build-arg INSTALL_PLAYWRIGHT=$(PLAYWRIGHT) \
+		-t $(IMAGE_NAME):amd64 .
+	@echo ">> 构建完成: $(IMAGE_NAME):amd64 ✅"
 
-docker-down:
-	docker-compose down
+docker-save:  ## 导出 amd64 镜像为 tar 文件
+	@echo ">> 导出镜像 $(IMAGE_NAME):amd64 → $(EXPORT_DIR)/$(IMAGE_NAME)-amd64.tar ..."
+	$(DOCKER) save $(IMAGE_NAME):amd64 -o $(EXPORT_DIR)/$(IMAGE_NAME)-amd64.tar
+	@ls -lh $(EXPORT_DIR)/$(IMAGE_NAME)-amd64.tar
+	@echo ">> 导出完成 ✅"
+	@echo ">> 部署命令:"
+	@echo "   scp $(EXPORT_DIR)/$(IMAGE_NAME)-amd64.tar user@server:/tmp/"
+	@echo "   ssh user@server 'docker load -i /tmp/$(IMAGE_NAME)-amd64.tar && docker-compose up -d'"
+
+docker-deploy: docker-build-amd64 docker-save  ## 构建 + 导出 amd64 镜像（一步到位）
+
+docker-up:  ## 启动容器
+	$(DOCKER)-compose up -d
+	@echo ">> 服务已启动: http://localhost:$${APP_PORT:-8088}"
+
+docker-down:  ## 停止容器
+	$(DOCKER)-compose down
 
 ## ─── 清理 ───────────────────────────────────────────────────
 
