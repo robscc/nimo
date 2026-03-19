@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
@@ -47,11 +49,12 @@ class TestInternalSubAgentRuntimeIntegration:
         """运行时应该能够用数据库会话正确初始化。"""
         from agentpal.models.session import SubAgentTask, TaskStatus
 
+        uid = uuid.uuid4().hex[:8]
         # 创建一个测试任务
         task = SubAgentTask(
-            id="test-task-integration",
+            id=f"test-task-integration-{uid}",
             parent_session_id="test-parent",
-            sub_session_id="sub:test-parent:integration",
+            sub_session_id=f"sub:test-parent:integration-{uid}",
             task_prompt="Test task prompt",
             status=TaskStatus.PENDING,
             agent_name=None,
@@ -83,10 +86,11 @@ class TestInternalSubAgentRuntimeIntegration:
         """运行时 execute 方法应与 Mock SubAgent 协同工作。"""
         from agentpal.models.session import SubAgentTask, TaskStatus
 
+        uid = uuid.uuid4().hex[:8]
         task = SubAgentTask(
-            id="test-execute-task",
+            id=f"test-execute-task-{uid}",
             parent_session_id="test-parent",
-            sub_session_id="sub:test-parent:execute",
+            sub_session_id=f"sub:test-parent:execute-{uid}",
             task_prompt="Analyze this data",
             status=TaskStatus.PENDING,
             agent_name="researcher",

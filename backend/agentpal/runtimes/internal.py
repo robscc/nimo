@@ -84,7 +84,7 @@ class InternalSubAgentRuntime(BaseAgentRuntime):
 
         # 创建记忆模块
         if self.memory is None:
-            self.memory = BufferMemory(session_id=self.session_id, db=self.db)
+            self.memory = BufferMemory()
 
         # 从配置中提取模型配置
         model_config = self.config.model_config or {}

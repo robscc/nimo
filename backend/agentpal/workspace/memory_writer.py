@@ -111,8 +111,9 @@ class MemoryWriter:
                     f"MemoryWriter: session={session_id} count={count} "
                     f"→ 触发记忆压缩 (threshold={self.compaction_threshold})"
                 )
+                # 后台任务使用独立 DB session，不复用请求级 memory
                 asyncio.create_task(
-                    self._flush(session_id, memory, ws_manager, model_config)
+                    self._flush_background(session_id, ws_manager, model_config)
                 )
         except Exception as e:
             logger.warning(f"MemoryWriter.maybe_flush 检查失败: {e}")
@@ -166,6 +167,24 @@ class MemoryWriter:
         asyncio.create_task(
             self._compress(session_id, memory, ws_manager, model_config)
         )
+
+    async def _flush_background(
+        self,
+        session_id: str,
+        ws_manager: "WorkspaceManager",  # type: ignore[name-defined]  # noqa: F821
+        model_config: dict,
+    ) -> None:
+        """后台记忆提炼：使用独立 DB session，避免复用已关闭的请求级 session。"""
+        try:
+            from agentpal.database import AsyncSessionLocal
+            from agentpal.memory.factory import MemoryFactory
+
+            async with AsyncSessionLocal() as bg_db:
+                bg_memory = MemoryFactory.create("sqlite", db=bg_db)
+                await self._flush(session_id, bg_memory, ws_manager, model_config)
+                await bg_db.commit()
+        except Exception as e:
+            logger.warning(f"MemoryWriter._flush_background 执行失败 (session={session_id}): {e}")
 
     async def _flush(
         self,
@@ -242,13 +261,18 @@ class MemoryWriter:
         """执行 token 压缩：LLM 生成摘要 → 标记旧消息 → 插入摘要消息 → 重置 tokens。
 
         使用独立的 AsyncSessionLocal() 数据库 session，避免复用请求级 session。
+        所有 DB 操作都通过 bg_memory（基于独立 session）执行，不触碰请求级 memory。
         """
         try:
             from agentpal.database import AsyncSessionLocal
+            from agentpal.memory.factory import MemoryFactory
 
             async with AsyncSessionLocal() as bg_db:
+                # 创建独立的 memory 实例，使用 bg_db，避免复用请求级 session
+                bg_memory = MemoryFactory.create("sqlite", db=bg_db)
+
                 # 1. 加载全部消息
-                all_msgs = await memory.get_recent(session_id, limit=10_000)
+                all_msgs = await bg_memory.get_recent(session_id, limit=10_000)
                 if len(all_msgs) <= KEEP_RECENT:
                     logger.info(
                         f"MemoryWriter._compress: session={session_id} "
@@ -293,7 +317,7 @@ class MemoryWriter:
 
                 # 5. 调用 _flush 提取事实 → MEMORY.md + 日志（利用旧消息做事实提炼）
                 try:
-                    await self._flush(session_id, memory, ws_manager, model_config)
+                    await self._flush(session_id, bg_memory, ws_manager, model_config)
                 except Exception as flush_err:
                     logger.warning(
                         f"MemoryWriter._compress: _flush 失败（不阻塞压缩）: {flush_err}"
@@ -301,7 +325,7 @@ class MemoryWriter:
 
                 # 6. 软标记旧消息为已压缩
                 old_msg_ids = [m.id for m in uncompressed_old if m.id]
-                marked = await memory.mark_compressed(session_id, old_msg_ids)
+                marked = await bg_memory.mark_compressed(session_id, old_msg_ids)
                 logger.info(
                     f"MemoryWriter._compress: 标记 {marked} 条旧消息为 compressed "
                     f"(session={session_id})"
@@ -319,7 +343,7 @@ class MemoryWriter:
                         "compressed_count": compressed_count,
                     },
                 )
-                await memory.add(summary_msg)
+                await bg_memory.add(summary_msg)
                 logger.info(
                     f"MemoryWriter._compress: 插入摘要消息 "
                     f"(compressed_count={compressed_count}, session={session_id})"
