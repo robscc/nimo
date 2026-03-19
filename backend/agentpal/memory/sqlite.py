@@ -136,6 +136,39 @@ class SQLiteMemory(BaseMemory):
         result = await self._db.execute(stmt)
         return result.scalar_one()
 
+    async def mark_compressed(self, session_id: str, message_ids: list[str]) -> int:
+        """批量标记消息为已压缩（在 meta JSON 中设置 compressed=true）。
+
+        对每条消息的 meta 字段合并 {"compressed": true}。
+        如果 meta 为 NULL，则设置为 {"compressed": true}。
+
+        Returns:
+            实际更新的行数
+        """
+        if not message_ids:
+            return 0
+
+        # 逐条更新 meta（SQLite JSON 函数兼容性最好的方式）
+        count = 0
+        for msg_id in message_ids:
+            # 先读取当前 meta
+            stmt = select(MemoryRecord).where(
+                MemoryRecord.id == msg_id,
+                MemoryRecord.session_id == session_id,
+            )
+            result = await self._db.execute(stmt)
+            record = result.scalar_one_or_none()
+            if record is None:
+                continue
+            meta = dict(record.meta) if record.meta else {}
+            meta["compressed"] = True
+            record.meta = meta
+            count += 1
+
+        if count > 0:
+            await self._db.flush()
+        return count
+
 
 # ── 内部工具 ──────────────────────────────────────────────
 

@@ -59,6 +59,18 @@ class BaseAgent(ABC):
         return [m.to_agentscope_msg() for m in msgs]
 
     async def _get_history_with_meta(self, limit: int = 20) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-        """获取最近对话历史，返回 (msg_dict, metadata) 元组列表。"""
+        """获取最近对话历史，返回 (msg_dict, metadata) 元组列表。
+
+        过滤已压缩的消息（meta.compressed == true），但保留摘要消息
+        （meta.type == context_summary），这样发给 LLM 的上下文只包含
+        摘要 + 最近未压缩的消息，真正降低 token 用量。
+        """
         msgs = await self.memory.get_recent(self.session_id, limit=limit)
-        return [(m.to_agentscope_msg(), m.metadata) for m in msgs]
+        result = []
+        for m in msgs:
+            meta = m.metadata or {}
+            # 跳过已压缩的消息（但保留摘要消息）
+            if meta.get("compressed") and meta.get("type") != "context_summary":
+                continue
+            result.append((m.to_agentscope_msg(), meta))
+        return result

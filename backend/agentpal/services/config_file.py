@@ -25,6 +25,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "model": "qwen-max",
         "api_key": "",
         "base_url": "",
+        "context_window": 128000,
     },
     "database": {
         "url": "sqlite+aiosqlite:///./agentpal.db",
@@ -115,6 +116,7 @@ _YAML_TO_SETTINGS: dict[str, str] = {
     "llm.model": "llm_model",
     "llm.api_key": "llm_api_key",
     "llm.base_url": "llm_base_url",
+    "llm.context_window": "llm_context_window",
     "database.url": "database_url",
     "memory.backend": "memory_backend",
     "memory.buffer_size": "memory_buffer_size",

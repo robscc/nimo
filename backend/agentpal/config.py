@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     llm_model: str = "qwen-max"
     llm_api_key: str = ""
     llm_base_url: str = ""
+    llm_context_window: int = 128000  # 模型上下文窗口大小（token），0 = 禁用自动压缩
 
     # ── 记忆模块 ──────────────────────────────────────────
     # buffer: 纯内存滑动窗口

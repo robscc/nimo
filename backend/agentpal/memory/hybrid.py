@@ -91,6 +91,15 @@ class HybridMemory(BaseMemory):
     async def count(self, session_id: str) -> int:
         return await self._persistent.count(session_id)
 
+    async def mark_compressed(self, session_id: str, message_ids: list[str]) -> int:
+        """委托给 SQLiteMemory 标记，成功后清除 Buffer 缓存以保证一致性。"""
+        result = await self._persistent.mark_compressed(session_id, message_ids)
+        if result > 0:
+            # 清除 Buffer 缓存，下次 get_recent 时从 SQLite 重新预热
+            await self._buffer.clear(session_id)
+            self._warmed_sessions.discard(session_id)
+        return result
+
     # ── 内部工具 ──────────────────────────────────────────
 
     async def _maybe_warm(self, session_id: str) -> None:
