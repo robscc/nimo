@@ -57,7 +57,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "tool_guard": {
         "enabled": True,
-        "default_threshold": 2,
+        "default_threshold": 0,
         "tool_levels": {
             "execute_shell_command": 1,
             "write_file": 2,

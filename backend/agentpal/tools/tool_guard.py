@@ -74,7 +74,7 @@ class PendingGuardRequest:
 
 DEFAULT_TOOL_GUARD_CONFIG: dict[str, Any] = {
     "enabled": True,
-    "default_threshold": 2,
+    "default_threshold": 0,
     "tool_levels": {
         "execute_shell_command": 1,
         "write_file": 2,
