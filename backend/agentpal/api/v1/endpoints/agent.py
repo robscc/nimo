@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.agents.personal_assistant import PersonalAssistant
 from agentpal.config import get_settings
-from agentpal.database import get_db, utc_isoformat
+from agentpal.database import AsyncSessionLocal, get_db, utc_isoformat
 from agentpal.memory.factory import MemoryFactory
 from agentpal.models.session import SessionRecord, SessionStatus, SubAgentTask
 
@@ -104,7 +104,7 @@ class TaskListItem(BaseModel):
 
 
 @router.post("/chat")
-async def chat(req: ChatRequest, request: Request, db: AsyncSession = Depends(get_db)):
+async def chat(req: ChatRequest, request: Request):
     """主助手流式对话接口（SSE）。
 
     优先使用 ZMQ 桥接模式（通过 AgentDaemonManager），
@@ -118,7 +118,9 @@ async def chat(req: ChatRequest, request: Request, db: AsyncSession = Depends(ge
         data: {"type": "done"}
         data: {"type": "error",      "message": "..."}
     """
-    await _ensure_session(db, req.session_id, req.channel)
+    # 用短事务完成 session upsert，立即释放连接，避免阻塞 SSE 流期间的其他写操作
+    async with AsyncSessionLocal() as db:
+        await _ensure_session(db, req.session_id, req.channel)
 
     zmq_manager = _get_zmq_manager(request)
 
@@ -127,7 +129,7 @@ async def chat(req: ChatRequest, request: Request, db: AsyncSession = Depends(ge
         return await _chat_via_zmq(req, zmq_manager)
     else:
         # ── 直接调用模式（回退）──────────────────────────
-        return await _chat_direct(req, db)
+        return await _chat_direct(req)
 
 
 async def _chat_via_zmq(req: ChatRequest, zmq_manager: Any) -> StreamingResponse:
@@ -204,34 +206,37 @@ async def _chat_via_zmq(req: ChatRequest, zmq_manager: Any) -> StreamingResponse
     )
 
 
-async def _chat_direct(req: ChatRequest, db: AsyncSession) -> StreamingResponse:
+async def _chat_direct(req: ChatRequest) -> StreamingResponse:
     """直接调用 PersonalAssistant 的 SSE 流式对话（ZMQ 不可用时回退）。"""
     settings = get_settings()
-    memory = MemoryFactory.create(settings.memory_backend, db=db)
-    assistant = PersonalAssistant(session_id=req.session_id, memory=memory, db=db)
 
     async def event_stream() -> AsyncGenerator[str, None]:
-        async for event in assistant.reply_stream(req.message, images=req.images):
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        # 在 generator 内部独立管理 session，与 SSE 流同生命周期
+        # 不通过 Depends(get_db) 注入，避免持有连接阻塞其他请求
+        async with AsyncSessionLocal() as db:
+            memory = MemoryFactory.create(settings.memory_backend, db=db)
+            assistant = PersonalAssistant(session_id=req.session_id, memory=memory, db=db)
+            async for event in assistant.reply_stream(req.message, images=req.images):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
-            # send_file_to_user 成功 → 额外 emit file 事件
-            if (
-                event.get("type") == "tool_done"
-                and event.get("name") == "send_file_to_user"
-                and not event.get("error")
-            ):
-                try:
-                    info = json.loads(event.get("output", "{}"))
-                    if info.get("status") == "sent":
-                        file_event = {
-                            "type": "file",
-                            "url": info["url"],
-                            "name": info["filename"],
-                            "mime": info.get("mime", "application/octet-stream"),
-                        }
-                        yield f"data: {json.dumps(file_event, ensure_ascii=False)}\n\n"
-                except Exception:
-                    pass
+                # send_file_to_user 成功 → 额外 emit file 事件
+                if (
+                    event.get("type") == "tool_done"
+                    and event.get("name") == "send_file_to_user"
+                    and not event.get("error")
+                ):
+                    try:
+                        info = json.loads(event.get("output", "{}"))
+                        if info.get("status") == "sent":
+                            file_event = {
+                                "type": "file",
+                                "url": info["url"],
+                                "name": info["filename"],
+                                "mime": info.get("mime", "application/octet-stream"),
+                            }
+                            yield f"data: {json.dumps(file_event, ensure_ascii=False)}\n\n"
+                    except Exception:
+                        pass
 
     return StreamingResponse(
         event_stream(),
