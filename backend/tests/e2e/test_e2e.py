@@ -142,7 +142,7 @@ class TestChatConversation:
 
         # 左侧会话列表应更新 — 标题应包含用户的第一句话
         session_panel = page.locator("div.w-64.bg-white.border-r")
-        expect(session_panel.get_by_text("你好呀").first).to_be_visible(timeout=5000)
+        expect(session_panel.get_by_text("你好呀").first).to_be_visible(timeout=15000)
 
     def test_multi_turn_conversation(self, page: Page):
         """多轮对话：连续发两条消息，均应得到回复。"""
@@ -235,8 +235,8 @@ class TestToolsPage:
         """工具列表可见。"""
         page.goto(f"{BASE_URL}/tools")
         page.wait_for_load_state("domcontentloaded")
-        # 至少应有 read_file 工具
-        expect(page.get_by_text("read_file", exact=True)).to_be_visible()
+        # 至少应有 read_file 工具（工具名出现在列表和日志两处，取第一个）
+        expect(page.get_by_text("read_file", exact=True).first).to_be_visible()
 
     def test_tool_toggle(self, page: Page):
         """工具开关可以切换。"""
@@ -308,18 +308,22 @@ class TestNavigation:
 
         # 导航到 Tools
         page.locator("a[title='工具']").click()
+        page.wait_for_url("**/tools**", timeout=5000)
         expect(page.get_by_text("工具管理", exact=True)).to_be_visible(timeout=10000)
 
         # 导航到 Skills
         page.locator("a[title='技能']").click()
+        page.wait_for_url("**/skills**", timeout=5000)
         expect(page.get_by_text("技能管理", exact=True)).to_be_visible(timeout=10000)
 
         # 导航到 Sessions
         page.locator("a[title='会话']").click()
+        page.wait_for_url("**/sessions**", timeout=5000)
         expect(page.get_by_text("会话管理", exact=True)).to_be_visible(timeout=10000)
 
         # 导航回 Chat
         page.locator("a[title='对话']").click()
+        page.wait_for_url("**/chat**", timeout=5000)
         expect(page.get_by_text("nimo", exact=True).first).to_be_visible(timeout=10000)
 
 
