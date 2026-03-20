@@ -35,7 +35,7 @@ class MemoryFactory:
         """创建记忆后端实例。
 
         Args:
-            backend: "buffer" | "sqlite" | "hybrid" | "mem0" | "reme"（None 时读取全局配置）
+            backend: "buffer" | "sqlite" | "hybrid" | "mem0" | "reme" | "reme_light"（None 时读取全局配置）
             **kwargs:
                 db (AsyncSession): SQLite/hybrid 后端必传
                 buffer_size (int): BufferMemory 窗口大小，可选
@@ -45,6 +45,15 @@ class MemoryFactory:
                 reme_agent_name (str): ReMe Agent 名称，可选
                 reme_model_config (dict): ReMe LLM 配置，可选
                 reme_embedding_config (dict): ReMe Embedding 配置，可选
+                reme_light_working_dir (str): ReMeLight 工作目录，可选
+                reme_light_llm_api_key (str): ReMeLight LLM API Key，可选
+                reme_light_llm_base_url (str): ReMeLight LLM Base URL，可选
+                reme_light_embedding_api_key (str): ReMeLight Embedding API Key，可选
+                reme_light_embedding_base_url (str): ReMeLight Embedding Base URL，可选
+                reme_light_llm_model_config (dict): ReMeLight LLM 模型配置，可选
+                reme_light_embedding_model_config (dict): ReMeLight Embedding 模型配置，可选
+                reme_light_vector_weight (float): ReMeLight 向量检索权重，可选
+                reme_light_candidate_multiplier (float): ReMeLight 候选倍数，可选
 
         Returns:
             BaseMemory 实例
@@ -77,9 +86,12 @@ class MemoryFactory:
         if backend == "reme":
             return _create_reme(settings, **kwargs)
 
+        if backend == "reme_light":
+            return _create_reme_light(settings, **kwargs)
+
         raise ValueError(
             f"未知的 memory_backend: '{backend}'。"
-            f"支持的后端：buffer, sqlite, hybrid, mem0, reme"
+            f"支持的后端：buffer, sqlite, hybrid, mem0, reme, reme_light"
         )
 
 
@@ -107,4 +119,70 @@ def _create_reme(settings: Any, **kwargs: Any) -> BaseMemory:
         agent_name=agent_name,
         model_config=model_config,
         embedding_config=embedding_config,
+    )
+
+
+def _create_reme_light(settings: Any, **kwargs: Any) -> BaseMemory:
+    """创建 ReMeLight 记忆后端。
+
+    LLM key 回退优先级：reme_light 专用 > kwargs > 全局 settings.llm_api_key
+    """
+    from agentpal.memory.reme_light_adapter import ReMeLightMemory
+
+    working_dir = (
+        kwargs.get("reme_light_working_dir")
+        or getattr(settings, "memory_reme_light_working_dir", ".reme")
+    )
+
+    # LLM key 回退
+    llm_api_key = (
+        kwargs.get("reme_light_llm_api_key")
+        or getattr(settings, "memory_reme_light_llm_api_key", None)
+        or getattr(settings, "llm_api_key", None)
+    )
+    llm_base_url = (
+        kwargs.get("reme_light_llm_base_url")
+        or getattr(settings, "memory_reme_light_llm_base_url", None)
+        or getattr(settings, "llm_base_url", None)
+    )
+
+    # Embedding key 回退
+    embedding_api_key = (
+        kwargs.get("reme_light_embedding_api_key")
+        or getattr(settings, "memory_reme_light_embedding_api_key", None)
+        or getattr(settings, "llm_api_key", None)
+    )
+    embedding_base_url = (
+        kwargs.get("reme_light_embedding_base_url")
+        or getattr(settings, "memory_reme_light_embedding_base_url", None)
+    )
+
+    llm_model_config = (
+        kwargs.get("reme_light_llm_model_config")
+        or getattr(settings, "memory_reme_light_llm_model_config", None)
+    )
+    embedding_model_config = (
+        kwargs.get("reme_light_embedding_model_config")
+        or getattr(settings, "memory_reme_light_embedding_model_config", None)
+    )
+
+    vector_weight = kwargs.get(
+        "reme_light_vector_weight",
+        getattr(settings, "memory_reme_light_vector_weight", 0.7),
+    )
+    candidate_multiplier = kwargs.get(
+        "reme_light_candidate_multiplier",
+        getattr(settings, "memory_reme_light_candidate_multiplier", 3.0),
+    )
+
+    return ReMeLightMemory(
+        working_dir=working_dir,
+        llm_api_key=llm_api_key,
+        llm_base_url=llm_base_url,
+        embedding_api_key=embedding_api_key,
+        embedding_base_url=embedding_base_url,
+        llm_model_config=llm_model_config,
+        embedding_model_config=embedding_model_config,
+        vector_weight=vector_weight,
+        candidate_multiplier=candidate_multiplier,
     )

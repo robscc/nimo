@@ -77,3 +77,31 @@ class TestMemoryFactory:
 
         mem = MemoryFactory.create("reme", reme_server_url="http://localhost:8080")
         assert isinstance(mem, ReMeMemory)
+
+    def test_create_reme_light(self):
+        """创建 ReMeLight 后端。"""
+        from agentpal.memory.reme_light_adapter import ReMeLightMemory
+
+        mem = MemoryFactory.create("reme_light")
+        assert isinstance(mem, ReMeLightMemory)
+
+    def test_create_reme_light_with_config(self):
+        """创建 ReMeLight 后端（带配置）。"""
+        from agentpal.memory.reme_light_adapter import ReMeLightMemory
+
+        mem = MemoryFactory.create(
+            "reme_light",
+            reme_light_working_dir="/tmp/reme",
+            reme_light_llm_api_key="sk-test",
+            reme_light_llm_base_url="https://api.example.com/v1",
+            reme_light_embedding_api_key="sk-emb",
+            reme_light_vector_weight=0.8,
+            reme_light_candidate_multiplier=5.0,
+        )
+        assert isinstance(mem, ReMeLightMemory)
+        assert mem._working_dir == "/tmp/reme"
+        assert mem._llm_api_key == "sk-test"
+        assert mem._llm_base_url == "https://api.example.com/v1"
+        assert mem._embedding_api_key == "sk-emb"
+        assert mem._vector_weight == 0.8
+        assert mem._candidate_multiplier == 5.0
