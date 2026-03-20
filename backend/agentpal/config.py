@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     # hybrid: buffer + sqlite（默认，推荐）
     # mem0:   mem0 语义记忆（需 pip install mem0ai）
     # reme:   ReMe 记忆管理（需 pip install reme-memory 或启动 ReMe server）
-    memory_backend: Literal["buffer", "sqlite", "hybrid", "mem0", "reme"] = "hybrid"
+    memory_backend: Literal["buffer", "sqlite", "hybrid", "mem0", "reme", "reme_light"] = "hybrid"
     memory_buffer_size: int = 30      # BufferMemory 最大条数
     memory_sqlite_limit: int = 200    # SQLite 每次查询上限
 
@@ -103,6 +103,17 @@ class Settings(BaseSettings):
     memory_reme_agent_name: str = "AgentPal"    # ReMe Agent 名称
     memory_reme_model_config: dict[str, Any] | None = None
     memory_reme_embedding_config: dict[str, Any] | None = None
+
+    # ── ReMeLight 配置（memory_backend="reme_light" 时生效）──
+    memory_reme_light_working_dir: str = ".reme"
+    memory_reme_light_llm_api_key: str | None = None
+    memory_reme_light_llm_base_url: str | None = None
+    memory_reme_light_embedding_api_key: str | None = None
+    memory_reme_light_embedding_base_url: str | None = None
+    memory_reme_light_llm_model_config: dict[str, Any] | None = None
+    memory_reme_light_embedding_model_config: dict[str, Any] | None = None
+    memory_reme_light_vector_weight: float = 0.7
+    memory_reme_light_candidate_multiplier: float = 3.0
 
     # ── Workspace ─────────────────────────────────────────
     # Agent 工作空间目录，默认 ~/.nimo（可通过 WORKSPACE_DIR 环境变量覆盖）
