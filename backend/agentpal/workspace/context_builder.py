@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from agentpal.paths import get_workspace_dir
+
 
 @dataclass
 class WorkspaceFiles:
@@ -126,13 +128,15 @@ class ContextBuilder:
                 )
 
         # 8. 运行时环境（时间、时区、OS、session_id 等）
+        ws_dir = str(get_workspace_dir())
+        ws_display = f"`{ws_dir}/`" if not ws_dir.startswith("~") else f"`{ws_dir}/`"
         tz_name = now.strftime("%Z")
         tz_offset = now.strftime("%z")  # e.g. +0800
         env_lines = [
             f"- Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} {tz_name} (UTC{tz_offset[:3]}:{tz_offset[3:]})",
             f"- Day of week: {now.strftime('%A')}",
             f"- Timezone: {tz_name} (UTC{tz_offset[:3]}:{tz_offset[3:]})",
-            "- Workspace directory: `~/.nimo/` (所有记忆文件必须存放在此目录下，如 `~/.nimo/USER.md`、`~/.nimo/MEMORY.md` 等)",
+            f"- Workspace directory: {ws_display} (所有记忆文件必须存放在此目录下，如 `{ws_dir}/USER.md`、`{ws_dir}/MEMORY.md` 等)",
         ]
         if runtime_context:
             if runtime_context.get("session_id"):

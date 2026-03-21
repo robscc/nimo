@@ -43,12 +43,8 @@ def find_project_root() -> Path | None:
 
 def get_workspace_dir() -> Path:
     """Get the workspace directory, respecting WORKSPACE_DIR env var."""
-    import os
-
-    env_dir = os.environ.get("WORKSPACE_DIR")
-    if env_dir:
-        return Path(env_dir)
-    return Path.home() / ".nimo"
+    from agentpal.paths import get_workspace_dir as _get_workspace_dir
+    return _get_workspace_dir()
 
 
 def mask_secret(value: str, reveal: bool = False) -> str:

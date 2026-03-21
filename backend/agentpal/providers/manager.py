@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 from agentscope.model import ChatModelBase
 from loguru import logger
 
+from agentpal.paths import get_nimo_dir
 from agentpal.providers.openai_provider import OpenAIProvider
 from agentpal.providers.provider import ModelInfo, Provider, ProviderConfig
 from agentpal.providers.retry_model import RetryCallback, RetryChatModel
@@ -108,7 +109,7 @@ class ProviderManager:
     _instance: "ProviderManager | None" = None
 
     def __init__(self, storage_dir: Path | None = None) -> None:
-        self._root = storage_dir or (Path.home() / ".nimo" / "providers")
+        self._root = storage_dir or (get_nimo_dir() / "providers")
         self._builtin_dir = self._root / "builtin"
         self._custom_dir = self._root / "custom"
         self._builtins: Dict[str, Provider] = {}

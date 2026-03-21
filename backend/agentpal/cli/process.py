@@ -14,9 +14,11 @@ class PidManager:
     """Manage PID files for a service (backend / frontend)."""
 
     def __init__(self, service: str, run_dir: Path | None = None) -> None:
+        from agentpal.paths import get_run_dir
+
         self.service = service
         if run_dir is None:
-            run_dir = Path.home() / ".nimo" / "run"
+            run_dir = get_run_dir()
         self.pid_file = run_dir / f"{service}.pid"
 
     def write(self, pid: int) -> None:

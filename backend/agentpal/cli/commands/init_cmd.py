@@ -30,7 +30,9 @@ def init(
     """Initialize AgentPal workspace, config, database, and default SubAgents."""
     banner("Initializing AgentPal...")
 
-    ws_path = Path(workspace_dir) if workspace_dir else Path.home() / ".nimo"
+    from agentpal.paths import get_workspace_dir
+
+    ws_path = Path(workspace_dir) if workspace_dir else get_workspace_dir()
 
     # 1. Bootstrap workspace
     try:

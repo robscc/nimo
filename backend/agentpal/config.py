@@ -15,6 +15,8 @@ from typing import Any, Literal, Tuple, Type
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from agentpal.paths import get_nimo_home, get_skills_dir, get_workspace_dir
+
 
 def _load_yaml_settings() -> dict[str, Any]:
     """从 ~/.nimo/config.yaml 加载配置（如果存在）。"""
@@ -116,8 +118,8 @@ class Settings(BaseSettings):
     memory_reme_light_candidate_multiplier: float = 3.0
 
     # ── Workspace ─────────────────────────────────────────
-    # Agent 工作空间目录，默认 ~/.nimo（可通过 WORKSPACE_DIR 环境变量覆盖）
-    workspace_dir: str = str(Path.home() / ".nimo")
+    # Agent 工作空间目录，默认 ~/.nimo（可通过 WORKSPACE_DIR 或 NIMO_HOME 环境变量覆盖）
+    workspace_dir: str = str(get_workspace_dir())
 
     # ── Heartbeat ────────────────────────────────────────
     # 心跳机制：定期读取 HEARTBEAT.md 并执行其中的任务
@@ -125,7 +127,8 @@ class Settings(BaseSettings):
     heartbeat_interval_minutes: int = 60  # 心跳间隔（分钟），默认 1 小时
 
     # ── Skill 系统 ──────────────────────────────────────
-    skills_dir: str = "./skills_data"   # 技能安装目录
+    # 技能安装目录，默认 ~/.nimo/skills_data（可通过 SKILLS_DIR 或 NIMO_HOME 环境变量覆盖）
+    skills_dir: str = str(get_skills_dir())
 
     # ── 渠道 ──────────────────────────────────────────────
     dingtalk_enabled: bool = False

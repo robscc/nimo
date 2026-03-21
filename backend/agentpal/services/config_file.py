@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from agentpal.paths import get_nimo_dir
 from loguru import logger
 
 # ~/.nimo/config.yaml 的默认模板
@@ -143,7 +144,7 @@ class ConfigFileManager:
     CONFIG_FILENAME = "config.yaml"
 
     def __init__(self, nimo_dir: Path | str | None = None) -> None:
-        self.nimo_dir = Path(nimo_dir) if nimo_dir else Path.home() / ".nimo"
+        self.nimo_dir = Path(nimo_dir) if nimo_dir else get_nimo_dir()
         self.config_path = self.nimo_dir / self.CONFIG_FILENAME
 
     # ── 读取 ──────────────────────────────────────────────
