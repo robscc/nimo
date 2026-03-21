@@ -25,6 +25,7 @@ from pathlib import Path
 import aiofiles
 from loguru import logger
 
+from agentpal.paths import get_workspace_dir
 from agentpal.workspace.context_builder import WorkspaceFiles
 from agentpal.workspace.defaults import DEFAULT_FILES, EDITABLE_FILES
 
@@ -39,7 +40,7 @@ class WorkspaceManager:
         workspace_dir: 工作空间根目录，默认 ~/.nimo
     """
 
-    DEFAULT_DIR: Path = Path.home() / ".nimo"
+    DEFAULT_DIR: Path = get_workspace_dir()
     _BOOTSTRAP_FLAG = ".bootstrapped"
 
     def __init__(self, workspace_dir: Path | str | None = None) -> None:
