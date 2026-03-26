@@ -6,15 +6,17 @@ import {
   CheckCircle2, Loader2, XCircle, Paperclip, Brain,
   Info, Settings, Cpu, Puzzle, X, Smartphone,
   Code2, Terminal, CalendarClock, Shield, ShieldAlert,
-  ShieldCheck, ShieldX, ImagePlus,
+  ShieldCheck, ShieldX, ImagePlus, Users,
 } from "lucide-react";
 import clsx from "clsx";
 import { clearMemory, createSession, getSessions, getSessionMessages, resolveToolGuard } from "../api";
 import NimoIcon from "../components/NimoIcon";
 import SessionPanel from "../components/SessionPanel";
+import MentionPopup from "../components/MentionPopup";
 import { useSessionMeta, useUpdateSessionConfig } from "../hooks/useSessionMeta";
 import { useTools } from "../hooks/useTools";
 import { useSkills } from "../hooks/useSkills";
+import { useSubAgents } from "../hooks/useSubAgents";
 import { useSessionEvents } from "../hooks/useSessionEvents";
 
 // ── Types ─────────────────────────────────────────────────
@@ -740,6 +742,60 @@ function SessionMetaPanel({
             )}
           </div>
         </div>
+
+        {/* SubAgent dispatch mode */}
+        <div data-testid="sub-agent-mode" className="space-y-2">
+          <div className="border-t border-gray-100 pt-3" />
+          <p className="text-xs font-semibold text-gray-600 flex items-center gap-1.5">
+            <Users size={13} className="text-nimo-500" /> SubAgent 调度模式
+          </p>
+          <p className="text-[10px] text-gray-400 leading-relaxed">
+            控制 LLM 何时将任务委派给专业 SubAgent
+          </p>
+          <div className="flex gap-1.5">
+            {([
+              { value: null, label: "全局", testId: "sub-agent-btn-global" },
+              { value: "auto" as const, label: "自动", testId: "sub-agent-btn-auto" },
+              { value: "manual" as const, label: "手动", testId: "sub-agent-btn-manual" },
+              { value: "off" as const, label: "关", testId: "sub-agent-btn-off" },
+            ] as const).map((opt) => {
+              const currentMode = meta?.sub_agent_mode ?? null;
+              const isActive = currentMode === opt.value;
+              return (
+                <button
+                  key={opt.testId}
+                  data-testid={opt.testId}
+                  aria-pressed={isActive}
+                  onClick={() =>
+                    updateConfig.mutate({ sessionId, config: { sub_agent_mode: opt.value } })
+                  }
+                  className={clsx(
+                    "px-2.5 py-1.5 rounded-lg text-[10px] font-semibold transition-all border",
+                    isActive
+                      ? "border-nimo-300 bg-nimo-100 text-nimo-700 shadow-sm"
+                      : "border-gray-200 bg-white text-gray-400 hover:border-gray-300 hover:text-gray-600"
+                  )}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+          <p data-testid="sub-agent-status" className="text-[10px] text-gray-500">
+            {meta?.sub_agent_mode === null || meta?.sub_agent_mode === undefined
+              ? "当前: 跟随全局"
+              : meta.sub_agent_mode === "auto"
+                ? "当前: 自动模式"
+                : meta.sub_agent_mode === "manual"
+                  ? "当前: 手动模式(@mention)"
+                  : "当前: 已禁用"}
+          </p>
+          {(meta?.sub_agent_mode === "manual" || (meta?.sub_agent_mode == null)) && (
+            <p className="text-[10px] text-gray-400 bg-gray-50 rounded-lg px-2.5 py-1.5 border border-gray-100">
+              手动模式下用 @researcher 或 @coder 指定 SubAgent
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -788,9 +844,31 @@ export default function ChatPage() {
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
 
   const isReadOnly = sessionId?.startsWith("dingtalk:") ?? false;
+
+  // ── @mention 自动提示 ─────────────────────────────────────
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionIndex, setMentionIndex] = useState(0);
+
+  const { data: sessionMeta } = useSessionMeta(sessionId);
+  const subAgentMode = sessionMeta?.sub_agent_mode ?? null;
+  // sub_agent_mode 为 "off" 时禁用 @mention
+  const mentionEnabled = subAgentMode !== "off";
+
+  const { data: subAgents } = useSubAgents();
+  const enabledAgents = mentionEnabled
+    ? (subAgents ?? []).filter((a) => a.enabled)
+    : [];
+  const filteredAgents = enabledAgents.filter(
+    (a) =>
+      !mentionQuery ||
+      a.name.toLowerCase().includes(mentionQuery.toLowerCase()) ||
+      a.display_name.toLowerCase().includes(mentionQuery.toLowerCase()),
+  );
 
   // ── 图片处理 ────────────────────────────────────────────
   const addImageFiles = useCallback((files: File[]) => {
@@ -1096,6 +1174,71 @@ export default function ChatPage() {
     }
   };
 
+  // ── @mention 输入检测 ──────────────────────────────────────
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setInput(val);
+
+    // 光标前的文本
+    const cursorPos = e.target.selectionStart ?? val.length;
+    const beforeCursor = val.slice(0, cursorPos);
+
+    // 匹配: 行首或空白后的 @xxx（避免邮箱误触发）
+    const match = beforeCursor.match(/(^|[\s])@(\S*)$/);
+    if (match) {
+      setMentionQuery(match[2]);
+      setMentionOpen(true);
+      setMentionIndex(0);
+    } else {
+      setMentionOpen(false);
+      setMentionQuery("");
+    }
+  };
+
+  const handleMentionSelect = (agent: { name: string; display_name: string }) => {
+    const el = chatInputRef.current;
+    if (!el) return;
+
+    const cursorPos = el.selectionStart ?? input.length;
+    const beforeCursor = input.slice(0, cursorPos);
+    const afterCursor = input.slice(cursorPos);
+
+    // 找到最后一个 @（触发 mention 的位置）
+    const atIndex = beforeCursor.lastIndexOf("@");
+    if (atIndex === -1) return;
+
+    const replacement = `@${agent.display_name} `;
+    const newValue = beforeCursor.slice(0, atIndex) + replacement + afterCursor;
+    setInput(newValue);
+    setMentionOpen(false);
+    setMentionQuery("");
+
+    // 恢复焦点并设置光标
+    requestAnimationFrame(() => {
+      el.focus();
+      const newCursor = atIndex + replacement.length;
+      el.setSelectionRange(newCursor, newCursor);
+    });
+  };
+
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!mentionOpen || filteredAgents.length === 0) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setMentionIndex((prev) => (prev + 1) % filteredAgents.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setMentionIndex((prev) => (prev - 1 + filteredAgents.length) % filteredAgents.length);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      handleMentionSelect(filteredAgents[mentionIndex]);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      setMentionOpen(false);
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     sendMessage(input.trim());
@@ -1326,7 +1469,7 @@ export default function ChatPage() {
                   )}
                   {/* Text bubble — show if has content OR still streaming */}
                   {(msg.content || msg.streaming) && (
-                    <div className="bg-white border rounded-2xl px-4 py-2.5 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
+                    <div data-testid="assistant-message" className="bg-white border rounded-2xl px-4 py-2.5 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
                       {msg.content || (
                         <span className="text-gray-400 animate-pulse">思考中…</span>
                       )}
@@ -1338,7 +1481,7 @@ export default function ChatPage() {
                   )}
                 </div>
               ) : (
-                <div className="max-w-[70%] bg-nimo-500 text-white rounded-2xl px-4 py-2.5 text-sm leading-relaxed">
+                <div data-testid="user-message" className="max-w-[70%] bg-nimo-500 text-white rounded-2xl px-4 py-2.5 text-sm leading-relaxed">
                   {msg.images && msg.images.length > 0 && (
                     <div className="flex gap-2 mb-2 flex-wrap">
                       {msg.images.map((img, imgIdx) => (
@@ -1408,7 +1551,15 @@ export default function ChatPage() {
               释放以添加图片
             </div>
           )}
-          <div className="flex gap-3">
+          <div className="flex gap-3 relative">
+          {/* @mention 弹窗 */}
+          {mentionOpen && filteredAgents.length > 0 && (
+            <MentionPopup
+              agents={filteredAgents}
+              selectedIndex={mentionIndex}
+              onSelect={handleMentionSelect}
+            />
+          )}
           <label
             className="w-10 h-10 rounded-xl border border-gray-200 text-gray-400 hover:text-nimo-500 hover:border-nimo-300 flex items-center justify-center cursor-pointer transition-colors shrink-0"
             title="上传图片或技能包 (.zip)"
@@ -1424,13 +1575,18 @@ export default function ChatPage() {
             />
           </label>
           <input
+            ref={chatInputRef}
+            data-testid="chat-input"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={pendingImages.length > 0 ? "添加描述文字...（可选）" : "输入消息...（支持粘贴/拖入图片）"}
+            onChange={handleInputChange}
+            onKeyDown={handleInputKeyDown}
+            onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
+            placeholder={pendingImages.length > 0 ? "添加描述文字...（可选）" : "输入消息...（@ 可选择 SubAgent）"}
             className="flex-1 rounded-xl border border-gray-200 px-4 py-2 text-sm outline-none focus:border-nimo-400 transition-colors"
             disabled={isStreaming}
           />
           <button
+            data-testid="chat-submit"
             type="submit"
             disabled={isStreaming || (!input.trim() && pendingImages.length === 0)}
             className="w-10 h-10 rounded-xl bg-nimo-500 text-white flex items-center justify-center hover:bg-nimo-600 disabled:opacity-40 transition-colors"

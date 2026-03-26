@@ -228,7 +228,7 @@ class TestCoderSubAgentIntegration:
         agents = resp.json()
         coder = next(a for a in agents if a["name"] == "coder")
 
-        expected_types = {"code", "debug", "script", "implement", "test"}
+        expected_types = {"code", "debug", "script", "implement", "test", "refactor", "fix"}
         actual_types = set(coder["accepted_task_types"])
         assert expected_types == actual_types
 
