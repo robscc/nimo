@@ -760,6 +760,9 @@ async def dispatch_sub_agent(
     from agentpal.runtimes.registry import get_runtime
 
     async def _run() -> str:
+        from agentpal.agents.sub_agent import SubAgent
+        from agentpal.memory.buffer import BufferMemory
+
         task_id = str(uuid.uuid4())
         sub_session_id = f"sub:{parent_session_id}:{task_id}"
 
@@ -798,70 +801,104 @@ async def dispatch_sub_agent(
             db.add(task)
             await db.commit()
 
-            # 3. 构建运行时配置
-            rt_config_data = {
-                "runtime_type": runtime_type,
-                "model_config": model_config,
-                "max_tool_rounds": max_tool_rounds,
-                "timeout_seconds": float(wait_seconds),
-            }
-            if runtime_config:
-                rt_config_data["extra"] = runtime_config
+            if not blocking:
+                # ── Non-blocking: 后台任务用独立 DB session ──
+                # 快照闭包需要的参数，避免引用已关闭的 db / ORM 对象
+                _task_id = task_id
+                _sub_session_id = sub_session_id
+                _model_config = model_config
+                _role_prompt = role_prompt
+                _max_tool_rounds = max_tool_rounds
+                _parent_session_id = parent_session_id
+                _resolved_agent_name = resolved_agent_name
 
-            rt_config = RuntimeConfig(**rt_config_data)
+                async def run_in_background() -> None:
+                    """在独立 AsyncSession 中运行 SubAgent。
 
-            # 4. 获取运行时实例并使用其执行任务
-            runtime = get_runtime(
-                runtime_type=runtime_type,
-                session_id=sub_session_id,
-                config=rt_config,
-                db=db,
-                parent_session_id=parent_session_id,
-                task=task,
-            )
+                    外层 `async with AsyncSessionLocal() as db` 会在
+                    _run() 返回后关闭，后台任务必须自己开新 session。
+                    与 PersonalAssistant.dispatch_sub_agent 模式一致。
+                    """
+                    from loguru import logger as _logger
 
-            try:
-                # 初始化运行时
-                await runtime._initialize()
+                    from agentpal.database import AsyncSessionLocal as _ASL
 
-                if blocking:
-                    # Blocking mode: execute and wait for completion
-                    result: ExecutionResult = await runtime.execute(task_prompt)
+                    async with _ASL() as bg_db:
+                        bg_task = await bg_db.get(SubAgentTask, _task_id)
+                        if bg_task is None:
+                            _logger.error(
+                                f"SubAgent 后台任务找不到 task record: {_task_id}"
+                            )
+                            return
 
-                    # 从数据库重新加载最新状态
-                    await db.refresh(task)
-
-                    agent_label = resolved_agent_name or "SubAgent"
-                    if result.success and task.status == TaskStatus.DONE:
-                        return f"[{agent_label}] DONE\n\n{result.output}"
-                    elif task.status == TaskStatus.INPUT_REQUIRED:
-                        question = task.meta.get("input_request", {}).get("question", "需要您的输入")
-                        return f"[{agent_label}] INPUT_REQUIRED\n任务 ID: {task_id}\n问题：{question}\n\n请提供所需输入以继续执行。"
-                    else:
-                        error_detail = f"\n\n错误：{task.error}" if task.error else (f"\n\n错误：{result.error}" if result.error else "")
-                        return f"[{agent_label}] FAILED\n任务 ID: {task_id}{error_detail}"
-                else:
-                    # Non-blocking mode: start background task and return immediately
-                    async def run_in_background():
+                        sub_memory = BufferMemory()
+                        sub_agent = SubAgent(
+                            session_id=_sub_session_id,
+                            memory=sub_memory,
+                            task=bg_task,
+                            db=bg_db,
+                            model_config=_model_config,
+                            role_prompt=_role_prompt,
+                            max_tool_rounds=_max_tool_rounds,
+                            parent_session_id=_parent_session_id,
+                        )
                         try:
-                            await runtime.execute(task_prompt)
-                        except Exception as e:
-                            task.status = TaskStatus.FAILED
-                            task.error = str(e)
-                            await db.commit()
+                            await sub_agent.run(task_prompt)
+                            await bg_db.commit()
+                        except Exception as exc:
+                            _logger.exception(
+                                f"SubAgent 后台任务执行失败: {exc}"
+                            )
+                            bg_task.status = TaskStatus.FAILED
+                            bg_task.error = str(exc)
+                            await bg_db.commit()
 
-                    asyncio.create_task(run_in_background())
+                asyncio.create_task(run_in_background())
 
-                    return (
-                        f"[SubAgent] STARTED\n"
-                        f"任务 ID: {task_id}\n"
-                        f"执行者：{resolved_agent_name or 'Auto'}\n"
-                        f"状态：{TaskStatus.RUNNING.value}\n\n"
-                        f"任务正在后台运行，可在 /tasks 页面查看进度。"
-                    )
-            finally:
-                # 清理运行时资源
-                await runtime._cleanup()
+                return (
+                    f"[SubAgent] STARTED\n"
+                    f"任务 ID: {task_id}\n"
+                    f"执行者：{resolved_agent_name or 'Auto'}\n"
+                    f"状态：{TaskStatus.RUNNING.value}\n\n"
+                    f"任务正在后台运行，可在 /tasks 页面查看进度。"
+                )
+            else:
+                # ── Blocking: db 在 async with 内，生命周期安全 ──
+                # 让 runtime.execute() 自行管理 _initialize / _cleanup
+                rt_config_data = {
+                    "runtime_type": runtime_type,
+                    "model_config": model_config,
+                    "max_tool_rounds": max_tool_rounds,
+                    "timeout_seconds": float(wait_seconds),
+                }
+                if runtime_config:
+                    rt_config_data["extra"] = runtime_config
+
+                rt_config = RuntimeConfig(**rt_config_data)
+
+                runtime = get_runtime(
+                    runtime_type=runtime_type,
+                    session_id=sub_session_id,
+                    config=rt_config,
+                    db=db,
+                    parent_session_id=parent_session_id,
+                    task=task,
+                )
+
+                result: ExecutionResult = await runtime.execute(task_prompt)
+
+                # 从数据库重新加载最新状态
+                await db.refresh(task)
+
+                agent_label = resolved_agent_name or "SubAgent"
+                if result.success and task.status == TaskStatus.DONE:
+                    return f"[{agent_label}] DONE\n\n{result.output}"
+                elif task.status == TaskStatus.INPUT_REQUIRED:
+                    question = task.meta.get("input_request", {}).get("question", "需要您的输入")
+                    return f"[{agent_label}] INPUT_REQUIRED\n任务 ID: {task_id}\n问题：{question}\n\n请提供所需输入以继续执行。"
+                else:
+                    error_detail = f"\n\n错误：{task.error}" if task.error else (f"\n\n错误：{result.error}" if result.error else "")
+                    return f"[{agent_label}] FAILED\n任务 ID: {task_id}{error_detail}"
 
     try:
         result_text = await asyncio.wait_for(_run(), timeout=wait_seconds)
