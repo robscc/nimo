@@ -11,6 +11,7 @@ from agentpal.memory.reme_light_adapter import (
     ReMeLightMemory,
     _extract_items_from_result,
     _extract_session_id,
+    _memory_role_to_str,
     _strip_session_tag,
     _tag_content,
 )
@@ -56,6 +57,21 @@ class TestHelpers:
 
     def test_extract_items_from_result_empty(self):
         assert _extract_items_from_result(42) == []
+
+    def test_memory_role_to_str_user(self):
+        assert _memory_role_to_str(MemoryRole.USER) == "user"
+
+    def test_memory_role_to_str_assistant(self):
+        assert _memory_role_to_str(MemoryRole.ASSISTANT) == "assistant"
+
+    def test_memory_role_to_str_system(self):
+        assert _memory_role_to_str(MemoryRole.SYSTEM) == "system"
+
+    def test_memory_role_to_str_tool(self):
+        assert _memory_role_to_str(MemoryRole.TOOL) == "user"
+
+    def test_memory_role_to_str_unknown(self):
+        assert _memory_role_to_str("unknown_role") == "user"
 
 
 # ── add() 测试 ───────────────────────────────────────────
@@ -120,11 +136,11 @@ class TestReMeLightMemoryAdd:
 
     @pytest.mark.asyncio
     async def test_add_with_reme_native(self):
-        """有 ReMeLight 实例时应调用原生存储。"""
+        """有 ReMeLight 实例时应调用原生存储，传入 Msg 对象。"""
         mem = ReMeLightMemory()
 
         mock_in_memory = MagicMock()
-        mock_in_memory.add = MagicMock()
+        mock_in_memory.add = AsyncMock()
 
         mock_reme = AsyncMock()
         mock_reme.start = AsyncMock()
@@ -142,9 +158,14 @@ class TestReMeLightMemoryAdd:
             msg = MemoryMessage(session_id="s1", role=MemoryRole.USER, content="hello")
             await mem.add(msg)
 
-            mock_in_memory.add.assert_called_once()
-            call_kwargs = mock_in_memory.add.call_args
-            assert "hello" in str(call_kwargs)
+            mock_in_memory.add.assert_awaited_once()
+            call_args = mock_in_memory.add.call_args
+            # 验证传入了 memories= kwarg，且是 Msg 对象
+            assert "memories" in call_args.kwargs
+            passed_msg = call_args.kwargs["memories"]
+            assert hasattr(passed_msg, "content")
+            assert "[session:s1] hello" in str(passed_msg.content)
+            assert passed_msg.role == "user"
 
     @pytest.mark.asyncio
     async def test_add_tolerates_reme_failure(self):
@@ -354,6 +375,50 @@ class TestReMeLightMemoryClear:
         # 不应抛异常
         await mem.clear("nonexistent")
 
+    @pytest.mark.asyncio
+    async def test_clear_triggers_clear_content(self):
+        """clear() 应调用 _in_memory.clear_content() 触发持久化。"""
+        mem = ReMeLightMemory()
+        mock_in_memory = MagicMock()
+        mock_in_memory.clear_content = MagicMock()
+
+        # 直接往 buffer 中写入（绕过 add 的 _ensure_started）
+        mem._session_messages["s1"] = [
+            MemoryMessage(session_id="s1", role=MemoryRole.USER, content="hello")
+        ]
+        mem._in_memory = mock_in_memory
+
+        await mem.clear("s1")
+
+        mock_in_memory.clear_content.assert_called_once()
+        # buffer 也应被清空
+        assert "s1" not in mem._session_messages
+
+    @pytest.mark.asyncio
+    async def test_clear_tolerates_clear_content_error(self):
+        """clear_content() 异常不影响 buffer 清除。"""
+        mem = ReMeLightMemory()
+        mock_in_memory = MagicMock()
+        mock_in_memory.clear_content = MagicMock(side_effect=RuntimeError("disk error"))
+        mem._in_memory = mock_in_memory
+
+        await mem.add(MemoryMessage(session_id="s1", role=MemoryRole.USER, content="hello"))
+        await mem.clear("s1")
+
+        # buffer 仍然被清空
+        assert "s1" not in mem._session_messages
+
+    @pytest.mark.asyncio
+    async def test_clear_without_in_memory(self):
+        """_in_memory 为 None 时 clear 仅清 buffer，不报错。"""
+        mem = ReMeLightMemory()
+        assert mem._in_memory is None
+
+        await mem.add(MemoryMessage(session_id="s1", role=MemoryRole.USER, content="hello"))
+        await mem.clear("s1")
+
+        assert "s1" not in mem._session_messages
+
 
 # ── count() 测试 ─────────────────────────────────────────
 
@@ -421,9 +486,14 @@ class TestReMeLightMemoryClose:
 class TestReMeLightNativeCapabilities:
     @pytest.mark.asyncio
     async def test_compact_history(self):
-        """compact_history 应调用 compact_memory()。"""
+        """compact_history 应调用 compact_memory(messages=...)。"""
         mem = ReMeLightMemory()
         mem._started = True
+
+        mock_messages = [MagicMock(), MagicMock()]
+        mock_in_memory = MagicMock()
+        mock_in_memory.get_memory.return_value = mock_messages
+        mem._in_memory = mock_in_memory
 
         mock_reme = AsyncMock()
         mock_reme.compact_memory = AsyncMock(return_value="compressed summary")
@@ -431,7 +501,25 @@ class TestReMeLightNativeCapabilities:
 
         result = await mem.compact_history("s1")
         assert result == "compressed summary"
-        mock_reme.compact_memory.assert_called_once()
+        mock_in_memory.get_memory.assert_called_once()
+        mock_reme.compact_memory.assert_called_once_with(messages=mock_messages)
+
+    @pytest.mark.asyncio
+    async def test_compact_history_empty_messages(self):
+        """消息为空时 compact_history 直接返回 None。"""
+        mem = ReMeLightMemory()
+        mem._started = True
+
+        mock_in_memory = MagicMock()
+        mock_in_memory.get_memory.return_value = []
+        mem._in_memory = mock_in_memory
+
+        mock_reme = AsyncMock()
+        mem._reme = mock_reme
+
+        result = await mem.compact_history("s1")
+        assert result is None
+        mock_reme.compact_memory.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_compact_history_failure(self):
@@ -444,9 +532,14 @@ class TestReMeLightNativeCapabilities:
 
     @pytest.mark.asyncio
     async def test_summarize_session(self):
-        """summarize_session 应调用 summary_memory()。"""
+        """summarize_session 应调用 summary_memory(messages=...)。"""
         mem = ReMeLightMemory()
         mem._started = True
+
+        mock_messages = [MagicMock(), MagicMock()]
+        mock_in_memory = MagicMock()
+        mock_in_memory.get_memory.return_value = mock_messages
+        mem._in_memory = mock_in_memory
 
         mock_reme = AsyncMock()
         mock_reme.summary_memory = AsyncMock(return_value="session summary")
@@ -454,7 +547,25 @@ class TestReMeLightNativeCapabilities:
 
         result = await mem.summarize_session("s1")
         assert result == "session summary"
-        mock_reme.summary_memory.assert_called_once()
+        mock_in_memory.get_memory.assert_called_once()
+        mock_reme.summary_memory.assert_called_once_with(messages=mock_messages)
+
+    @pytest.mark.asyncio
+    async def test_summarize_session_empty_messages(self):
+        """消息为空时 summarize_session 直接返回 None。"""
+        mem = ReMeLightMemory()
+        mem._started = True
+
+        mock_in_memory = MagicMock()
+        mock_in_memory.get_memory.return_value = []
+        mem._in_memory = mock_in_memory
+
+        mock_reme = AsyncMock()
+        mem._reme = mock_reme
+
+        result = await mem.summarize_session("s1")
+        assert result is None
+        mock_reme.summary_memory.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_summarize_session_failure(self):
@@ -467,9 +578,14 @@ class TestReMeLightNativeCapabilities:
 
     @pytest.mark.asyncio
     async def test_pre_reasoning(self):
-        """pre_reasoning 应调用 pre_reasoning_hook()。"""
+        """pre_reasoning 应调用 pre_reasoning_hook(messages=..., ...)。"""
         mem = ReMeLightMemory()
         mem._started = True
+
+        mock_messages = [MagicMock(), MagicMock()]
+        mock_in_memory = MagicMock()
+        mock_in_memory.get_memory.return_value = mock_messages
+        mem._in_memory = mock_in_memory
 
         mock_reme = AsyncMock()
         mock_reme.pre_reasoning_hook = AsyncMock(
@@ -479,7 +595,12 @@ class TestReMeLightNativeCapabilities:
 
         result = await mem.pre_reasoning("s1", system_prompt="You are helpful.")
         assert result == {"compressed": True, "summary": "..."}
-        mock_reme.pre_reasoning_hook.assert_called_once_with(system_prompt="You are helpful.")
+        mock_in_memory.get_memory.assert_called_once()
+        mock_reme.pre_reasoning_hook.assert_called_once_with(
+            messages=mock_messages,
+            system_prompt="You are helpful.",
+            compressed_summary="",
+        )
 
     @pytest.mark.asyncio
     async def test_pre_reasoning_with_compressed_summary(self):
@@ -487,13 +608,60 @@ class TestReMeLightNativeCapabilities:
         mem = ReMeLightMemory()
         mem._started = True
 
+        mock_messages = [MagicMock()]
+        mock_in_memory = MagicMock()
+        mock_in_memory.get_memory.return_value = mock_messages
+        mem._in_memory = mock_in_memory
+
         mock_reme = AsyncMock()
         mock_reme.pre_reasoning_hook = AsyncMock(return_value={"ok": True})
         mem._reme = mock_reme
 
         result = await mem.pre_reasoning("s1", compressed_summary="prev summary")
         assert result == {"ok": True}
-        mock_reme.pre_reasoning_hook.assert_called_once_with(compressed_summary="prev summary")
+        mock_reme.pre_reasoning_hook.assert_called_once_with(
+            messages=mock_messages,
+            system_prompt="",
+            compressed_summary="prev summary",
+        )
+
+    @pytest.mark.asyncio
+    async def test_pre_reasoning_empty_messages(self):
+        """消息为空时 pre_reasoning 直接返回 None。"""
+        mem = ReMeLightMemory()
+        mem._started = True
+
+        mock_in_memory = MagicMock()
+        mock_in_memory.get_memory.return_value = []
+        mem._in_memory = mock_in_memory
+
+        mock_reme = AsyncMock()
+        mem._reme = mock_reme
+
+        result = await mem.pre_reasoning("s1")
+        assert result is None
+        mock_reme.pre_reasoning_hook.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pre_reasoning_tuple_result(self):
+        """pre_reasoning_hook 返回 tuple[list[Msg], str] 时应正确解析。"""
+        mem = ReMeLightMemory()
+        mem._started = True
+
+        mock_messages = [MagicMock(), MagicMock()]
+        mock_in_memory = MagicMock()
+        mock_in_memory.get_memory.return_value = mock_messages
+        mem._in_memory = mock_in_memory
+
+        kept = [MagicMock(), MagicMock(), MagicMock()]
+        mock_reme = AsyncMock()
+        mock_reme.pre_reasoning_hook = AsyncMock(
+            return_value=(kept, "compressed summary text")
+        )
+        mem._reme = mock_reme
+
+        result = await mem.pre_reasoning("s1")
+        assert result == {"messages_count": 3, "compressed_summary": "compressed summary text"}
 
     @pytest.mark.asyncio
     async def test_pre_reasoning_failure(self):
@@ -506,9 +674,14 @@ class TestReMeLightNativeCapabilities:
 
     @pytest.mark.asyncio
     async def test_pre_reasoning_non_dict_result(self):
-        """pre_reasoning 非 dict 结果应包装为 dict。"""
+        """pre_reasoning 非 dict/tuple 结果应包装为 dict。"""
         mem = ReMeLightMemory()
         mem._started = True
+
+        mock_messages = [MagicMock()]
+        mock_in_memory = MagicMock()
+        mock_in_memory.get_memory.return_value = mock_messages
+        mem._in_memory = mock_in_memory
 
         mock_reme = AsyncMock()
         mock_reme.pre_reasoning_hook = AsyncMock(return_value="some string result")

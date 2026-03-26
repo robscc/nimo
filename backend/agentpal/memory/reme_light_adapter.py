@@ -30,9 +30,21 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from agentscope.message import Msg
+
 from agentpal.memory.base import BaseMemory, MemoryMessage, MemoryRole, MemoryScope
 
 logger = logging.getLogger(__name__)
+
+# ── Role 映射 ─────────────────────────────────────────────
+
+_ROLE_MAP = {"user": "user", "assistant": "assistant", "system": "system", "tool": "user"}
+
+
+def _memory_role_to_str(role) -> str:
+    """将 MemoryRole 映射为 ReMeLight 接受的 role 字符串。"""
+    return _ROLE_MAP.get(str(role), "user")
+
 
 # ── Session tag 辅助函数 ──────────────────────────────────
 
@@ -217,10 +229,12 @@ class ReMeLightMemory(BaseMemory):
         try:
             await self._ensure_started()
             tagged = _tag_content(message.session_id, message.content)
-            self._in_memory.add(
-                role=str(message.role),
+            msg = Msg(
+                name=_memory_role_to_str(message.role),
                 content=tagged,
+                role=_memory_role_to_str(message.role),
             )
+            await self._in_memory.add(memories=msg)
         except Exception:
             logger.warning("ReMeLight add 失败，消息已保存至本地 buffer", exc_info=True)
 
@@ -235,8 +249,16 @@ class ReMeLightMemory(BaseMemory):
         return msgs[-limit:]
 
     async def clear(self, session_id: str) -> None:
-        """清空指定 session 的记忆。"""
+        """清空指定 session 的记忆。
+
+        先调用 ReMeLight clear_content() 触发持久化（同步方法），再清 buffer。
+        """
         self._session_messages.pop(session_id, None)
+        if self._in_memory is not None:
+            try:
+                self._in_memory.clear_content()
+            except Exception:
+                logger.warning("ReMeLight clear_content 失败", exc_info=True)
 
     # ── BaseMemory 可选覆盖 ────────────────────────────────
 
@@ -258,8 +280,7 @@ class ReMeLightMemory(BaseMemory):
             fetch_limit = int(limit * self._candidate_multiplier)
             result = await self._reme.memory_search(
                 query=tagged_query,
-                top_k=fetch_limit,
-                vector_weight=self._vector_weight,
+                max_results=fetch_limit,
             )
             items = _extract_items_from_result(result)
 
@@ -312,8 +333,7 @@ class ReMeLightMemory(BaseMemory):
             fetch_limit = int(limit * self._candidate_multiplier)
             result = await self._reme.memory_search(
                 query=query,
-                top_k=fetch_limit,
-                vector_weight=self._vector_weight,
+                max_results=fetch_limit,
             )
             items = _extract_items_from_result(result)
 
@@ -377,7 +397,10 @@ class ReMeLightMemory(BaseMemory):
         """
         try:
             await self._ensure_started()
-            result = await self._reme.compact_memory()
+            messages = self._in_memory.get_memory()
+            if not messages:
+                return None
+            result = await self._reme.compact_memory(messages=messages)
             return str(result) if result else None
         except Exception:
             logger.warning("ReMeLight compact_history 失败", exc_info=True)
@@ -391,7 +414,10 @@ class ReMeLightMemory(BaseMemory):
         """
         try:
             await self._ensure_started()
-            result = await self._reme.summary_memory()
+            messages = self._in_memory.get_memory()
+            if not messages:
+                return None
+            result = await self._reme.summary_memory(messages=messages)
             return str(result) if result else None
         except Exception:
             logger.warning("ReMeLight summarize_session 失败", exc_info=True)
@@ -417,12 +443,18 @@ class ReMeLightMemory(BaseMemory):
         """
         try:
             await self._ensure_started()
-            kwargs: dict[str, Any] = {}
-            if system_prompt is not None:
-                kwargs["system_prompt"] = system_prompt
-            if compressed_summary is not None:
-                kwargs["compressed_summary"] = compressed_summary
-            result = await self._reme.pre_reasoning_hook(**kwargs)
+            messages = self._in_memory.get_memory()
+            if not messages:
+                return None
+            result = await self._reme.pre_reasoning_hook(
+                messages=messages,
+                system_prompt=system_prompt or "",
+                compressed_summary=compressed_summary or "",
+            )
+            # pre_reasoning_hook 可能返回 tuple[list[Msg], str]
+            if isinstance(result, tuple):
+                kept_messages, summary = result
+                return {"messages_count": len(kept_messages), "compressed_summary": summary}
             if isinstance(result, dict):
                 return result
             return {"result": str(result)} if result else None
