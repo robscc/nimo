@@ -22,27 +22,33 @@ agentpal/                       ← 项目根目录（本地路径）
 │   │   │   ├── personal_assistant.py  ← 主 Agent（流式对话 + 工具调用）
 │   │   │   ├── sub_agent.py           ← SubAgent（独立上下文 + 多轮工具 + 执行日志）
 │   │   │   ├── cron_agent.py          ← 定时任务 Agent（轻量，只加载 SOUL.md + AGENTS.md）
+│   │   │   ├── base.py               ← Agent 基类，共享功能
 │   │   │   ├── registry.py            ← SubAgent 角色注册（CRUD + 任务路由）
 │   │   │   └── message_bus.py         ← Agent 间异步消息总线
-│   │   ├── api/v1/endpoints/   ← agent, tools, session, channel, sub_agents, cron, skills, workspace, config
+│   │   ├── api/v1/endpoints/   ← agent, tools, session, channel, sub_agents, cron, skills, workspace, config, dashboard, memory, notifications, providers, tasks
 │   │   ├── channels/           ← dingtalk.py, feishu.py, imessage.py
-│   │   ├── memory/             ← base / buffer / sqlite / hybrid / factory
-│   │   ├── models/             ← ORM: memory, session, tool, skill, agent, cron, message
-│   │   ├── services/           ← config_file.py, cron_scheduler.py
-│   │   ├── tools/              ← builtin.py (6个工具), registry.py
+│   │   ├── memory/             ← base / buffer / sqlite / hybrid / factory / reme_light_adapter
+│   │   ├── models/             ← ORM: memory, session, tool, skill, agent, cron, message, llm_usage
+│   │   ├── providers/          ← Provider 管理（manager.py, provider.py, openai_provider.py, retry_model.py）
+│   │   ├── runtimes/           ← SubAgent 运行时抽象（base.py, internal.py, http.py, registry.py）
+│   │   ├── zmq_bus/            ← ZMQ 消息总线（manager.py, protocol.py, daemon.py, pa_daemon.py, sub_daemon.py, cron_daemon.py, event_subscriber.py）
+│   │   ├── cli/                ← 命令行工具（app.py, console.py, process.py, utils.py, commands/）
+│   │   ├── workspace/          ← 工作空间管理（manager.py, context_builder.py, defaults.py, memory_writer.py）
+│   │   ├── services/           ← config_file.py, cron_scheduler.py, notification_bus.py, task_event_bus.py, session_event_bus.py, skill_event_bus.py
+│   │   ├── tools/              ← builtin.py (12个工具), registry.py
 │   │   ├── config.py           ← pydantic-settings（优先级: env > ~/.nimo/config.yaml > .env > defaults）
 │   │   ├── database.py         ← async SQLAlchemy + init_db()
 │   │   └── main.py             ← FastAPI app factory + lifespan
 │   ├── tests/
-│   │   ├── unit/               ← 单元测试（agents, memory, channels, cron, config, skills, browser_use）
+│   │   ├── unit/               ← 单元测试（agents, memory, channels, cron, config, skills, browser_use, providers, cli, zmq, tool_guard, workspace, notifications）
 │   │   ├── integration/        ← 集成测试（API + 内存 SQLite）
 │   │   └── e2e/                ← Playwright E2E 测试（需前后端运行）
 │   └── pyproject.toml          ← 包元数据、依赖、ruff/pytest 配置
 ├── frontend/                   ← React + Vite + TypeScript + Tailwind
 │   └── src/
-│       ├── pages/              ← ChatPage, ToolsPage, SkillsPage, TasksPage, SessionsPage, WorkspacePage
-│       ├── components/         ← Layout (侧边栏导航), SessionPanel, NimoIcon
-│       ├── hooks/              ← useTools, useSessions, useSessionMeta, useSkills, useSubAgents, useCron
+│       ├── pages/              ← ChatPage, ToolsPage, SkillsPage, TasksPage, SessionsPage, WorkspacePage, CronPage, DashboardPage
+│       ├── components/         ← Layout (侧边栏导航), SessionPanel, NimoIcon, NimoLogo, MentionPopup, TaskArtifactViewer
+│       ├── hooks/              ← useTools, useSessions, useSessionMeta, useSkills, useSubAgents, useCron, useTasks, useTaskArtifacts, useNotifications, useSessionEvents
 │       └── api/index.ts        ← axios base client + 全部 API 类型定义
 ├── .github/workflows/          ← ci.yml (lint + test matrix), release.yml
 ├── Makefile                    ← make dev / test / lint / format / docker-*
@@ -116,24 +122,28 @@ llm:
 ### 3. 记忆模块（可扩展）
 - `BaseMemory` ABC → `BufferMemory` / `SQLiteMemory` / `HybridMemory`
 - `HybridMemory`：BufferMemory 做热缓存，SQLiteMemory 做持久化，冷启动时 warm-up
+- `ReMeLightAdapter`：当前主力适配器，支持跨 Session 记忆搜索
+- `MemoryWriter`：记忆压缩与持久化写入
 - 新增记忆后端只需实现 `add / get_recent / clear` 三个方法
 
 ### 4. 工具系统
-- `backend/agentpal/tools/builtin.py`：6 个内置工具
-  - 安全（默认开启）：`read_file`, `browser_use`, `get_current_time`
-  - 危险（默认关闭）：`execute_shell_command`, `write_file`, `edit_file`
+- `backend/agentpal/tools/builtin.py`：12 个内置工具
+  - 安全（默认开启）：`read_file`, `browser_use`, `get_current_time`, `send_file_to_user`, `skill_cli`, `cron_cli`, `dispatch_sub_agent`
+  - 危险（默认关闭）：`execute_shell_command`, `write_file`, `edit_file`, `execute_python_code`, `produce_artifact`
 - `ToolConfig` 表持久化启用状态；`ToolCallLog` 表记录每次调用
 - 前端 `/tools` 页面：Toggle 开关 + 调用日志 accordion
 - Session 级工具/技能配置：可单独覆盖全局设置（null = 跟随全局）
+- **Tool Guard**：安全防护机制，对危险工具操作进行拦截和用户确认
 
 ### 5. SubAgent 系统
 - **角色定义**：`SubAgentDefinition` 模型（`models/agent.py`），包含 name、role_prompt、accepted_task_types、独立模型配置
-- **角色注册**：`SubAgentRegistry`（`agents/registry.py`），启动时自动创建默认角色（researcher、coder）
+- **角色注册**：`SubAgentRegistry`（`agents/registry.py`），启动时自动创建默认角色（researcher、coder、ops-engineer）
 - **任务路由**：主 Agent 通过 `task_type` 匹配 SubAgent 的 `accepted_task_types`，或直接指定 `agent_name`
 - **独立上下文**：每个 SubAgent 有独立的 session_id、BufferMemory，不影响主上下文
 - **独立模型配置**：SubAgent 可配置自己的 model_name/provider/api_key/base_url，未配置则回退到全局
 - **执行日志**：`SubAgentTask.execution_log` 记录完整的 LLM 对话 + 工具调用过程
 - **Agent 间通信**：`MessageBus`（`agents/message_bus.py`）支持 request/response/notify/broadcast 消息模式
+- **Task Artifacts**：SubAgent 可通过 `produce_artifact` 工具生成产出物，持久化到 `task_artifacts` 表
 
 ### 6. 定时任务系统（Cron）
 - **调度器**：`CronScheduler`（`services/cron_scheduler.py`）— asyncio 后台任务，每 30 秒检查到期任务
@@ -142,10 +152,39 @@ llm:
 - **结果通知**：执行完成后通过 `MessageBus` 向主 Agent 发送 NOTIFY 消息
 - **执行日志**：`CronJobExecution` 记录状态、结果、完整 execution_log（LLM + 工具调用）
 - **生命周期**：在 FastAPI lifespan 中 `await cron_scheduler.start()` / `stop()`
+- **CLI 管理**：通过 `cron_cli` 工具支持 list/create/update/delete/toggle/history
 
-### 7. 数据库
+### 7. Provider 管理
+- **Provider Manager**（`providers/manager.py`）：统一管理多个 LLM 提供方
+- **Provider 抽象**（`providers/provider.py`）：定义 Provider 接口
+- **OpenAI Provider**（`providers/openai_provider.py`）：兼容 OpenAI 格式的提供方实现
+- **重试模型**（`providers/retry_model.py`）：带重试逻辑的模型包装器
+- 支持通过 API 动态创建/删除/测试 Provider，获取可用模型列表
+
+### 8. 运行时抽象（Runtimes）
+- **Base Runtime**（`runtimes/base.py`）：运行时基类定义
+- **Internal Runtime**（`runtimes/internal.py`）：进程内运行时，SubAgent 在同一进程中执行
+- **HTTP Runtime**（`runtimes/http.py`）：远程 HTTP 运行时，SubAgent 通过 HTTP 调用执行
+- **Runtime Registry**（`runtimes/registry.py`）：运行时注册与选择
+
+### 9. ZMQ 消息总线
+- **Manager**（`zmq_bus/manager.py`）：ZMQ 守护进程管理
+- **Protocol**（`zmq_bus/protocol.py`）：消息协议定义
+- **Daemon**（`zmq_bus/daemon.py`）：基础守护进程
+- **PA Daemon**（`zmq_bus/pa_daemon.py`）：PersonalAssistant 守护进程
+- **Sub Daemon**（`zmq_bus/sub_daemon.py`）：SubAgent 守护进程
+- **Cron Daemon**（`zmq_bus/cron_daemon.py`）：Cron 守护进程
+- **Event Subscriber**（`zmq_bus/event_subscriber.py`）：事件订阅器
+
+### 10. 通知系统
+- **Notification Bus**（`services/notification_bus.py`）：全局发布/订阅总线，支持 WebSocket 推送
+- **Session Event Bus**（`services/session_event_bus.py`）：按 Session 的 SSE 事件推送
+- **Task Event Bus**（`services/task_event_bus.py`）：按 Task 的 SSE 事件推送
+- **Skill Event Bus**（`services/skill_event_bus.py`）：技能热重载/安装/回滚事件
+
+### 11. 数据库
 - 仅使用 SQLite（`aiosqlite` + `sqlalchemy 2.x async`），WAL 模式
-- 表：`memory_records`, `sessions`, `sub_agent_tasks`, `tool_configs`, `tool_call_logs`, `skills`, `sub_agent_definitions`, `cron_jobs`, `cron_job_executions`, `agent_messages`
+- 表：`memory_records`, `sessions`, `sub_agent_tasks`, `task_artifacts`, `task_events`, `tool_configs`, `tool_call_logs`, `skills`, `sub_agent_definitions`, `cron_jobs`, `cron_job_executions`, `agent_messages`, `llm_call_logs`
 - `init_db()` 在 lifespan 里调用，idempotent
 - **重要**：Service 层用 `flush()`，API 层负责 `commit()`。工具执行前需 `commit()` 避免 SQLite 锁
 
@@ -155,54 +194,108 @@ llm:
 
 ```
 # 对话
-POST   /api/v1/agent/chat              ← 流式对话（SSE）
-POST   /api/v1/agent/dispatch          ← 派遣 SubAgent
-GET    /api/v1/agent/tasks/{task_id}   ← 查询 SubAgent 任务状态
+POST   /api/v1/agent/chat                        ← 流式对话（SSE）
+POST   /api/v1/agent/dispatch                     ← 派遣 SubAgent
+GET    /api/v1/agent/tasks                        ← 任务列表
+GET    /api/v1/agent/tasks/{task_id}              ← 查询 SubAgent 任务状态
+POST   /api/v1/agent/tool-guard/{request_id}/resolve  ← Tool Guard 确认
 
 # 会话
-GET    /api/v1/sessions                ← 会话列表（含 model_name、channel）
-POST   /api/v1/sessions                ← 创建会话
-GET    /api/v1/sessions/{id}           ← 会话信息
-GET    /api/v1/sessions/{id}/meta      ← 会话元信息（模型、工具、技能配置）
-PATCH  /api/v1/sessions/{id}/config    ← 更新会话级配置
-GET    /api/v1/sessions/{id}/messages  ← 历史消息
-DELETE /api/v1/sessions/{id}           ← 删除会话（软删除）
-DELETE /api/v1/sessions/{id}/memory    ← 清空记忆
+GET    /api/v1/sessions                           ← 会话列表（含 model_name、channel）
+POST   /api/v1/sessions                           ← 创建会话
+GET    /api/v1/sessions/{id}                      ← 会话信息
+GET    /api/v1/sessions/{id}/meta                 ← 会话元信息（模型、工具、技能配置）
+PATCH  /api/v1/sessions/{id}/config               ← 更新会话级配置
+GET    /api/v1/sessions/{id}/messages             ← 历史消息
+DELETE /api/v1/sessions/{id}                      ← 删除会话（软删除）
+DELETE /api/v1/sessions/{id}/memory               ← 清空记忆
+GET    /api/v1/sessions/{id}/sub-tasks            ← 会话关联的子任务
+GET    /api/v1/sessions/{id}/events               ← 会话 SSE 事件流
+GET    /api/v1/sessions/{id}/usage                ← 会话 Token 用量
 
 # SubAgent
-GET    /api/v1/sub-agents              ← SubAgent 列表
-GET    /api/v1/sub-agents/{name}       ← 获取 SubAgent
-POST   /api/v1/sub-agents              ← 创建 SubAgent
-PATCH  /api/v1/sub-agents/{name}       ← 更新 SubAgent
-DELETE /api/v1/sub-agents/{name}       ← 删除 SubAgent
+GET    /api/v1/sub-agents                         ← SubAgent 列表
+GET    /api/v1/sub-agents/{name}                  ← 获取 SubAgent
+POST   /api/v1/sub-agents                         ← 创建 SubAgent
+PATCH  /api/v1/sub-agents/{name}                  ← 更新 SubAgent
+DELETE /api/v1/sub-agents/{name}                  ← 删除 SubAgent
+
+# 任务
+GET    /api/v1/tasks/{task_id}                    ← 任务详情
+GET    /api/v1/tasks/{task_id}/events             ← 任务 SSE 事件流
+GET    /api/v1/tasks/{task_id}/artifacts          ← 任务产出物列表
+GET    /api/v1/tasks/{task_id}/artifacts/{id}     ← 产出物详情
+POST   /api/v1/tasks/{task_id}/input              ← 恢复用户输入
+POST   /api/v1/tasks/artifacts                    ← 创建产出物
+POST   /api/v1/tasks/{task_id}/cancel             ← 取消任务
 
 # 定时任务
-GET    /api/v1/cron                    ← 定时任务列表
-POST   /api/v1/cron                    ← 创建定时任务
-PATCH  /api/v1/cron/{id}              ← 更新定时任务
-DELETE /api/v1/cron/{id}              ← 删除定时任务
-PATCH  /api/v1/cron/{id}/toggle       ← 启用/禁用
-GET    /api/v1/cron/{id}/executions   ← 执行记录
-GET    /api/v1/cron/executions/{id}/detail ← 执行详情（含完整日志）
+GET    /api/v1/cron                               ← 定时任务列表
+GET    /api/v1/cron/{id}                          ← 定时任务详情
+POST   /api/v1/cron                               ← 创建定时任务
+PATCH  /api/v1/cron/{id}                          ← 更新定时任务
+DELETE /api/v1/cron/{id}                          ← 删除定时任务
+PATCH  /api/v1/cron/{id}/toggle                   ← 启用/禁用
+GET    /api/v1/cron/{id}/executions               ← 执行记录
+GET    /api/v1/cron/executions/all                ← 所有执行记录
+GET    /api/v1/cron/executions/{id}/detail        ← 执行详情（含完整日志）
 
 # 工具
-GET    /api/v1/tools                   ← 工具列表（含启用状态）
-PATCH  /api/v1/tools/{name}            ← 启用/禁用工具
-GET    /api/v1/tools/logs              ← 调用日志
+GET    /api/v1/tools                              ← 工具列表（含启用状态）
+PATCH  /api/v1/tools/{name}                       ← 启用/禁用工具
+GET    /api/v1/tools/logs                         ← 调用日志
 
 # 技能
-GET    /api/v1/skills                  ← 技能列表
-POST   /api/v1/skills/install/zip      ← ZIP 安装
-POST   /api/v1/skills/install/url      ← URL 安装
+GET    /api/v1/skills                             ← 技能列表
+GET    /api/v1/skills/events                      ← 技能 SSE 事件流
+GET    /api/v1/skills/{name}                      ← 技能详情
+GET    /api/v1/skills/{name}/versions             ← 技能版本列表
+POST   /api/v1/skills/{name}/rollback             ← 技能版本回滚
+POST   /api/v1/skills/install/zip                 ← ZIP 安装
+POST   /api/v1/skills/install/url                 ← URL 安装
+PATCH  /api/v1/skills/{name}                      ← 更新技能（启用/禁用）
+DELETE /api/v1/skills/{name}                      ← 卸载技能
+
+# Provider 管理
+GET    /api/v1/providers                          ← Provider 列表
+POST   /api/v1/providers                          ← 创建自定义 Provider
+PATCH  /api/v1/providers/{id}                     ← 更新 Provider
+DELETE /api/v1/providers/{id}                     ← 删除 Provider
+POST   /api/v1/providers/{id}/test                ← 测试 Provider 连接
+GET    /api/v1/providers/{id}/models              ← 获取可用模型列表
+POST   /api/v1/providers/{id}/models/fetch        ← 刷新模型列表
+
+# Dashboard
+GET    /api/v1/dashboard/stats                    ← 系统统计数据
+
+# 记忆搜索
+POST   /api/v1/memory/search                     ← 跨 Session 记忆搜索
+GET    /api/v1/memory/sessions/{id}/search        ← 单 Session 记忆搜索
+
+# 通知
+WS     /api/v1/notifications/ws                   ← WebSocket 实时通知
 
 # 全局配置
-GET    /api/v1/config                  ← 获取配置
-PUT    /api/v1/config                  ← 更新配置
-POST   /api/v1/config/init             ← 初始化配置
+GET    /api/v1/config                             ← 获取配置
+PUT    /api/v1/config                             ← 更新配置
+POST   /api/v1/config/init                        ← 初始化配置
+POST   /api/v1/config/reload                      ← 重载配置
 
 # 工作空间
-GET    /api/v1/workspace/info          ← 工作空间信息
-GET    /api/v1/workspace/files         ← 文件列表
+GET    /api/v1/workspace/info                     ← 工作空间信息
+GET    /api/v1/workspace/files                    ← 文件列表
+GET    /api/v1/workspace/files/{name}             ← 读取文件
+PUT    /api/v1/workspace/files/{name}             ← 写入文件
+POST   /api/v1/workspace/memory                   ← 追加记忆
+GET    /api/v1/workspace/memory/daily             ← 每日记忆日志
+GET    /api/v1/workspace/memory/daily/list        ← 每日记忆列表
+GET    /api/v1/workspace/canvas                   ← 画布文件列表
+GET    /api/v1/workspace/canvas/{filename}        ← 读取画布文件
+PUT    /api/v1/workspace/canvas/{filename}        ← 写入画布文件
+
+# 渠道
+POST   /api/v1/channels/dingtalk/webhook          ← 钉钉 Webhook
+POST   /api/v1/channels/feishu/webhook            ← 飞书 Webhook
 
 GET    /health
 ```
@@ -216,9 +309,11 @@ GET    /health
 | `/chat` | ChatPage | 流式对话、工具调用展示、思考过程、会话信息面板（卡片式工具/技能切换） |
 | `/sessions` | SessionsPage | 会话管理列表（搜索、模型/消息数/时间信息、展开详情、快捷跳转对话） |
 | `/tools` | ToolsPage | 工具 Toggle 开关 + 调用日志 |
-| `/skills` | SkillsPage | 技能安装（ZIP/URL）+ 已安装列表 |
-| `/tasks` | TasksPage | SubAgent 任务状态 |
-| `/workspace` | WorkspacePage | Agent 工作空间文件管理 |
+| `/skills` | SkillsPage | 技能安装（ZIP/URL）+ 已安装列表 + 版本管理 |
+| `/tasks` | TasksPage | SubAgent 任务状态 + 产出物查看 |
+| `/cron` | CronPage | 定时任务管理（创建/编辑/启停/执行记录） |
+| `/workspace` | WorkspacePage | Agent 工作空间文件管理 + 画布 + 每日记忆 |
+| `/dashboard` | DashboardPage | 系统统计面板（会话/消息/Token/工具/技能/任务汇总） |
 
 ---
 
@@ -227,7 +322,7 @@ GET    /health
 ```bash
 cd backend
 
-# 单元 + 集成测试（195 tests）
+# 单元 + 集成测试（672 tests）
 .venv/bin/pytest tests/unit/ tests/integration/ -v --tb=short
 
 # E2E 测试（21 tests，需前后端运行）— 包含 LLM 对话测试
