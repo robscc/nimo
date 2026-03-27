@@ -41,6 +41,7 @@ class MessageType(StrEnum):
     AGENT_REGISTER = "agent_register"
     AGENT_HEARTBEAT = "agent_heartbeat"
     AGENT_SHUTDOWN = "agent_shutdown"
+    AGENT_STATE_CHANGE = "agent_state_change"  # Scheduler → Dashboard SSE
 
 
 class Envelope(BaseModel):

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from agentpal.api.v1.endpoints import agent, channel, config, cron, dashboard, memory, notifications, providers, session, skills, sub_agents, tasks, tools, workspace
+from agentpal.api.v1.endpoints import agent, channel, config, cron, dashboard, memory, notifications, providers, scheduler, session, skills, sub_agents, tasks, tools, workspace
 
 router = APIRouter()
 router.include_router(agent.router, prefix="/agent", tags=["agent"])
@@ -17,3 +17,4 @@ router.include_router(cron.router, prefix="/cron", tags=["cron"])
 router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 router.include_router(memory.router, prefix="/memory", tags=["memory"])
 router.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
+router.include_router(scheduler.router, prefix="/scheduler", tags=["scheduler"])

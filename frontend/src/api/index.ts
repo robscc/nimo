@@ -124,6 +124,19 @@ export interface TaskListItem {
   finished_at: string | null;
 }
 
+/** SSE event emitted when an async task (SubAgent / Cron) completes. */
+export interface AsyncTaskDoneSSEEvent {
+  type: "async_task_done";
+  source: "sub_agent" | "cron";
+  task_id: string | null;
+  agent_name: string | null;
+  task_prompt: string;
+  status: "done" | "failed";
+  result_preview: string | null;
+  error_preview: string | null;
+  finished_at: string | null;
+}
+
 // ── API 方法 ──────────────────────────────────────────────
 
 export async function chat(req: ChatRequest): Promise<ChatResponse> {
@@ -507,6 +520,46 @@ export async function resolveToolGuard(
 export async function cancelTask(taskId: string, reason?: string): Promise<{ task_id: string; status: string; message: string }> {
   const { data } = await api.post(`/tasks/${taskId}/cancel`, { reason });
   return data;
+}
+
+// ── Scheduler API ────────────────────────────────────────
+
+export interface AgentProcessInfo {
+  process_id: string;
+  agent_type: "pa" | "sub_agent" | "cron";
+  state: "pending" | "starting" | "running" | "idle" | "stopping" | "stopped" | "failed";
+  session_id: string | null;
+  task_id: string | null;
+  agent_name: string | null;
+  os_pid: number | null;
+  started_at: string;
+  last_active_at: string;
+  idle_seconds: number;
+  error: string | null;
+}
+
+export interface SchedulerStats {
+  total_processes: number;
+  pa_count: number;
+  sub_agent_count: number;
+  cron_count: number;
+  by_state: Record<string, number>;
+  total_memory_mb: number;
+  uptime_seconds: number;
+}
+
+export async function getSchedulerAgents(): Promise<AgentProcessInfo[]> {
+  const { data } = await api.get<AgentProcessInfo[]>("/scheduler/agents");
+  return data;
+}
+
+export async function getSchedulerStats(): Promise<SchedulerStats> {
+  const { data } = await api.get<SchedulerStats>("/scheduler/stats");
+  return data;
+}
+
+export async function stopSchedulerAgent(id: string): Promise<void> {
+  await api.post(`/scheduler/agents/${encodeURIComponent(id)}/stop`);
 }
 
 export default api;

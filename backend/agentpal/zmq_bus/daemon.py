@@ -44,22 +44,28 @@ class AgentDaemon:
         self._recv_task: asyncio.Task | None = None
         self._work_task: asyncio.Task | None = None
         self._ctx: zmq.asyncio.Context | None = None
+        self._own_ctx: bool = False  # 是否由 daemon 自己创建的 ctx
 
     # ── 生命周期 ──────────────────────────────────────────
 
     async def start(
         self,
-        ctx: zmq.asyncio.Context,
-        router_addr: str,
-        events_addr: str,
+        ctx: zmq.asyncio.Context | None = None,
+        router_addr: str = "",
+        events_addr: str = "",
     ) -> None:
         """连接 DEALER/PUB socket，启动 recv_loop + work_loop。
 
         Args:
-            ctx:          共享的 zmq.asyncio.Context
+            ctx:          共享的 zmq.asyncio.Context（None 时自动创建独立 ctx）
             router_addr:  ROUTER socket 地址（如 "inproc://agent-router"）
             events_addr:  XPUB broker 地址（如 "inproc://agent-events"）
         """
+        if ctx is None:
+            self._own_ctx = True
+            ctx = zmq.asyncio.Context()
+        else:
+            self._own_ctx = False
         self._ctx = ctx
         self._running = True
 
@@ -114,6 +120,11 @@ class AgentDaemon:
         if self._pub is not None:
             self._pub.close(linger=0)
             self._pub = None
+
+        # 如果是自己创建的 ctx，负责终止
+        if self._own_ctx and self._ctx is not None:
+            self._ctx.term()
+            self._ctx = None
 
         logger.info(f"AgentDaemon [{self.identity}] 已停止")
 

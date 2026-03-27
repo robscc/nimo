@@ -1,5 +1,5 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { MessageCircle, ListTodo, Wrench, Puzzle, FolderClosed, MessagesSquare, BarChart3, CalendarClock } from "lucide-react";
+import { MessageCircle, ListTodo, Wrench, Puzzle, FolderClosed, MessagesSquare, BarChart3, CalendarClock, Cpu } from "lucide-react";
 import clsx from "clsx";
 import NimoIcon from "./NimoIcon";
 
@@ -13,6 +13,7 @@ export default function Layout() {
     { to: "/cron",      icon: CalendarClock,   label: "定时任务" },
     { to: "/tasks",     icon: ListTodo,        label: "任务" },
     { to: "/workspace", icon: FolderClosed,    label: "工作空间" },
+    { to: "/scheduler", icon: Cpu,             label: "调度器" },
     { to: "/dashboard", icon: BarChart3,        label: "监控" },
   ];
 

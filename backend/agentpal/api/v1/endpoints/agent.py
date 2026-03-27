@@ -25,8 +25,8 @@ router = APIRouter()
 
 
 def _get_zmq_manager(request: Request) -> Any:
-    """从 app.state 获取 ZMQ manager（如果可用）。"""
-    return getattr(request.app.state, "zmq_manager", None)
+    """从 app.state 获取 Scheduler/ZMQ manager（如果可用）。"""
+    return getattr(request.app.state, "scheduler", None) or getattr(request.app.state, "zmq_manager", None)
 
 
 async def _ensure_session(db: AsyncSession, session_id: str, channel: str) -> None:
