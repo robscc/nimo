@@ -721,6 +721,148 @@ def cron_cli(
         return _text_response(f"<error>操作失败: {e}</error>")
 
 
+# ── 10a. plan_cli ──────────────────────────────────────────
+
+
+def plan_cli(
+    action: str,
+    plan_id: str = "",
+    session_id: str = "",
+) -> ToolResponse:
+    """管理执行计划 — list / status / cancel。
+
+    Args:
+        action: 操作类型 (list / status / cancel)
+        plan_id: 计划 ID（status/cancel 时需要）
+        session_id: 会话 ID（list 时需要，默认当前会话，见 Runtime Environment）
+    """
+    import asyncio
+    import concurrent.futures
+
+    async def _run() -> str:
+        from agentpal.plans.store import PlanStore
+
+        settings = get_settings()
+        store = PlanStore(settings.plans_dir)
+
+        if action == "list":
+            if not session_id:
+                return "<error>list 操作需要提供 session_id 参数（见 Runtime Environment）</error>"
+            plans = await store.list_plans(session_id)
+            if not plans:
+                return "当前没有执行计划。"
+            lines = []
+            for p in plans:
+                status_icon = {
+                    "generating": "🔄",
+                    "confirming": "⏳",
+                    "executing": "▶️",
+                    "completed": "✅",
+                    "cancelled": "⏹️",
+                    "failed": "❌",
+                }.get(p["status"], "❓")
+                progress = f"{p['steps_completed']}/{p['steps_total']}"
+                lines.append(
+                    f"  {status_icon} {p['goal'][:50]}\n"
+                    f"     ID: {p['id']}\n"
+                    f"     状态: {p['status']}  |  进度: {progress}"
+                )
+            return f"执行计划列表（{len(plans)} 个）:\n\n" + "\n\n".join(lines)
+
+        elif action == "status":
+            if not plan_id:
+                # 尝试获取活跃计划
+                if not session_id:
+                    return "<error>status 操作需要提供 plan_id 或 session_id 参数</error>"
+                plan = await store.get_active(session_id)
+                if plan is None:
+                    return "当前没有活跃的执行计划。"
+            else:
+                if not session_id:
+                    return "<error>status 操作需要同时提供 session_id 参数</error>"
+                plan = await store.load(session_id, plan_id)
+                if plan is None:
+                    return f"<error>计划不存在: {plan_id}</error>"
+
+            lines = [
+                f"📋 计划详情\n",
+                f"  ID: {plan.id}",
+                f"  目标: {plan.goal}",
+                f"  概述: {plan.summary}",
+                f"  状态: {plan.status}",
+                f"  步骤进度: {plan.current_step + 1}/{len(plan.steps)}",
+                "",
+            ]
+            for s in plan.steps:
+                icon = {
+                    "pending": "⬜",
+                    "running": "⏳",
+                    "completed": "✅",
+                    "failed": "❌",
+                    "skipped": "⏭",
+                }.get(s.status, "❓")
+                line = f"  {icon} 步骤 {s.index + 1}: {s.title} [{s.status}]"
+                if s.result:
+                    result_preview = s.result[:100] + ("..." if len(s.result) > 100 else "")
+                    line += f"\n     结果: {result_preview}"
+                if s.error:
+                    line += f"\n     错误: {s.error[:100]}"
+                lines.append(line)
+            return "\n".join(lines)
+
+        elif action == "cancel":
+            if not session_id:
+                return "<error>cancel 操作需要提供 session_id 参数</error>"
+            if plan_id:
+                plan = await store.load(session_id, plan_id)
+            else:
+                plan = await store.get_active(session_id)
+
+            if plan is None:
+                return "<error>没有找到可取消的计划</error>"
+
+            from agentpal.plans.store import PlanStatus
+
+            if plan.status in (PlanStatus.COMPLETED, PlanStatus.CANCELLED, PlanStatus.FAILED):
+                return f"计划已处于终态: {plan.status}"
+
+            plan.status = PlanStatus.CANCELLED
+            await store.save(plan)
+
+            # 同步更新 session agent_mode
+            from agentpal.database import AsyncSessionLocal
+            from sqlalchemy import text as sa_text
+            async with AsyncSessionLocal() as db:
+                await db.execute(
+                    sa_text("UPDATE sessions SET agent_mode = 'normal' WHERE id = :sid"),
+                    {"sid": session_id},
+                )
+                await db.commit()
+
+            return f"✅ 计划已取消: {plan.goal[:50]}"
+
+        else:
+            return (
+                f"<error>不支持的操作: {action}</error>\n"
+                f"可用操作: list, status, cancel"
+            )
+
+    def _thread_run() -> str:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_thread_run)
+            result_text = future.result(timeout=30)
+        return _text_response(result_text)
+    except Exception as e:
+        return _text_response(f"<error>操作失败: {e}</error>")
+
+
 # ── 10. dispatch_sub_agent ───────────────────────────────
 
 
@@ -1172,6 +1314,13 @@ BUILTIN_TOOLS: list[dict] = [
         "func": cron_cli,
         "description": "管理定时任务（列出、创建、更新、删除、启用禁用、查看历史）",
         "icon": "Timer",
+        "dangerous": False,
+    },
+    {
+        "name": "plan_cli",
+        "func": plan_cli,
+        "description": "管理执行计划（列出、查看状态、取消计划）",
+        "icon": "ClipboardList",
         "dangerous": False,
     },
     {

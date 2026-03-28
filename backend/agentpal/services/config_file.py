@@ -39,6 +39,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "skills": {
         "dir": "./skills_data",
     },
+    "plans": {
+        "dir": "",  # 默认 ~/.nimo/plans
+    },
     "channels": {
         "dingtalk": {"enabled": False, "app_key": "", "app_secret": "", "robot_code": ""},
         "feishu": {
@@ -123,6 +126,7 @@ _YAML_TO_SETTINGS: dict[str, str] = {
     "memory.buffer_size": "memory_buffer_size",
     "memory.sqlite_limit": "memory_sqlite_limit",
     "skills.dir": "skills_dir",
+    "plans.dir": "plans_dir",
     "channels.dingtalk.enabled": "dingtalk_enabled",
     "channels.dingtalk.app_key": "dingtalk_app_key",
     "channels.dingtalk.app_secret": "dingtalk_app_secret",

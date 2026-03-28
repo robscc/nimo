@@ -128,6 +128,28 @@ def get_run_dir() -> Path:
     return Path.home() / ".nimo" / "run"
 
 
+def get_plans_dir() -> Path:
+    """Get the plans directory.
+
+    Priority:
+    1. PLANS_DIR env var
+    2. NIMO_HOME env var + "plans" subdirectory
+    3. ~/.nimo/plans (legacy default)
+
+    Returns:
+        The plans directory path.
+    """
+    env_dir = os.environ.get("PLANS_DIR")
+    if env_dir:
+        return Path(env_dir)
+
+    nimo_home = os.environ.get("NIMO_HOME")
+    if nimo_home:
+        return Path(nimo_home) / "plans"
+
+    return Path.home() / ".nimo" / "plans"
+
+
 def get_config_file() -> Path:
     """Get the config.yaml file path.
 
@@ -146,6 +168,7 @@ def _cached_getter(func_name: str) -> Path:
         "skills": get_skills_dir,
         "providers": get_providers_dir,
         "run": get_run_dir,
+        "plans": get_plans_dir,
     }
     getter = getters.get(func_name)
     if getter:
@@ -162,3 +185,4 @@ WORKSPACE_DEFAULT = get_workspace_dir()
 SKILLS_DEFAULT = get_skills_dir()
 PROVIDERS_DEFAULT = get_providers_dir()
 RUN_DEFAULT = get_run_dir()
+PLANS_DEFAULT = get_plans_dir()

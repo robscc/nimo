@@ -840,6 +840,37 @@ class SchedulerBroker:
                 f"(task={task_id}, agent={agent_name})"
             )
 
+            # ── Plan Mode: 检测计划步骤完成 → 通知 PA ──
+            try:
+                from agentpal.models.session import SubAgentTask as SATask
+
+                async with AsyncSessionLocal() as check_db:
+                    sa_task = await check_db.get(SATask, task_id)
+                    if sa_task and sa_task.meta and sa_task.meta.get("plan_id"):
+                        plan_step_payload = {
+                            "plan_id": sa_task.meta["plan_id"],
+                            "step_index": sa_task.meta.get("step_index", 0),
+                            "task_id": task_id,
+                            "status": status,
+                            "result": result,
+                            "agent_name": agent_name,
+                        }
+                        pa_identity = f"pa:{parent_session_id}"
+                        step_done_env = Env(
+                            msg_type=MessageType.PLAN_STEP_DONE,
+                            source="scheduler",
+                            target=pa_identity,
+                            session_id=parent_session_id,
+                            payload=plan_step_payload,
+                        )
+                        await self._send_to_daemon(pa_identity, step_done_env)
+                        logger.info(
+                            f"Plan step done 通知已发送: plan={sa_task.meta['plan_id']} "
+                            f"step={sa_task.meta.get('step_index')}"
+                        )
+            except Exception as plan_exc:
+                logger.error(f"Plan step done 通知失败: {plan_exc}", exc_info=True)
+
         except Exception as e:
             logger.error(
                 f"投递 SubAgent 结果失败: task={task_id} error={e}",

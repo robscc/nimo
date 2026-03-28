@@ -1,9 +1,10 @@
-"""PersonalAssistant — 主助手 Agent，支持工具调用 + SubAgent 派遣。"""
+"""PersonalAssistant — 主助手 Agent，支持工具调用 + SubAgent 派遣 + Plan Mode。"""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re as _re
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -15,12 +16,15 @@ from agentpal.config import get_settings
 from agentpal.memory.base import BaseMemory
 from agentpal.memory.factory import MemoryFactory
 from agentpal.models.llm_usage import LLMCallLog  # noqa: F401 — 触发 Base.metadata 注册
-from agentpal.models.session import SessionRecord, SubAgentTask, TaskStatus
+from agentpal.models.session import AgentMode, SessionRecord, SubAgentTask, TaskStatus
+from agentpal.plans.intent import IntentClassifier
+from agentpal.plans.store import Plan, PlanStatus, PlanStep, PlanStore
 from agentpal.workspace.context_builder import ContextBuilder
 from agentpal.workspace.manager import WorkspaceManager
 from agentpal.workspace.memory_writer import MemoryWriter
 
 MAX_TOOL_ROUNDS = 32  # 最大工具调用轮次，防止死循环
+MAX_PLAN_TOOL_ROUNDS = 8  # 计划生成阶段最大工具调用轮次
 
 
 class PersonalAssistant(BaseAgent):
@@ -257,6 +261,31 @@ class PersonalAssistant(BaseAgent):
             {"type": "error",      "message": "..."}
         """
         try:
+            # ── Plan Mode 状态路由 ──────────────────────────
+            mode = await self._load_agent_mode()
+
+            # 退出计划（任何非 normal 状态都可以退出）
+            if IntentClassifier.is_exit_plan(user_input) and mode != AgentMode.NORMAL:
+                async for event in self._handle_exit_plan():
+                    yield event
+                return
+
+            # 确认阶段
+            if mode == AgentMode.CONFIRMING:
+                async for event in self._handle_confirming(user_input):
+                    yield event
+                return
+
+            # 执行中用户插话 → 不中断步骤执行，fall through 到正常回复
+            # (执行由 SubAgent 进行，PA 仍可正常聊天)
+
+            # 触发新计划
+            if mode == AgentMode.NORMAL and IntentClassifier.is_plan_trigger(user_input):
+                async for event in self._handle_plan_trigger(user_input, images):
+                    yield event
+                return
+
+            # ── 正常对话流程 ─────────────────────────────────
             await self._remember_user(user_input, meta={"images": images} if images else None)
             # 防御性 commit：确保 user 消息持久化（防止 StreamingResponse 生命周期 bug）
             if self._db is not None:
@@ -274,6 +303,17 @@ class PersonalAssistant(BaseAgent):
             mention_hint = await self._extract_mention_hint(user_input)
             if mention_hint:
                 system_prompt += f"\n\n---\n\n{mention_hint}"
+
+            # Plan Mode 执行阶段：注入计划进度上下文
+            if mode == AgentMode.EXECUTING:
+                try:
+                    from agentpal.plans.prompts import build_execution_context
+
+                    plan = await self._get_active_plan()
+                    if plan:
+                        system_prompt += f"\n\n---\n\n{build_execution_context(plan)}"
+                except Exception:
+                    pass
 
             messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
             # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
@@ -523,6 +563,564 @@ class PersonalAssistant(BaseAgent):
             for rev in retry_events:
                 yield rev
             yield {"type": "error", "message": str(exc)}
+
+    # ── Plan Mode Handlers ─────────────────────────────────
+
+    async def _handle_plan_trigger(
+        self, user_input: str, images: list[str] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """处理计划触发：生成计划 → 进入确认阶段。"""
+        from agentpal.plans.prompts import PLAN_GENERATION_PROMPT, build_confirm_context
+
+        await self._remember_user(user_input, meta={"images": images} if images else None)
+        if self._db is not None:
+            await self._db.commit()
+
+        await self._set_agent_mode(AgentMode.PLANNING)
+        yield {"type": "plan_generating", "goal": user_input}
+
+        # 构建 plan 生成 system prompt
+        toolkit = await self._build_active_toolkit()
+        enabled_tool_names = _get_tool_names(toolkit)
+        skill_prompts = await self._load_prompt_skills()
+        base_prompt = await self._build_system_prompt(
+            enabled_tool_names or None, skill_prompts=skill_prompts or None,
+        )
+        plan_prompt = base_prompt + "\n\n---\n\n" + PLAN_GENERATION_PROMPT
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": plan_prompt},
+            _build_user_message(user_input, images),
+        ]
+
+        final_text = ""
+        # LLM 工具循环（最多 MAX_PLAN_TOOL_ROUNDS 轮，允许收集信息）
+        for round_idx in range(MAX_PLAN_TOOL_ROUNDS):
+            tools_schema = toolkit.get_json_schemas() if toolkit else None
+            model = _build_model(self._model_config, stream=True)
+            response_gen = await model(messages, tools=tools_schema)
+
+            prev_text_len = 0
+            final_response = None
+
+            async for chunk in response_gen:
+                final_response = chunk
+                for block in (chunk.content or []):
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "thinking":
+                        pass  # 不推 thinking delta
+                    elif block.get("type") == "text":
+                        full = block.get("text", "")
+                        # 不推 text_delta — plan JSON 由 plan_ready 事件结构化推送
+                        prev_text_len = len(full)
+
+            if final_response is None:
+                break
+
+            response = final_response
+            tool_calls = [
+                b for b in (response.content or [])
+                if isinstance(b, dict) and b.get("type") == "tool_use"
+            ]
+
+            if not tool_calls:
+                final_text = "".join(
+                    b.get("text", "")
+                    for b in (response.content or [])
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+                break
+
+            # 处理工具调用（允许收集信息）
+            openai_tool_calls = [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc.get("input", {}), ensure_ascii=False),
+                    },
+                }
+                for tc in tool_calls
+            ]
+            text_parts = [
+                b["text"] for b in (response.content or [])
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            messages.append({
+                "role": "assistant",
+                "content": "".join(text_parts) or None,
+                "tool_calls": openai_tool_calls,
+            })
+            for tool_call in tool_calls:
+                tc_id = tool_call.get("id", str(uuid.uuid4()))
+                tc_name = tool_call.get("name", "")
+                yield {"type": "tool_start", "id": tc_id, "name": tc_name, "input": tool_call.get("input", {})}
+                output_text, error_text, duration_ms = await self._run_tool(toolkit, tool_call)
+                yield {"type": "tool_done", "id": tc_id, "name": tc_name, "output": output_text, "error": error_text, "duration_ms": duration_ms}
+                messages.append({"role": "tool", "tool_call_id": tc_id, "content": output_text})
+
+        # 解析 JSON 计划
+        plan = self._parse_plan_from_text(final_text, user_input)
+        if plan is None:
+            await self._set_agent_mode(AgentMode.NORMAL)
+            yield {"type": "error", "message": "无法从 LLM 输出中解析计划 JSON。"}
+            return
+
+        store = self._get_plan_store()
+        await store.save(plan)
+        await self._set_agent_mode(AgentMode.CONFIRMING)
+
+        await self._remember_assistant(
+            f"我已为你制定了执行计划：{plan.summary}\n共 {len(plan.steps)} 步。请确认是否开始执行？",
+            meta={"plan_id": plan.id},
+        )
+        if self._db is not None:
+            await self._db.commit()
+
+        yield {"type": "plan_ready", "plan": plan.to_dict()}
+        yield {"type": "done"}
+
+    async def _handle_confirming(self, user_input: str) -> AsyncGenerator[dict[str, Any], None]:
+        """处理确认阶段的用户输入。"""
+        from agentpal.plans.prompts import build_confirm_context, build_revise_prompt
+
+        await self._remember_user(user_input)
+        if self._db is not None:
+            await self._db.commit()
+
+        intent = IntentClassifier.classify_confirm(user_input)
+        plan = await self._get_active_plan()
+
+        if plan is None:
+            await self._set_agent_mode(AgentMode.NORMAL)
+            yield {"type": "text_delta", "delta": "当前没有待确认的计划。"}
+            yield {"type": "done"}
+            return
+
+        if intent == "cancel":
+            plan.status = PlanStatus.CANCELLED
+            store = self._get_plan_store()
+            await store.save(plan)
+            await self._set_agent_mode(AgentMode.NORMAL)
+            await self._remember_assistant("好的，计划已取消。")
+            if self._db is not None:
+                await self._db.commit()
+            yield {"type": "plan_cancelled"}
+            yield {"type": "text_delta", "delta": "好的，计划已取消。"}
+            yield {"type": "done"}
+
+        elif intent == "approve":
+            # 开始执行
+            async for event in self._start_plan_execution(plan):
+                yield event
+
+        elif intent == "modify":
+            # 回到 planning 模式修改计划
+            await self._set_agent_mode(AgentMode.PLANNING)
+            async for event in self._revise_plan(plan, user_input):
+                yield event
+
+        else:
+            # unknown → 在计划上下文中正常回答
+            confirm_ctx = build_confirm_context(plan)
+            toolkit = await self._build_active_toolkit()
+            enabled_tool_names = _get_tool_names(toolkit)
+            base_prompt = await self._build_system_prompt(enabled_tool_names or None)
+            system_prompt = base_prompt + "\n\n---\n\n" + confirm_ctx
+
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_input},
+            ]
+            model = _build_model(self._model_config, stream=True)
+            response_gen = await model(messages)
+
+            prev_text_len = 0
+            final_text = ""
+            async for chunk in response_gen:
+                for block in (chunk.content or []):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        full = block.get("text", "")
+                        if len(full) > prev_text_len:
+                            yield {"type": "text_delta", "delta": full[prev_text_len:]}
+                            prev_text_len = len(full)
+                        final_text = full
+
+            await self._remember_assistant(final_text)
+            if self._db is not None:
+                await self._db.commit()
+            yield {"type": "done"}
+
+    async def _start_plan_execution(self, plan: Plan) -> AsyncGenerator[dict[str, Any], None]:
+        """开始执行计划。"""
+        plan.status = PlanStatus.EXECUTING
+        store = self._get_plan_store()
+        await store.save(plan)
+        await self._set_agent_mode(AgentMode.EXECUTING)
+
+        msg = f"计划开始执行！共 {len(plan.steps)} 步。"
+        await self._remember_assistant(msg)
+        if self._db is not None:
+            await self._db.commit()
+        yield {"type": "text_delta", "delta": msg}
+
+        # 启动第一步
+        async for event in self._dispatch_plan_step(plan, 0):
+            yield event
+        yield {"type": "done"}
+
+    async def _dispatch_plan_step(
+        self, plan: Plan, step_index: int,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """派遣计划的某一步到 SubAgent 执行。
+
+        使用独立 DB session 创建 SubAgentTask + 查询 SubAgentDefinition，
+        避免在主 streaming session 上持有 SQLite 写锁导致其他 endpoint 阻塞。
+        """
+        from agentpal.plans.prompts import build_step_prompt
+
+        if step_index >= len(plan.steps):
+            return
+
+        step = plan.steps[step_index]
+        task_prompt = build_step_prompt(plan, step)
+
+        from agentpal.database import AsyncSessionLocal
+        from agentpal.models.agent import SubAgentDefinition
+
+        task_id = str(uuid.uuid4())
+        sub_session_id = f"sub:{self.session_id}:{task_id}"
+
+        # 使用独立短事务查询 SubAgentDefinition + 创建 SubAgentTask
+        agent_name: str | None = None
+        role_prompt = ""
+        model_config = self._model_config
+        max_tool_rounds = 8
+
+        try:
+            async with AsyncSessionLocal() as tmp_db:
+                # 自动路由 SubAgent（基于步骤策略/工具）
+                agent_def: SubAgentDefinition | None = None
+
+                if step.tools:
+                    code_tools = {"execute_python_code", "execute_shell_command", "write_file", "edit_file"}
+                    if set(step.tools) & code_tools:
+                        agent_def = await tmp_db.get(SubAgentDefinition, "coder")
+                    elif "browser_use" in step.tools:
+                        agent_def = await tmp_db.get(SubAgentDefinition, "researcher")
+
+                if agent_def is None:
+                    agent_def = await tmp_db.get(SubAgentDefinition, "researcher")
+
+                if agent_def:
+                    agent_name = agent_def.name
+                    role_prompt = agent_def.role_prompt or ""
+                    model_config = agent_def.get_model_config(model_config)
+                    max_tool_rounds = agent_def.max_tool_rounds
+
+                task = SubAgentTask(
+                    id=task_id,
+                    parent_session_id=self.session_id,
+                    sub_session_id=sub_session_id,
+                    task_prompt=task_prompt,
+                    status=TaskStatus.PENDING,
+                    agent_name=agent_name,
+                    task_type="plan_step",
+                    execution_log=[],
+                    meta={
+                        "plan_id": plan.id,
+                        "step_index": step_index,
+                    },
+                )
+                tmp_db.add(task)
+                await tmp_db.commit()
+        except Exception as exc:
+            yield {"type": "error", "message": f"创建计划步骤任务失败: {exc}"}
+            return
+
+        # 更新计划步骤状态
+        plan.mark_step_running(step_index, task_id)
+        store = self._get_plan_store()
+        await store.save(plan)
+
+        yield {
+            "type": "plan_step_start",
+            "step_index": step_index,
+            "step": {"title": step.title, "description": step.description},
+            "total_steps": len(plan.steps),
+        }
+
+        # 使用 Scheduler 派遣 SubAgent
+        from agentpal.tools.builtin import _get_scheduler
+        scheduler = _get_scheduler()
+        if scheduler is not None:
+            await scheduler.dispatch_sub_agent(
+                task_id=task_id,
+                task_prompt=task_prompt,
+                parent_session_id=self.session_id,
+                agent_name=agent_name or "default",
+                model_config=model_config,
+                role_prompt=role_prompt,
+                max_tool_rounds=max_tool_rounds,
+            )
+        else:
+            # Fallback: in-process 执行
+            from agentpal.agents.sub_agent import SubAgent
+            from agentpal.database import AsyncSessionLocal
+
+            _tid = task_id
+            _ssid = sub_session_id
+            _mc = model_config
+            _rp = role_prompt
+            _mtr = max_tool_rounds
+            _pid = self.session_id
+            _tp = task_prompt
+
+            async def _run_bg() -> None:
+                from loguru import logger as _l
+
+                async with AsyncSessionLocal() as bg_db:
+                    bg_task = await bg_db.get(SubAgentTask, _tid)
+                    if bg_task is None:
+                        return
+                    sub_memory = MemoryFactory.create("buffer")
+                    sub_agent = SubAgent(
+                        session_id=_ssid,
+                        memory=sub_memory,
+                        task=bg_task,
+                        db=bg_db,
+                        model_config=_mc,
+                        role_prompt=_rp,
+                        max_tool_rounds=_mtr,
+                        parent_session_id=_pid,
+                    )
+                    await sub_agent.run(_tp)
+                    await bg_db.commit()
+
+            asyncio.create_task(_run_bg())
+
+    async def handle_plan_step_done(self, payload: dict[str, Any]) -> AsyncGenerator[dict[str, Any], None]:
+        """处理计划步骤完成事件（由 PA daemon 调用）。
+
+        更新 plan step 结果 → 推进下一步或完成。
+        """
+        plan_id = payload.get("plan_id", "")
+        step_index = payload.get("step_index", 0)
+        status = payload.get("status", "")
+        result = payload.get("result", "")
+        task_id = payload.get("task_id", "")
+
+        store = self._get_plan_store()
+        plan = await store.load(self.session_id, plan_id)
+        if plan is None:
+            yield {"type": "error", "message": f"计划不存在: {plan_id}"}
+            return
+
+        if status == "done":
+            plan.mark_step_done(step_index, result)
+            yield {
+                "type": "plan_step_done",
+                "step_index": step_index,
+                "result": result[:500],
+            }
+        else:
+            error = payload.get("error", result or "步骤执行失败")
+            plan.mark_step_failed(step_index, error)
+            yield {
+                "type": "plan_step_done",
+                "step_index": step_index,
+                "result": f"失败: {error[:500]}",
+            }
+            # 步骤失败 → 中止计划
+            plan.status = PlanStatus.FAILED
+            await store.save(plan)
+            await self._set_agent_mode(AgentMode.NORMAL)
+            yield {"type": "text_delta", "delta": f"\n计划执行失败（步骤 {step_index + 1}）: {error[:200]}"}
+            yield {"type": "done"}
+            return
+
+        await store.save(plan)
+
+        # 检查是否还有下一步
+        if plan.all_done():
+            plan.status = PlanStatus.COMPLETED
+            await store.save(plan)
+            await self._set_agent_mode(AgentMode.NORMAL)
+
+            summary = f"计划执行完成！共 {len(plan.steps)} 步全部完成。"
+            await self._remember_assistant(summary, meta={"plan_id": plan.id})
+            if self._db is not None:
+                await self._db.commit()
+
+            yield {"type": "plan_completed", "plan": plan.to_dict()}
+            yield {"type": "text_delta", "delta": summary}
+            yield {"type": "done"}
+        elif plan.auto_proceed:
+            # 自动推进下一步
+            next_step = plan.next_pending_step()
+            if next_step:
+                async for event in self._dispatch_plan_step(plan, next_step.index):
+                    yield event
+
+    async def _revise_plan(self, plan: Plan, user_feedback: str) -> AsyncGenerator[dict[str, Any], None]:
+        """根据用户反馈修改计划。"""
+        from agentpal.plans.prompts import build_revise_prompt
+
+        yield {"type": "plan_generating", "goal": plan.goal}
+
+        revise_prompt_text = build_revise_prompt(plan, user_feedback)
+        toolkit = await self._build_active_toolkit()
+        enabled_tool_names = _get_tool_names(toolkit)
+        base_prompt = await self._build_system_prompt(enabled_tool_names or None)
+        system_prompt = base_prompt + "\n\n---\n\n" + revise_prompt_text
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_feedback},
+        ]
+
+        model = _build_model(self._model_config, stream=True)
+        response_gen = await model(messages)
+
+        prev_text_len = 0
+        final_text = ""
+        async for chunk in response_gen:
+            for block in (chunk.content or []):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    full = block.get("text", "")
+                    # 不推 text_delta — plan JSON 由 plan_ready 事件结构化推送
+                    prev_text_len = len(full)
+                    final_text = full
+
+        # 尝试解析修改后的计划
+        new_plan = self._parse_plan_from_text(final_text, plan.goal)
+        if new_plan is not None:
+            new_plan.id = plan.id  # 保持 ID 不变
+            new_plan.session_id = plan.session_id
+            new_plan.created_at = plan.created_at
+            store = self._get_plan_store()
+            await store.save(new_plan)
+            await self._set_agent_mode(AgentMode.CONFIRMING)
+            yield {"type": "plan_ready", "plan": new_plan.to_dict()}
+        else:
+            # 解析失败，保持原计划
+            await self._set_agent_mode(AgentMode.CONFIRMING)
+
+        await self._remember_assistant(final_text)
+        if self._db is not None:
+            await self._db.commit()
+        yield {"type": "done"}
+
+    async def _handle_exit_plan(self) -> AsyncGenerator[dict[str, Any], None]:
+        """退出计划模式。"""
+        plan = await self._get_active_plan()
+        if plan:
+            plan.status = PlanStatus.CANCELLED
+            store = self._get_plan_store()
+            await store.save(plan)
+        await self._set_agent_mode(AgentMode.NORMAL)
+        await self._remember_assistant("好的，计划已取消。")
+        if self._db is not None:
+            await self._db.commit()
+        yield {"type": "plan_cancelled"}
+        yield {"type": "text_delta", "delta": "好的，计划已取消。"}
+        yield {"type": "done"}
+
+    # ── Plan Mode 辅助方法 ─────────────────────────────────
+
+    async def _load_agent_mode(self) -> str:
+        """从 DB 读取 agent_mode（独立短事务，不污染主 session）。
+
+        使用独立 AsyncSession 避免在 reply_stream 主 db session 上开启
+        长时间 SELECT 事务，防止与其他写操作竞争 SQLite 锁。
+        """
+        if self._db is None:
+            return AgentMode.NORMAL
+        try:
+            from agentpal.database import AsyncSessionLocal
+            from sqlalchemy import text
+
+            async with AsyncSessionLocal() as tmp_db:
+                result = await tmp_db.execute(
+                    text("SELECT agent_mode FROM sessions WHERE id = :sid"),
+                    {"sid": self.session_id},
+                )
+                row = result.first()
+                return (row[0] if row and row[0] else None) or AgentMode.NORMAL
+        except Exception:
+            return AgentMode.NORMAL
+
+    async def _set_agent_mode(self, mode: str) -> None:
+        """更新 DB agent_mode（独立短事务，立即提交释放锁）。
+
+        使用独立 AsyncSession + 立即 commit，避免 flush-without-commit
+        在主 session 上持有 SQLite 写锁导致其他 endpoint "database is locked"。
+        """
+        try:
+            from agentpal.database import AsyncSessionLocal
+            from sqlalchemy import text
+
+            async with AsyncSessionLocal() as tmp_db:
+                await tmp_db.execute(
+                    text("UPDATE sessions SET agent_mode = :mode WHERE id = :sid"),
+                    {"mode": mode, "sid": self.session_id},
+                )
+                await tmp_db.commit()
+        except Exception:
+            pass
+
+    def _get_plan_store(self) -> PlanStore:
+        """懒初始化 PlanStore。"""
+        if not hasattr(self, "_plan_store"):
+            settings = get_settings()
+            self._plan_store = PlanStore(settings.plans_dir)
+        return self._plan_store
+
+    async def _get_active_plan(self) -> Plan | None:
+        """获取当前 session 的活跃计划。"""
+        store = self._get_plan_store()
+        return await store.get_active(self.session_id)
+
+    def _parse_plan_from_text(self, text: str, goal: str) -> Plan | None:
+        """从 LLM 输出中解析 JSON 计划。"""
+        # 尝试提取 ```json ... ``` 代码块
+        json_match = _re.search(r"```json\s*\n(.*?)\n```", text, _re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            # 尝试直接解析整个文本
+            json_str = text
+
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(data, dict) or "steps" not in data:
+            return None
+
+        plan_id = str(uuid.uuid4())
+        steps = [
+            PlanStep(
+                index=i,
+                title=s.get("title", f"步骤 {i + 1}"),
+                description=s.get("description", ""),
+                strategy=s.get("strategy", ""),
+                tools=s.get("tools", []),
+            )
+            for i, s in enumerate(data["steps"])
+        ]
+
+        return Plan(
+            id=plan_id,
+            session_id=self.session_id,
+            goal=data.get("goal", goal),
+            summary=data.get("summary", ""),
+            status=PlanStatus.CONFIRMING,
+            steps=steps,
+        )
 
     # ── SubAgent 派遣 ─────────────────────────────────────
 

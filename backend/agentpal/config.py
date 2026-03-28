@@ -15,7 +15,7 @@ from typing import Any, Literal, Tuple, Type
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from agentpal.paths import get_nimo_home, get_skills_dir, get_workspace_dir
+from agentpal.paths import get_nimo_home, get_plans_dir, get_skills_dir, get_workspace_dir
 
 
 def _load_yaml_settings() -> dict[str, Any]:
@@ -129,6 +129,10 @@ class Settings(BaseSettings):
     # ── Skill 系统 ──────────────────────────────────────
     # 技能安装目录，默认 ~/.nimo/skills_data（可通过 SKILLS_DIR 或 NIMO_HOME 环境变量覆盖）
     skills_dir: str = str(get_skills_dir())
+
+    # ── Plan Mode ────────────────────────────────────────
+    # 计划文件目录，默认 ~/.nimo/plans（可通过 PLANS_DIR 或 NIMO_HOME 环境变量覆盖）
+    plans_dir: str = str(get_plans_dir())
 
     # ── 渠道 ──────────────────────────────────────────────
     dingtalk_enabled: bool = False

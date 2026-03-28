@@ -37,6 +37,9 @@ class MessageType(StrEnum):
     AGENT_NOTIFY = "agent_notify"
     AGENT_BROADCAST = "agent_broadcast"
 
+    # Plan Mode
+    PLAN_STEP_DONE = "plan_step_done"  # Broker → PA: 计划步骤完成
+
     # Lifecycle
     AGENT_REGISTER = "agent_register"
     AGENT_HEARTBEAT = "agent_heartbeat"
