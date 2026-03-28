@@ -611,9 +611,14 @@ class PersonalAssistant(BaseAgent):
             请求级 session 会在 HTTP 响应返回后被 get_db 关闭，
             而 SubAgent 后台任务可能还在执行 → 用已关闭的 session 会 crash 或锁死。
             """
+            import os
+
             from loguru import logger as _logger
 
             from agentpal.database import AsyncSessionLocal
+
+            # 设置环境变量，供 produce_artifact 工具获取当前任务 ID
+            os.environ["AGENTPAL_CURRENT_TASK_ID"] = _task_id
 
             async with AsyncSessionLocal() as bg_db:
                 # 重新加载 task 到新 session 的 identity map 中

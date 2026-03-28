@@ -243,8 +243,40 @@ class ReMeLightMemory(BaseMemory):
     async def get_recent(self, session_id: str, limit: int = 20) -> list[MemoryMessage]:
         """获取最近消息。
 
-        从 _session_messages 辅助 buffer 返回（保证返回 MemoryMessage 类型）。
+        优先从 ReMeLight 持久化存储读取，按 session_id 过滤。
+        如果 ReMeLight 不可用或失败，回退到内存 buffer。
         """
+        # 先尝试从 ReMeLight 读取
+        try:
+            await self._ensure_started()
+            memories = await self._in_memory.get_memory()
+            if memories:
+                matched: list[MemoryMessage] = []
+                # 倒序遍历，取最近的
+                for mem in reversed(memories):
+                    content = getattr(mem, "content", "") or ""
+                    extracted_sid = _extract_session_id(content)
+                    if extracted_sid == session_id:
+                        role = getattr(mem, "role", "assistant") or "assistant"
+                        name = getattr(mem, "name", role)
+                        matched.append(
+                            MemoryMessage(
+                                id=getattr(mem, "id", None) or str(uuid.uuid4()),
+                                session_id=session_id,
+                                role=_safe_role(name) if name else MemoryRole.ASSISTANT,
+                                content=_strip_session_tag(content),
+                                created_at=_parse_datetime(getattr(mem, "created_at", None)),
+                                metadata={},
+                            )
+                        )
+                    if len(matched) >= limit:
+                        break
+                # 按时间正序返回（最新的在末尾）
+                return list(reversed(matched))
+        except Exception:
+            logger.warning("ReMeLight get_memory 失败，回退到内存 buffer", exc_info=True)
+
+        # 回退到内存 buffer
         msgs = self._session_messages.get(session_id, [])
         return msgs[-limit:]
 

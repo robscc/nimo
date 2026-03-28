@@ -50,6 +50,29 @@ class TestSubAgentRegistry:
         assert len(agents) >= 3
 
     @pytest.mark.asyncio
+    async def test_ensure_defaults_updates_role_prompt(self, db: AsyncSession):
+        """ensure_defaults 应自动更新已存在 SubAgent 的 role_prompt。"""
+        registry = SubAgentRegistry(db)
+
+        # 先创建一个旧版本的 researcher
+        old_prompt = "旧版本的 role_prompt"
+        await registry.create_agent({
+            "name": "researcher",
+            "display_name": "调研员",
+            "role_prompt": old_prompt,
+            "accepted_task_types": ["research"],
+        })
+
+        # 调用 ensure_defaults 应更新 role_prompt
+        await registry.ensure_defaults()
+
+        # 验证 role_prompt 已更新
+        agent = await registry.get_agent("researcher")
+        assert agent is not None
+        assert agent["role_prompt"] != old_prompt
+        assert "produce_artifact" in agent["role_prompt"]
+
+    @pytest.mark.asyncio
     async def test_create_agent(self, db: AsyncSession):
         """创建自定义 SubAgent。"""
         registry = SubAgentRegistry(db)
