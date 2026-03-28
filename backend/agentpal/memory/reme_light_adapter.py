@@ -106,16 +106,20 @@ def _parse_datetime(dt_str: Any) -> datetime:
 class ReMeLightMemory(BaseMemory):
     """ReMeLight 本地文件记忆后端适配器。
 
+    采用双写策略：
+    - ReMeLight 用于语义搜索和上下文管理
+    - SQLite MemoryRecord 表用于持久化（API 读取）
+
     直接采用 ReMeLight 原生记忆管理方案：
     - 单一全局 ReMeLight 实例（嵌入模型只加载一次）
     - 消息存储：使用 ReMeInMemoryMemory 做会话消息管理，自动持久化到 jsonl
     - 搜索检索：使用 memory_search() 做混合向量+BM25 语义检索
     - 工作记忆：暴露 compact_memory() / summary_memory() / pre_reasoning_hook() 等原生能力
     - 延迟初始化：首次使用时 import + await start()，配 asyncio.Lock 防并发
-    - _session_messages 辅助 buffer 仅用于 BaseMemory 接口兼容
 
     Args:
         working_dir:           ReMeLight 工作目录（默认 ".reme"）
+        db:                    SQLAlchemy AsyncSession（用于 SQLite 持久化）
         llm_api_key:           LLM API Key
         llm_base_url:          LLM API Base URL
         embedding_api_key:     Embedding API Key
@@ -129,6 +133,7 @@ class ReMeLightMemory(BaseMemory):
     def __init__(
         self,
         working_dir: str = ".reme",
+        db: Any = None,
         llm_api_key: str | None = None,
         llm_base_url: str | None = None,
         embedding_api_key: str | None = None,
@@ -139,6 +144,7 @@ class ReMeLightMemory(BaseMemory):
         candidate_multiplier: float = 3.0,
     ) -> None:
         self._working_dir = working_dir
+        self._db = db
         self._llm_api_key = llm_api_key
         self._llm_base_url = llm_base_url
         self._embedding_api_key = embedding_api_key
@@ -152,9 +158,6 @@ class ReMeLightMemory(BaseMemory):
         self._in_memory: Any = None  # ReMeInMemoryMemory
         self._init_lock = asyncio.Lock()
         self._started = False
-
-        # 辅助 buffer：仅用于 BaseMemory 接口兼容（get_recent 返回 MemoryMessage 列表）
-        self._session_messages: dict[str, list[MemoryMessage]] = {}
 
     async def _ensure_started(self) -> None:
         """延迟初始化 ReMeLight 实例。
@@ -206,26 +209,40 @@ class ReMeLightMemory(BaseMemory):
     # ── BaseMemory 必选实现 ────────────────────────────────
 
     async def add(self, message: MemoryMessage) -> MemoryMessage:
-        """写入消息到 ReMeLight。
+        """写入消息到 ReMeLight 和 SQLite。
 
-        1. 存入 _session_messages 做 MemoryMessage 格式兼容
-        2. 调用 ReMeLight ReMeInMemoryMemory 存储（原生持久化到 jsonl）
-
-        空内容消息只存 buffer，不发往 ReMeLight。
+        双写策略：
+        1. 写入 SQLite MemoryRecord 表（持久化，API 可读）
+        2. 写入 ReMeLight（语义搜索）
         """
         if message.id is None:
             message.id = str(uuid.uuid4())
 
-        # 辅助 buffer 保存
-        if message.session_id not in self._session_messages:
-            self._session_messages[message.session_id] = []
-        self._session_messages[message.session_id].append(message)
+        # 1. 写入 SQLite（如果有 db）
+        if self._db is not None:
+            try:
+                from agentpal.models.memory import MemoryRecord
 
-        # 空内容跳过原生存储
+                record = MemoryRecord(
+                    id=message.id,
+                    session_id=message.session_id,
+                    role=str(message.role),
+                    content=message.content,
+                    created_at=message.created_at or datetime.now(timezone.utc),
+                    meta=message.metadata,
+                    user_id=message.user_id,
+                    channel=message.channel,
+                    memory_type=message.memory_type or "conversation",
+                )
+                self._db.add(record)
+                await self._db.flush()
+            except Exception:
+                logger.warning("ReMeLightMemory SQLite 写入失败", exc_info=True)
+
+        # 2. 写入 ReMeLight（语义搜索）
         if not message.content or not message.content.strip():
             return message
 
-        # ReMeLight 原生存储
         try:
             await self._ensure_started()
             tagged = _tag_content(message.session_id, message.content)
@@ -236,23 +253,41 @@ class ReMeLightMemory(BaseMemory):
             )
             await self._in_memory.add(memories=msg)
         except Exception:
-            logger.warning("ReMeLight add 失败，消息已保存至本地 buffer", exc_info=True)
+            logger.warning("ReMeLight add 失败", exc_info=True)
 
         return message
 
     async def get_recent(self, session_id: str, limit: int = 20) -> list[MemoryMessage]:
         """获取最近消息。
 
-        优先从 ReMeLight 持久化存储读取，按 session_id 过滤。
-        如果 ReMeLight 不可用或失败，回退到内存 buffer。
+        优先从 SQLite 读取（持久化），失败时回退到 ReMeLight 内存。
         """
-        # 先尝试从 ReMeLight 读取
+        # 1. 优先从 SQLite 读取（如果有 db）
+        if self._db is not None:
+            try:
+                from sqlalchemy import select
+
+                from agentpal.models.memory import MemoryRecord
+
+                stmt = (
+                    select(MemoryRecord)
+                    .where(MemoryRecord.session_id == session_id)
+                    .order_by(MemoryRecord.created_at.desc())
+                    .limit(limit)
+                )
+                result = await self._db.execute(stmt)
+                records = result.scalars().all()
+                if records:
+                    return [_record_to_msg(r) for r in reversed(records)]
+            except Exception:
+                logger.warning("ReMeLightMemory SQLite 读取失败", exc_info=True)
+
+        # 2. 回退到 ReMeLight 内存
         try:
             await self._ensure_started()
             memories = await self._in_memory.get_memory()
             if memories:
                 matched: list[MemoryMessage] = []
-                # 倒序遍历，取最近的
                 for mem in reversed(memories):
                     content = getattr(mem, "content", "") or ""
                     extracted_sid = _extract_session_id(content)
@@ -271,21 +306,30 @@ class ReMeLightMemory(BaseMemory):
                         )
                     if len(matched) >= limit:
                         break
-                # 按时间正序返回（最新的在末尾）
                 return list(reversed(matched))
         except Exception:
-            logger.warning("ReMeLight get_memory 失败，回退到内存 buffer", exc_info=True)
+            logger.warning("ReMeLight get_memory 失败", exc_info=True)
 
-        # 回退到内存 buffer
-        msgs = self._session_messages.get(session_id, [])
-        return msgs[-limit:]
+        return []
 
     async def clear(self, session_id: str) -> None:
         """清空指定 session 的记忆。
 
-        先调用 ReMeLight clear_content() 触发持久化（同步方法），再清 buffer。
+        同时清除 SQLite 和 ReMeLight。
         """
-        self._session_messages.pop(session_id, None)
+        # 1. 清除 SQLite
+        if self._db is not None:
+            try:
+                from sqlalchemy import delete
+
+                from agentpal.models.memory import MemoryRecord
+
+                stmt = delete(MemoryRecord).where(MemoryRecord.session_id == session_id)
+                await self._db.execute(stmt)
+            except Exception:
+                logger.warning("ReMeLightMemory SQLite 清除失败", exc_info=True)
+
+        # 2. 清除 ReMeLight
         if self._in_memory is not None:
             try:
                 self._in_memory.clear_content()
@@ -337,13 +381,9 @@ class ReMeLightMemory(BaseMemory):
 
             return matched
         except Exception:
-            logger.warning("ReMeLight search 失败，回退到 buffer 关键词搜索", exc_info=True)
+            logger.warning("ReMeLight search 失败", exc_info=True)
 
-        # 回退到 buffer 关键词搜索
-        msgs = self._session_messages.get(session_id, [])
-        q = query.lower()
-        matched_fallback = [m for m in msgs if q in m.content.lower()]
-        return matched_fallback[-limit:]
+        return []
 
     async def cross_session_search(
         self,
@@ -388,25 +428,26 @@ class ReMeLightMemory(BaseMemory):
 
             return matched
         except Exception:
-            logger.warning("ReMeLight cross_session_search 失败，回退到 buffer", exc_info=True)
+            logger.warning("ReMeLight cross_session_search 失败", exc_info=True)
 
-        # 回退到 buffer 扫描
-        q = query.lower()
-        all_matched: list[MemoryMessage] = []
-        for sid, msgs in self._session_messages.items():
-            for msg in msgs:
-                if scope.user_id and msg.user_id != scope.user_id:
-                    continue
-                if scope.channel and msg.channel != scope.channel:
-                    continue
-                if q in msg.content.lower():
-                    all_matched.append(msg)
-        all_matched.sort(key=lambda m: m.created_at)
-        return all_matched[-limit:]
+        return []
 
     async def count(self, session_id: str) -> int:
         """统计指定 session 的记忆条数。"""
-        return len(self._session_messages.get(session_id, []))
+        if self._db is not None:
+            try:
+                from sqlalchemy import func, select
+
+                from agentpal.models.memory import MemoryRecord
+
+                stmt = select(func.count()).select_from(MemoryRecord).where(
+                    MemoryRecord.session_id == session_id
+                )
+                result = await self._db.execute(stmt)
+                return result.scalar_one()
+            except Exception:
+                logger.warning("ReMeLightMemory count 失败", exc_info=True)
+        return 0
 
     async def close(self) -> None:
         """关闭 ReMeLight 实例。"""
@@ -513,3 +554,18 @@ def _safe_role(role: Any) -> MemoryRole | str:
     if role and str(role) in MemoryRole._value2member_map_:
         return MemoryRole(str(role))
     return MemoryRole.ASSISTANT
+
+
+def _record_to_msg(record: Any) -> MemoryMessage:
+    """将 MemoryRecord ORM 对象转换为 MemoryMessage。"""
+    return MemoryMessage(
+        id=record.id,
+        session_id=record.session_id,
+        role=MemoryRole(record.role) if record.role in MemoryRole._value2member_map_ else record.role,
+        content=record.content,
+        created_at=record.created_at,
+        metadata=record.meta or {},
+        user_id=record.user_id,
+        channel=record.channel,
+        memory_type=record.memory_type or "conversation",
+    )
