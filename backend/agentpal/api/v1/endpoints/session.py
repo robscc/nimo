@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -364,22 +364,57 @@ async def clear_session_memory(session_id: str, db: AsyncSession = Depends(get_d
 
 
 @router.get("/{session_id}/events")
-async def session_events(session_id: str):
+async def session_events(session_id: str, request: Request):
     """SSE 端点：订阅指定 session 的实时消息推送。
 
-    当定时任务完成并将结果写入该 session 时，此端点会向客户端推送 new_message 事件。
+    通过 ZMQ EventSubscriber 接收跨进程事件（SubAgent/Cron 完成通知），
+    同时保留 session_event_bus 作为进程内事件的补充来源。
     客户端断开时自动取消订阅。
     """
-    queue = session_event_bus.subscribe(session_id)
+    # 尝试获取 ZMQ manager 用于跨进程事件订阅
+    zmq_manager = getattr(request.app.state, "scheduler", None) or getattr(
+        request.app.state, "zmq_manager", None
+    )
 
     async def event_generator():
+        subscriber = None
+        queue = session_event_bus.subscribe(session_id)
         try:
             # 发送初始连接确认
             yield f"data: {json.dumps({'type': 'connected', 'session_id': session_id})}\n\n"
+
+            # 创建 ZMQ 订阅者（如果 ZMQ 可用）
+            if zmq_manager is not None:
+                subscriber = zmq_manager.create_event_subscriber(
+                    topic=f"session:{session_id}",
+                    filter_msg_id=None,
+                )
+                await subscriber._ensure_socket()
+
             while True:
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    if subscriber is not None and subscriber._sub is not None:
+                        # 同时监听 ZMQ 和 session_event_bus
+                        # 优先检查 ZMQ（跨进程事件）
+                        if await subscriber._sub.poll(timeout=0):
+                            frames = await subscriber._sub.recv_multipart()
+                            if len(frames) >= 2:
+                                from agentpal.zmq_bus.protocol import Envelope as Env
+
+                                envelope = Env.deserialize(frames[1])
+                                event = envelope.payload
+                                event_clean = {
+                                    k: v
+                                    for k, v in event.items()
+                                    if not k.startswith("_")
+                                }
+                                yield f"data: {json.dumps(event_clean, ensure_ascii=False)}\n\n"
+                                continue
+
+                    # 检查 session_event_bus（进程内事件）
+                    event = await asyncio.wait_for(queue.get(), timeout=5.0)
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
                 except asyncio.TimeoutError:
                     # 发送心跳保持连接
                     yield ": heartbeat\n\n"
@@ -387,6 +422,8 @@ async def session_events(session_id: str):
             pass
         finally:
             session_event_bus.unsubscribe(session_id, queue)
+            if subscriber is not None:
+                await subscriber.close()
 
     return StreamingResponse(
         event_generator(),

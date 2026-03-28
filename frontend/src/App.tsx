@@ -7,6 +7,7 @@ import CronPage from "./pages/CronPage";
 import WorkspacePage from "./pages/WorkspacePage";
 import SessionsPage from "./pages/SessionsPage";
 import DashboardPage from "./pages/DashboardPage";
+import SchedulerPage from "./pages/SchedulerPage";
 import Layout from "./components/Layout";
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/workspace" element={<WorkspacePage />} />
           <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/scheduler" element={<SchedulerPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

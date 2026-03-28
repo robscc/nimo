@@ -270,7 +270,10 @@ class SubAgentRegistry:
             "## Available SubAgents\n",
             "You can delegate tasks to the following specialized SubAgents "
             "by calling `dispatch_sub_agent`.\n"
-            "Only dispatch when the task genuinely benefits from a specialist.\n",
+            "Only dispatch when the task genuinely benefits from a specialist.\n"
+            "**IMPORTANT:** Always use `blocking=false` (the default) so the SubAgent "
+            "runs asynchronously and reports results back. Never use `blocking=true` "
+            "unless the user explicitly asks to wait.\n",
         ]
 
         for agent in agents:

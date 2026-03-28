@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     # hybrid: buffer + sqlite（默认，推荐）
     # mem0:   mem0 语义记忆（需 pip install mem0ai）
     # reme:   ReMe 记忆管理（需 pip install reme-memory 或启动 ReMe server）
-    memory_backend: Literal["buffer", "sqlite", "hybrid", "mem0", "reme", "reme_light"] = "hybrid"
+    memory_backend: Literal["buffer", "sqlite", "hybrid", "mem0", "reme", "reme_light"] = "reme_light"
     memory_buffer_size: int = 30      # BufferMemory 最大条数
     memory_sqlite_limit: int = 200    # SQLite 每次查询上限
 
@@ -146,15 +146,28 @@ class Settings(BaseSettings):
 
     # ── 日志 ──────────────────────────────────────────────
     log_level: str = "INFO"
+    llm_debug: bool = False   # 打印每次 LLM 请求/响应的完整 JSON（不截断）
 
     # ── CORS ─────────────────────────────────────────────
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
-    # ── ZMQ 消息总线 ─────────────────────────────────────
-    zmq_router_addr: str = "inproc://agent-router"   # ROUTER socket 地址
-    zmq_events_addr: str = "inproc://agent-events"   # PUB/SUB 事件 broker 地址
+    # ── 异步任务结果注入 ─────────────────────────────────
+    async_result_max_inject: int = 5      # system prompt 注入最近 N 条完成任务的完整结果
+    async_result_max_chars: int = 500     # 每条结果最大字符数
+
+    # ── ZMQ 消息总线（已废弃，使用 scheduler_* 系列配置）───
+    zmq_router_addr: str = "ipc:///tmp/agentpal-router.sock"   # ROUTER socket 地址
+    zmq_events_addr: str = "ipc:///tmp/agentpal-events.sock"   # PUB/SUB 事件 broker 地址
     zmq_pa_idle_timeout: int = 1800   # PA daemon 空闲回收超时（秒），默认 30 分钟
     zmq_sub_idle_timeout: int = 300   # SubAgent daemon 空闲回收超时（秒），默认 5 分钟
+
+    # ── Scheduler（多进程 Agent 调度）──────────────────
+    scheduler_router_addr: str = "ipc:///tmp/agentpal-router.sock"
+    scheduler_events_addr: str = "ipc:///tmp/agentpal-events.sock"
+    scheduler_pa_idle_timeout: int = 1800     # PA 空闲超时（秒），默认 30 分钟
+    scheduler_sub_idle_timeout: int = 300     # SubAgent 空闲超时（秒），默认 5 分钟
+    scheduler_health_check_interval: int = 30  # 健康检查间隔（秒）
+    scheduler_process_start_timeout: int = 15  # 子进程启动超时（秒）
 
     @property
     def is_dev(self) -> bool:

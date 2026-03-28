@@ -96,6 +96,16 @@ class SubAgentDaemon(AgentDaemon):
             "parent_session_id", self._parent_session_id
         )
 
+        # 从 payload 更新配置（create_sub_daemon 通过 envelope 传递）
+        if payload.get("model_config"):
+            self._model_config = payload["model_config"]
+        if payload.get("role_prompt"):
+            self._role_prompt = payload["role_prompt"]
+        if payload.get("max_tool_rounds"):
+            self._max_tool_rounds = payload["max_tool_rounds"]
+        if parent_session_id:
+            self._parent_session_id = parent_session_id
+
         topic = f"task:{task_id}"
         logger.info(
             f"SubAgentDaemon [{self.identity}] 开始执行任务: "
@@ -213,7 +223,7 @@ class SubAgentDaemon(AgentDaemon):
                 data={
                     "task_id": task_id,
                     "agent_name": self._agent_name,
-                    "status": task.status.value if task.status else "unknown",
+                    "status": task.status if task.status else "unknown",
                 },
                 message="任务记录加载成功",
             )
@@ -245,7 +255,7 @@ class SubAgentDaemon(AgentDaemon):
                 data={
                     "task_id": task_id,
                     "log_entries": log_count,
-                    "final_status": task.status.value if task.status else "unknown",
+                    "final_status": task.status if task.status else "unknown",
                 },
                 message=f"执行日志共 {log_count} 条",
             )

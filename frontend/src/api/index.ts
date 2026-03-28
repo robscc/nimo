@@ -102,6 +102,11 @@ export interface HistoryMessageMeta {
   compressed?: boolean;           // 是否已被压缩
   type?: string;                  // 'context_summary' 表示摘要消息
   compressed_count?: number;      // 被压缩的消息数量
+  card_type?: string;             // 'sub_agent_result' | 'cron_result'
+  agent_name?: string;
+  task_id?: string;
+  job_name?: string;
+  [key: string]: unknown;         // 允许额外字段
 }
 
 export interface HistoryMessage {
@@ -121,6 +126,19 @@ export interface TaskListItem {
   result: string | null;
   error: string | null;
   created_at: string;
+  finished_at: string | null;
+}
+
+/** SSE event emitted when an async task (SubAgent / Cron) completes. */
+export interface AsyncTaskDoneSSEEvent {
+  type: "async_task_done";
+  source: "sub_agent" | "cron";
+  task_id: string | null;
+  agent_name: string | null;
+  task_prompt: string;
+  status: "done" | "failed";
+  result_preview: string | null;
+  error_preview: string | null;
   finished_at: string | null;
 }
 
@@ -507,6 +525,46 @@ export async function resolveToolGuard(
 export async function cancelTask(taskId: string, reason?: string): Promise<{ task_id: string; status: string; message: string }> {
   const { data } = await api.post(`/tasks/${taskId}/cancel`, { reason });
   return data;
+}
+
+// ── Scheduler API ────────────────────────────────────────
+
+export interface AgentProcessInfo {
+  process_id: string;
+  agent_type: "pa" | "sub_agent" | "cron";
+  state: "pending" | "starting" | "running" | "idle" | "stopping" | "stopped" | "failed";
+  session_id: string | null;
+  task_id: string | null;
+  agent_name: string | null;
+  os_pid: number | null;
+  started_at: string;
+  last_active_at: string;
+  idle_seconds: number;
+  error: string | null;
+}
+
+export interface SchedulerStats {
+  total_processes: number;
+  pa_count: number;
+  sub_agent_count: number;
+  cron_count: number;
+  by_state: Record<string, number>;
+  total_memory_mb: number;
+  uptime_seconds: number;
+}
+
+export async function getSchedulerAgents(): Promise<AgentProcessInfo[]> {
+  const { data } = await api.get<AgentProcessInfo[]>("/scheduler/agents");
+  return data;
+}
+
+export async function getSchedulerStats(): Promise<SchedulerStats> {
+  const { data } = await api.get<SchedulerStats>("/scheduler/stats");
+  return data;
+}
+
+export async function stopSchedulerAgent(id: string): Promise<void> {
+  await api.post(`/scheduler/agents/${encodeURIComponent(id)}/stop`);
 }
 
 export default api;

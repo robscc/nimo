@@ -20,7 +20,7 @@ import zmq
 import zmq.asyncio
 from loguru import logger
 
-from agentpal.zmq_bus.protocol import Envelope
+from agentpal.zmq_bus.protocol import Envelope, MessageType
 
 
 class AgentDaemon:
@@ -44,22 +44,28 @@ class AgentDaemon:
         self._recv_task: asyncio.Task | None = None
         self._work_task: asyncio.Task | None = None
         self._ctx: zmq.asyncio.Context | None = None
+        self._own_ctx: bool = False  # 是否由 daemon 自己创建的 ctx
 
     # ── 生命周期 ──────────────────────────────────────────
 
     async def start(
         self,
-        ctx: zmq.asyncio.Context,
-        router_addr: str,
-        events_addr: str,
+        ctx: zmq.asyncio.Context | None = None,
+        router_addr: str = "",
+        events_addr: str = "",
     ) -> None:
         """连接 DEALER/PUB socket，启动 recv_loop + work_loop。
 
         Args:
-            ctx:          共享的 zmq.asyncio.Context
+            ctx:          共享的 zmq.asyncio.Context（None 时自动创建独立 ctx）
             router_addr:  ROUTER socket 地址（如 "inproc://agent-router"）
             events_addr:  XPUB broker 地址（如 "inproc://agent-events"）
         """
+        if ctx is None:
+            self._own_ctx = True
+            ctx = zmq.asyncio.Context()
+        else:
+            self._own_ctx = False
         self._ctx = ctx
         self._running = True
 
@@ -114,6 +120,11 @@ class AgentDaemon:
         if self._pub is not None:
             self._pub.close(linger=0)
             self._pub = None
+
+        # 如果是自己创建的 ctx，负责终止
+        if self._own_ctx and self._ctx is not None:
+            self._ctx.term()
+            self._ctx = None
 
         logger.info(f"AgentDaemon [{self.identity}] 已停止")
 
@@ -217,6 +228,12 @@ class AgentDaemon:
 
                 self.last_active_at = time.time()
 
+                # 拦截 CONFIG_RELOAD 消息 — 在基类层统一处理
+                if envelope.msg_type == MessageType.CONFIG_RELOAD:
+                    self._handle_config_reload()
+                    self._task_queue.task_done()
+                    continue
+
                 try:
                     await self.handle_message(envelope)
                 except Exception as e:
@@ -233,3 +250,13 @@ class AgentDaemon:
             except Exception as e:
                 if self._running:
                     logger.error(f"AgentDaemon [{self.identity}] work_loop 异常: {e}")
+
+    def _handle_config_reload(self) -> None:
+        """处理 CONFIG_RELOAD 消息：清除 Settings LRU 缓存。"""
+        try:
+            from agentpal.config import get_settings
+
+            get_settings.cache_clear()
+            logger.info(f"AgentDaemon [{self.identity}] 已刷新 Settings 缓存 (CONFIG_RELOAD)")
+        except Exception as e:
+            logger.warning(f"AgentDaemon [{self.identity}] CONFIG_RELOAD 处理失败: {e}")

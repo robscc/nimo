@@ -237,11 +237,12 @@ class CronDaemon(AgentDaemon):
         - 发送 AGENT_NOTIFY 到通用 "pa:__cron__" 目标
         """
         sender = agent_name or "cron"
-        content = (
-            f"📋 定时任务「{job_name}」执行完成\n\n"
-            f"执行者: {sender}\n"
-            f"结果:\n{result[:2000]}"
-        )
+        content = result[:2000]
+        meta = {
+            "card_type": "cron_result",
+            "job_name": job_name,
+            "agent_name": sender,
+        }
 
         if target_session_id:
             # 写入指定 session 的记忆记录（DB 审计）
@@ -252,6 +253,7 @@ class CronDaemon(AgentDaemon):
                 session_id=target_session_id,
                 role="assistant",
                 content=content,
+                meta=meta,
             )
             db.add(record)
             await db.flush()
@@ -284,6 +286,7 @@ class CronDaemon(AgentDaemon):
                         "role": "assistant",
                         "content": content,
                         "created_at": created_at,
+                        "meta": meta,
                     },
                 },
             )

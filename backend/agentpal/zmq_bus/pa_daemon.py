@@ -45,6 +45,16 @@ class PersonalAssistantDaemon(AgentDaemon):
             await self._handle_notify(envelope)
         elif envelope.msg_type == MessageType.AGENT_REQUEST:
             await self._handle_agent_request(envelope)
+        elif envelope.msg_type == MessageType.DISPATCH_SUB_ACK:
+            # PA 通过 WorkerSchedulerProxy 派遣 SubAgent 后收到的确认
+            status = envelope.payload.get("status", "unknown")
+            if status == "error":
+                logger.error(
+                    f"PA daemon [{self._session_id}] SubAgent 派遣失败: "
+                    f"{envelope.payload.get('error', '')}"
+                )
+            else:
+                logger.info(f"PA daemon [{self._session_id}] SubAgent 派遣确认: {status}")
         elif envelope.msg_type == MessageType.AGENT_SHUTDOWN:
             logger.info(f"PA daemon [{self._session_id}] 收到关闭信号")
             self._running = False
