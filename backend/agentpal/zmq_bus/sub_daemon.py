@@ -88,6 +88,10 @@ class SubAgentDaemon(AgentDaemon):
         - task_id:            任务 ID（应与 self._task_id 一致）
         - task_prompt:        任务描述
         - parent_session_id:  父会话 ID（可选，覆盖构造函数值）
+
+        兜底机制：无论正常完成、业务异常还是意外异常（BaseException），
+        finally 块都会检查 _response_sent 标记，确保 AGENT_RESPONSE
+        至少发送一次，避免 broker 侧状态卡在 RUNNING。
         """
         payload = envelope.payload
         task_id = payload.get("task_id", self._task_id)
@@ -107,6 +111,8 @@ class SubAgentDaemon(AgentDaemon):
             self._parent_session_id = parent_session_id
 
         topic = f"task:{task_id}"
+        response_sent = False  # 兜底标记：是否已成功发送 AGENT_RESPONSE
+
         logger.info(
             f"SubAgentDaemon [{self.identity}] 开始执行任务: "
             f"task_id={task_id}"
@@ -152,6 +158,7 @@ class SubAgentDaemon(AgentDaemon):
                 source=self.identity,
             )
             await self.send_to_router(response_envelope)
+            response_sent = True
 
             logger.info(
                 f"SubAgentDaemon [{self.identity}] 任务完成: task_id={task_id}"
@@ -188,6 +195,41 @@ class SubAgentDaemon(AgentDaemon):
                 source=self.identity,
             )
             await self.send_to_router(error_envelope)
+            response_sent = True
+
+        finally:
+            # 兜底：如果上面的 try/except 都没能成功发送 AGENT_RESPONSE
+            # （如 send_to_router 抛异常、BaseException 绕过 except 等），
+            # 在此做最后一次 best-effort 发送，确保 broker 能收到响应并
+            # 将状态从 RUNNING 转回 IDLE/FAILED。
+            if not response_sent:
+                logger.warning(
+                    f"SubAgentDaemon [{self.identity}] AGENT_RESPONSE 未发送，"
+                    f"执行 finally 兜底: task_id={task_id}"
+                )
+                try:
+                    fallback_envelope = envelope.make_reply(
+                        msg_type=MessageType.AGENT_RESPONSE,
+                        payload={
+                            "task_id": task_id,
+                            "status": "failed",
+                            "error": "SubAgent 异常退出，AGENT_RESPONSE 由 finally 兜底发送",
+                            "agent_name": self._agent_name,
+                        },
+                        source=self.identity,
+                    )
+                    await self.send_to_router(fallback_envelope)
+                    logger.info(
+                        f"SubAgentDaemon [{self.identity}] finally 兜底 "
+                        f"AGENT_RESPONSE 已发送: task_id={task_id}"
+                    )
+                except Exception as fallback_exc:
+                    # best-effort：连兜底都失败了，只能靠 broker 侧
+                    # 的 RUNNING 超时机制（防线2）来兜底
+                    logger.error(
+                        f"SubAgentDaemon [{self.identity}] finally 兜底发送失败: "
+                        f"task_id={task_id} error={fallback_exc}"
+                    )
 
     async def _run_task(
         self,

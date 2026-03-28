@@ -18,6 +18,15 @@ class SessionStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class AgentMode(StrEnum):
+    """PA Agent 运行模式。"""
+    NORMAL = "normal"
+    PLANNING = "planning"
+    CONFIRMING = "confirming"
+    EXECUTING = "executing"
+    STEP_CONFIRM = "step_confirm"  # Phase 2
+
+
 class TaskStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
@@ -63,6 +72,11 @@ class SessionRecord(Base):
     enabled_skills: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     context_tokens: Mapped[int | None] = mapped_column(nullable=True)
     tool_guard_threshold: Mapped[int | None] = mapped_column(nullable=True)
+
+    # ── Plan Mode ─────────────────────────────────────
+    agent_mode: Mapped[str] = mapped_column(
+        String(32), default="normal", server_default="normal"
+    )
 
     __table_args__ = (
         Index("ix_session_channel_user", "channel", "user_id"),

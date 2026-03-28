@@ -324,6 +324,8 @@ class SchedulerBroker:
             },
         )
         await self._send_to_daemon(process_id, envelope)
+        # 派发任务后立即标记为 RUNNING（修复：之前漏掉导致 SubAgent 一直显示 IDLE）
+        self._mark_running(process_id)
         logger.info(f"SubAgent 子进程已派发任务: {process_id}")
 
         return info
@@ -727,6 +729,7 @@ class SchedulerBroker:
             if info.state == AgentState.IDLE:
                 try:
                     info.transition_to(AgentState.RUNNING)
+                    info.running_since = time.time()
                 except ValueError:
                     pass
 
@@ -737,6 +740,7 @@ class SchedulerBroker:
             if info.state == AgentState.RUNNING:
                 try:
                     info.transition_to(AgentState.IDLE)
+                    info.running_since = 0.0
                 except ValueError:
                     pass
 
@@ -835,6 +839,37 @@ class SchedulerBroker:
                 f"SubAgent 结果已投递到 session {parent_session_id} "
                 f"(task={task_id}, agent={agent_name})"
             )
+
+            # ── Plan Mode: 检测计划步骤完成 → 通知 PA ──
+            try:
+                from agentpal.models.session import SubAgentTask as SATask
+
+                async with AsyncSessionLocal() as check_db:
+                    sa_task = await check_db.get(SATask, task_id)
+                    if sa_task and sa_task.meta and sa_task.meta.get("plan_id"):
+                        plan_step_payload = {
+                            "plan_id": sa_task.meta["plan_id"],
+                            "step_index": sa_task.meta.get("step_index", 0),
+                            "task_id": task_id,
+                            "status": status,
+                            "result": result,
+                            "agent_name": agent_name,
+                        }
+                        pa_identity = f"pa:{parent_session_id}"
+                        step_done_env = Env(
+                            msg_type=MessageType.PLAN_STEP_DONE,
+                            source="scheduler",
+                            target=pa_identity,
+                            session_id=parent_session_id,
+                            payload=plan_step_payload,
+                        )
+                        await self._send_to_daemon(pa_identity, step_done_env)
+                        logger.info(
+                            f"Plan step done 通知已发送: plan={sa_task.meta['plan_id']} "
+                            f"step={sa_task.meta.get('step_index')}"
+                        )
+            except Exception as plan_exc:
+                logger.error(f"Plan step done 通知失败: {plan_exc}", exc_info=True)
 
         except Exception as e:
             logger.error(
@@ -946,10 +981,16 @@ class SchedulerBroker:
     # ── 健康检查循环 ──────────────────────────────────────
 
     async def _health_check_loop(self) -> None:
-        """检查子进程是否存活，dead 的标记 FAILED。"""
+        """检查子进程是否存活，dead 的标记 FAILED。
+
+        同时检测 RUNNING 超时：Agent 在 RUNNING 状态持续超过
+        max_running_duration 后，强制标记 FAILED 并终止进程，
+        防止 daemon 侧异常导致状态永久卡在 RUNNING。
+        """
         while self._running:
             try:
                 await asyncio.sleep(self._config.health_check_interval)
+                now = time.time()
 
                 for identity, managed in list(self._processes.items()):
                     if not managed.info.is_alive:
@@ -958,6 +999,7 @@ class SchedulerBroker:
                     if not managed.process.is_alive():
                         managed.info.state = AgentState.FAILED
                         managed.info.error = "process exited unexpectedly"
+                        managed.info.running_since = 0.0
                         logger.warning(f"子进程异常退出: {identity}")
 
                         # 自动重启 Cron 进程
@@ -965,6 +1007,33 @@ class SchedulerBroker:
                             logger.info("尝试自动重启 Cron 子进程...")
                             del self._processes[identity]
                             await self._spawn_cron_process()
+
+                        continue
+
+                    # RUNNING 超时检测（防线2）：
+                    # 如果 Agent 处于 RUNNING 状态超过 max_running_duration，
+                    # 说明 daemon 侧的 AGENT_RESPONSE 未能成功发出（防线1 也失败了），
+                    # 强制标记 FAILED 并终止进程。
+                    if (
+                        managed.info.state == AgentState.RUNNING
+                        and managed.info.running_since > 0
+                    ):
+                        running_secs = now - managed.info.running_since
+                        if running_secs > self._config.max_running_duration:
+                            logger.error(
+                                f"Agent RUNNING 超时: {identity} "
+                                f"(已运行 {running_secs:.0f}s > "
+                                f"{self._config.max_running_duration}s)，"
+                                f"强制标记 FAILED"
+                            )
+                            managed.info.state = AgentState.FAILED
+                            managed.info.error = (
+                                f"RUNNING 超时 ({running_secs:.0f}s > "
+                                f"{self._config.max_running_duration}s)"
+                            )
+                            managed.info.running_since = 0.0
+                            # 强制终止进程
+                            await self._stop_process(identity, timeout=5.0)
 
             except asyncio.CancelledError:
                 break

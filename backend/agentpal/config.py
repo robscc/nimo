@@ -15,7 +15,7 @@ from typing import Any, Literal, Tuple, Type
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from agentpal.paths import get_nimo_home, get_skills_dir, get_workspace_dir
+from agentpal.paths import get_nimo_home, get_plans_dir, get_skills_dir, get_workspace_dir
 
 
 def _load_yaml_settings() -> dict[str, Any]:
@@ -130,6 +130,10 @@ class Settings(BaseSettings):
     # 技能安装目录，默认 ~/.nimo/skills_data（可通过 SKILLS_DIR 或 NIMO_HOME 环境变量覆盖）
     skills_dir: str = str(get_skills_dir())
 
+    # ── Plan Mode ────────────────────────────────────────
+    # 计划文件目录，默认 ~/.nimo/plans（可通过 PLANS_DIR 或 NIMO_HOME 环境变量覆盖）
+    plans_dir: str = str(get_plans_dir())
+
     # ── 渠道 ──────────────────────────────────────────────
     dingtalk_enabled: bool = False
     dingtalk_app_key: str = ""
@@ -168,6 +172,7 @@ class Settings(BaseSettings):
     scheduler_sub_idle_timeout: int = 300     # SubAgent 空闲超时（秒），默认 5 分钟
     scheduler_health_check_interval: int = 30  # 健康检查间隔（秒）
     scheduler_process_start_timeout: int = 15  # 子进程启动超时（秒）
+    scheduler_max_running_duration: int = 1800  # Agent RUNNING 最大持续时间（秒），超时强制 FAILED，默认 30 分钟
 
     @property
     def is_dev(self) -> bool:

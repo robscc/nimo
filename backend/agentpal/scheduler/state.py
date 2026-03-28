@@ -48,6 +48,7 @@ class AgentProcessInfo:
         os_pid:         操作系统进程 PID
         started_at:     启动时间戳（Unix 秒）
         last_active_at: 最近活跃时间戳（Unix 秒）
+        running_since:  进入 RUNNING 状态的时间戳（Unix 秒），非 RUNNING 时为 0
         error:          错误信息（仅 FAILED 状态）
     """
 
@@ -60,6 +61,7 @@ class AgentProcessInfo:
     os_pid: int | None = None
     started_at: float = field(default_factory=time.time)
     last_active_at: float = field(default_factory=time.time)
+    running_since: float = 0.0
     error: str | None = None
 
     def transition_to(self, new_state: AgentState) -> None:
@@ -109,5 +111,17 @@ class AgentProcessInfo:
                 self.last_active_at, tz=timezone.utc
             ).isoformat(),
             "idle_seconds": round(self.idle_seconds, 1),
+            "running_since": (
+                datetime.fromtimestamp(
+                    self.running_since, tz=timezone.utc
+                ).isoformat()
+                if self.running_since > 0
+                else None
+            ),
+            "running_seconds": (
+                round(time.time() - self.running_since, 1)
+                if self.running_since > 0
+                else None
+            ),
             "error": self.error,
         }

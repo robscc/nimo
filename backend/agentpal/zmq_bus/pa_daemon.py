@@ -45,6 +45,8 @@ class PersonalAssistantDaemon(AgentDaemon):
             await self._handle_notify(envelope)
         elif envelope.msg_type == MessageType.AGENT_REQUEST:
             await self._handle_agent_request(envelope)
+        elif envelope.msg_type == MessageType.PLAN_STEP_DONE:
+            await self._handle_plan_step_done(envelope)
         elif envelope.msg_type == MessageType.DISPATCH_SUB_ACK:
             # PA 通过 WorkerSchedulerProxy 派遣 SubAgent 后收到的确认
             status = envelope.payload.get("status", "unknown")
@@ -150,6 +152,38 @@ class PersonalAssistantDaemon(AgentDaemon):
             payload={"status": "received"},
         )
         await self.send_to_router(response)
+
+    # ── PLAN_STEP_DONE 处理 ────────────────────────────────
+
+    async def _handle_plan_step_done(self, envelope: Envelope) -> None:
+        """处理计划步骤完成：更新 plan → 推进下一步或完成。"""
+        from agentpal.agents.personal_assistant import PersonalAssistant
+        from agentpal.config import get_settings
+        from agentpal.database import AsyncSessionLocal
+        from agentpal.memory.factory import MemoryFactory
+
+        topic = f"session:{self._session_id}"
+        msg_id = envelope.msg_id
+        settings = get_settings()
+
+        try:
+            async with AsyncSessionLocal() as db:
+                memory = MemoryFactory.create(settings.memory_backend, db=db)
+                assistant = PersonalAssistant(
+                    session_id=self._session_id,
+                    memory=memory,
+                    db=db,
+                )
+                async for event in assistant.handle_plan_step_done(envelope.payload):
+                    await self._publish_sse_event(topic, msg_id, event)
+        except Exception as exc:
+            logger.error(
+                f"PA daemon [{self._session_id}] plan step done 处理异常: {exc}",
+                exc_info=True,
+            )
+            await self._publish_sse_event(
+                topic, msg_id, {"type": "error", "message": str(exc)}
+            )
 
     # ── 辅助方法 ──────────────────────────────────────────
 

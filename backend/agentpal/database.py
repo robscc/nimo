@@ -145,6 +145,8 @@ async def run_migrations() -> None:
         ("sub_agent_tasks", "completed_at", "ALTER TABLE sub_agent_tasks ADD COLUMN completed_at DATETIME"),
         # Phase 6: Rename metadata to extra in task_artifacts (metadata is reserved)
         ("task_artifacts", "extra", "ALTER TABLE task_artifacts ADD COLUMN extra JSON"),
+        # Plan Mode: agent_mode on sessions
+        ("sessions", "agent_mode", "ALTER TABLE sessions ADD COLUMN agent_mode VARCHAR(32) DEFAULT 'normal'"),
     ]
     async with engine.begin() as conn:
         for table, column, sql in migrations:

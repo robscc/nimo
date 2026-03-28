@@ -63,6 +63,8 @@ class SessionMeta(BaseModel):
     enabled_tools: list[str] | None  # null = 跟随全局
     enabled_skills: list[str] | None  # null = 跟随全局
     tool_guard_threshold: int | None  # null = 跟随全局
+    agent_mode: str = "normal"
+    active_plan_id: str | None = None
     message_count: int
     created_at: str
     updated_at: str
@@ -208,6 +210,19 @@ async def get_session_meta(session_id: str, db: AsyncSession = Depends(get_db)):
     )
     message_count = count_result.scalar() or 0
 
+    # Plan Mode: 获取活跃计划 ID
+    agent_mode = getattr(session, "agent_mode", "normal") or "normal"
+    active_plan_id = None
+    if agent_mode in ("executing", "confirming", "generating"):
+        try:
+            from agentpal.plans.store import PlanStore
+            store = PlanStore(get_settings().plans_dir)
+            plan = await store.get_active(session_id)
+            if plan:
+                active_plan_id = plan.id
+        except Exception:
+            pass
+
     return SessionMeta(
         id=session.id,
         channel=session.channel,
@@ -216,6 +231,8 @@ async def get_session_meta(session_id: str, db: AsyncSession = Depends(get_db)):
         enabled_tools=session.enabled_tools,
         enabled_skills=session.enabled_skills,
         tool_guard_threshold=session.tool_guard_threshold,
+        agent_mode=agent_mode,
+        active_plan_id=active_plan_id,
         message_count=message_count,
         created_at=utc_isoformat(session.created_at),
         updated_at=utc_isoformat(session.updated_at),
@@ -267,6 +284,8 @@ async def update_session_config(
         enabled_tools=session.enabled_tools,
         enabled_skills=session.enabled_skills,
         tool_guard_threshold=session.tool_guard_threshold,
+        agent_mode=getattr(session, "agent_mode", "normal") or "normal",
+        active_plan_id=None,
         message_count=message_count,
         created_at=utc_isoformat(session.created_at),
         updated_at=utc_isoformat(session.updated_at),
@@ -492,3 +511,40 @@ async def get_session_usage(session_id: str, db: AsyncSession = Depends(get_db))
             for r in logs
         ],
     )
+
+
+# ── Plan Mode Endpoints ────────────────────────────────────
+
+
+@router.get("/{session_id}/plan")
+async def get_active_plan(session_id: str):
+    """获取当前 session 的活跃计划。"""
+    from agentpal.plans.store import PlanStore
+
+    store = PlanStore(get_settings().plans_dir)
+    plan = await store.get_active(session_id)
+    if plan is None:
+        return {"plan": None}
+    return {"plan": plan.to_dict()}
+
+
+@router.get("/{session_id}/plans")
+async def list_plans(session_id: str):
+    """列出指定 session 的所有计划（摘要）。"""
+    from agentpal.plans.store import PlanStore
+
+    store = PlanStore(get_settings().plans_dir)
+    plans = await store.list_plans(session_id)
+    return {"plans": plans}
+
+
+@router.get("/{session_id}/plans/{plan_id}")
+async def get_plan_detail(session_id: str, plan_id: str):
+    """获取指定计划的详情。"""
+    from agentpal.plans.store import PlanStore
+
+    store = PlanStore(get_settings().plans_dir)
+    plan = await store.load(session_id, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return {"plan": plan.to_dict()}
