@@ -65,7 +65,9 @@ class SubAgent(BaseAgent):
     async def run(self, task_prompt: str) -> str:
         """异步执行任务，自动更新任务状态和执行日志。
 
-        失败时自动重试（指数退避），超过 max_retries 则标记 FAILED。
+        错误分类处理：
+        - Transient error（限流、超时、空响应等）→ 指数退避重试
+        - Permanent error（认证、配置、请求格式等）→ 直接 FAILED，不重试
         """
         await self._update_status(TaskStatus.RUNNING)
 
@@ -81,7 +83,20 @@ class SubAgent(BaseAgent):
             error_msg = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             self._task.execution_log = self._execution_log
 
-            # ── 自动重试逻辑 ──────────────────────────────────
+            # ── Permanent error → 直接 FAILED，不重试 ─────────
+            if not self._is_retryable_error(exc):
+                self._log("permanent_error", {
+                    "error_type": type(exc).__name__,
+                    "error": error_msg[:500],
+                })
+                logger.warning(
+                    "SubAgent task {} permanent error ({}), skip retry",
+                    self._task.id, type(exc).__name__,
+                )
+                await self._update_status(TaskStatus.FAILED, error=error_msg)
+                return ""
+
+            # ── Transient error → 指数退避重试 ────────────────
             if self._task.retry_count < self._task.max_retries:
                 self._task.retry_count += 1
                 retry_count = self._task.retry_count
@@ -157,6 +172,9 @@ class SubAgent(BaseAgent):
                     pass
 
             response = await model(messages, tools=tools_schema)
+
+            # 校验 LLM 响应有效性（空响应 → 抛出异常供 run() 分类处理）
+            self._validate_llm_response(response)
 
             # 记录响应
             response_content = []
@@ -289,6 +307,90 @@ class SubAgent(BaseAgent):
         )
 
         return "\n\n---\n\n".join(parts)
+
+    # ── LLM 响应校验与错误分类 ────────────────────────────
+
+    def _validate_llm_response(self, response: Any) -> None:
+        """校验 LLM 响应有效性，无效时抛出相应错误。
+
+        有效响应须包含至少一项：非空文本 block 或 tool_use block。
+        """
+        from agentpal.agents.errors import LLMEmptyResponseError
+
+        if response is None:
+            raise LLMEmptyResponseError("LLM 返回了 None")
+
+        content = getattr(response, "content", None)
+        if content is None:
+            raise LLMEmptyResponseError("LLM response.content 为 None")
+
+        if isinstance(content, list) and len(content) == 0:
+            raise LLMEmptyResponseError("LLM response.content 为空列表")
+
+        if isinstance(content, list):
+            has_text = any(
+                isinstance(b, dict)
+                and b.get("type") == "text"
+                and b.get("text", "").strip()
+                for b in content
+            )
+            has_tool = any(
+                isinstance(b, dict) and b.get("type") == "tool_use"
+                for b in content
+            )
+            if not has_text and not has_tool:
+                raise LLMEmptyResponseError(
+                    f"LLM 响应无有效内容（{len(content)} blocks，无文本或工具调用）"
+                )
+
+    @staticmethod
+    def _is_retryable_error(exc: Exception) -> bool:
+        """判断异常是否为可重试的瞬时错误。
+
+        Permanent（直接 FAILED）：
+            - 认证/权限错误 (401, 403)
+            - 请求格式错误 (400, 422)
+            - 自定义 PermanentLLMError
+
+        Transient（可重试）：
+            - 限流 (429)
+            - 服务端错误 (500, 502, 503, 504)
+            - 超时、连接中断
+            - LLMEmptyResponseError
+        """
+        from agentpal.agents.errors import SubAgentError
+
+        # 自定义错误 → 读 retryable 属性
+        if isinstance(exc, SubAgentError):
+            return exc.retryable
+
+        # OpenAI SDK 错误
+        try:
+            import openai  # noqa: PLC0415
+
+            if isinstance(exc, (openai.AuthenticationError, openai.PermissionDeniedError)):
+                return False
+            if isinstance(exc, openai.BadRequestError):
+                return False
+            if isinstance(exc, (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError)):
+                return True
+        except ImportError:
+            pass
+
+        # HTTP status_code
+        status = getattr(exc, "status_code", None)
+        if status is not None:
+            if status in {400, 401, 403, 404, 422}:
+                return False
+            if status in {429, 500, 502, 503, 504}:
+                return True
+
+        # Python 内置瞬时错误
+        if isinstance(exc, (ConnectionError, TimeoutError, asyncio.TimeoutError, OSError)):
+            return True
+
+        # 兜底：视为可重试（由 max_retries 兜底上限）
+        return True
 
     # ── Agent 间通信 ──────────────────────────────────────
 
