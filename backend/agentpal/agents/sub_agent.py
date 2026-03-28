@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -134,6 +135,14 @@ class SubAgent(BaseAgent):
         response = None
         loop_exhausted = False  # 标记是否因轮次耗尽退出
 
+        # 计算 tools_schema（循环外只需一次）
+        tools_schema = toolkit.get_json_schemas() if toolkit else None
+        tool_count = len(tools_schema) if tools_schema else 0
+        logger.debug(
+            f"SubAgent [{self.session_id}] Toolkit: "
+            f"exists={toolkit is not None}, tools={tool_count}"
+        )
+
         for round_idx in range(self._max_tool_rounds):
             # 每轮开始前检查消息
             incoming = await self._check_incoming_messages()
@@ -146,7 +155,7 @@ class SubAgent(BaseAgent):
                     messages.append({"role": "user", "content": inject})
                     self._log("incoming_message", msg)
 
-            tools_schema = toolkit.get_json_schemas() if toolkit else None
+            # tools_schema 已在循环外计算，无需重复
             model = _build_model(self._model_config)
 
             # 释放 DB 写锁
@@ -156,14 +165,21 @@ class SubAgent(BaseAgent):
                 except Exception:
                     pass
 
+            logger.debug(
+                f"SubAgent [{self.session_id}] LLM call: round={round_idx}, tools={tool_count}"
+            )
+
             response = await model(messages, tools=tools_schema)
 
-            # 记录响应
-            response_content = []
+            # 记录响应 block 类型统计
+            block_types = {}
             for block in (response.content or []):
                 if isinstance(block, dict):
-                    response_content.append(block)
-            self._log("llm_response", {"round": round_idx, "content": response_content})
+                    bt = block.get("type", "unknown")
+                    block_types[bt] = block_types.get(bt, 0) + 1
+
+            self._log("llm_response", {"round": round_idx, "block_types": block_types})
+            logger.debug(f"SubAgent [{self.session_id}] LLM response: round={round_idx}, blocks={block_types}")
 
             tool_calls = [
                 b for b in (response.content or [])
@@ -171,6 +187,48 @@ class SubAgent(BaseAgent):
             ]
 
             if not tool_calls:
+                # 没有 tool_use，检查是否有 thinking 但没有 text（边缘情况）
+                thinking_blocks = [
+                    b for b in (response.content or [])
+                    if isinstance(b, dict) and b.get("type") == "thinking"
+                ]
+                thinking_content = "".join(
+                    b.get("thinking", "") for b in thinking_blocks if isinstance(b, dict)
+                )
+
+                # 检测是否在 thinking 中模拟了工具调用（如 <function=browser_use>）
+                simulated_tool_pattern = r"<function=([a-zA-Z_][a-zA-Z0-9_]*)>"
+                simulated_tools = re.findall(simulated_tool_pattern, thinking_content)
+
+                if simulated_tools:
+                    self._log("simulated_tools_detected", {
+                        "tools": simulated_tools,
+                        "thinking_preview": thinking_content[:500],
+                    })
+                    logger.warning(
+                        f"SubAgent [{self.session_id}] 检测到 thinking 中模拟了工具调用: {simulated_tools}，"
+                        f"强制要求模型使用真实工具调用"
+                    )
+
+                    # 强制要求模型使用真实工具调用
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "你刚才在 thinking 中模拟了工具调用，但没有实际执行。"
+                            "如果你需要使用工具，请通过实际的 tool_use 调用来执行，"
+                            "不要在 thinking 中模拟。现在请继续执行任务。"
+                        ),
+                    })
+                    # 继续下一轮，不退出
+                    continue
+
+                if thinking_blocks and not any(
+                    b.get("type") == "text" for b in (response.content or [])
+                ):
+                    logger.warning(
+                        f"SubAgent [{self.session_id}] 模型返回 thinking 但无 tool_use 或 text，"
+                        f"可能模型未正确调用工具"
+                    )
                 break  # 有文字回复，正常退出
 
             # 最后一轮仍有工具调用，标记需要强制文字总结
@@ -336,7 +394,7 @@ class SubAgent(BaseAgent):
     # ── 工具集构建 ────────────────────────────────────────
 
     async def _build_toolkit(self) -> Any:
-        """构建工具集（复用主 Agent 的全局工具配置 + Skill 工具）。"""
+        """构建工具集（复用主 Agent 的全局工具配置 + Skill 工具 + SubAgent 专用工具）。"""
         if self._db is None:
             return None
         try:
@@ -345,17 +403,19 @@ class SubAgent(BaseAgent):
             await ensure_tool_configs(self._db)
             enabled = await get_enabled_tools(self._db)
 
-            # 加载 skill 工具（引用关系，与主 Agent 共享）
+            # 加载 skill 工具
             skill_tools: list[dict] = []
             try:
                 from agentpal.skills.manager import SkillManager
                 mgr = SkillManager(self._db)
                 skill_tools = await mgr.get_all_skill_tools()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"SubAgent [{self.session_id}] 加载 Skill 工具失败: {e}")
 
-            return build_toolkit(enabled, extra_tools=skill_tools or None)
-        except Exception:
+            # SubAgent 上下文：包含 produce_artifact 等 subagent_only 工具
+            return build_toolkit(enabled, extra_tools=skill_tools or None, is_subagent=True)
+        except Exception as e:
+            logger.error(f"SubAgent [{self.session_id}] _build_toolkit 异常: {e}")
             return None
 
     # ── 内部方法 ──────────────────────────────────────────

@@ -34,13 +34,28 @@ DEFAULT_SUB_AGENTS: list[dict[str, Any]] = [
             "- 重要结论放前面（倒金字塔结构）\n"
             "- 注明信息来源和搜索日期\n"
             "- 如果信息不足或存在不确定性，**明确说明**，不要编造\n\n"
+            "### 4. 保存产出物（必须执行）\n"
+            "**任务完成前，必须调用 `produce_artifact` 工具保存最终报告：**\n"
+            "```\n"
+            "produce_artifact(\n"
+            "    name=\"调研报告.md\",\n"
+            "    content=\"<完整的 Markdown 报告内容>\",\n"
+            "    artifact_type=\"text\",\n"
+            "    mime_type=\"text/markdown\"\n"
+            ")\n"
+            "```\n"
+            "**注意：**\n"
+            "- 如果任务说明中指定了 artifact 的类型或格式，以任务说明为准\n"
+            "- 例如任务要求保存为 JSON 或特定文件名，按要求执行\n"
+            "- 这确保你的报告被持久化保存，用户可以在 /tasks 页面查看和下载\n\n"
             "## 工作原则\n"
             "- **宁可多搜几次，不要信息不足就下结论**\n"
             "- 质量 > 速度：深入调研比快速敷衍更有价值\n"
-            "- 每次调研结束，回顾一下：有没有遗漏的角度？结论是否站得住脚？"
+            "- 每次调研结束，回顾一下：有没有遗漏的角度？结论是否站得住脚？\n"
+            "- **最后一步必须是 `produce_artifact`**，确保成果被保存"
         ),
         "accepted_task_types": ["research", "summarize", "analyze", "report", "investigate", "compare"],
-        "max_tool_rounds": 12,
+        "max_tool_rounds": 15,
         "timeout_seconds": 600,
     },
     {
@@ -149,13 +164,27 @@ class SubAgentRegistry:
         self._db = db
 
     async def ensure_defaults(self) -> None:
-        """确保默认 SubAgent 角色存在（幂等）。"""
+        """确保默认 SubAgent 角色存在且配置为最新版本（幂等）。
+
+        - 不存在：创建
+        - 已存在但配置不同：更新 role_prompt 和 max_tool_rounds（保持其他用户配置不变）
+        """
         for defn in DEFAULT_SUB_AGENTS:
             existing = await self._db.get(SubAgentDefinition, defn["name"])
             if existing is None:
                 record = SubAgentDefinition(**defn)
                 self._db.add(record)
                 logger.info(f"创建默认 SubAgent 定义: {defn['name']}")
+            else:
+                # 更新 role_prompt
+                if existing.role_prompt != defn.get("role_prompt"):
+                    existing.role_prompt = defn.get("role_prompt", "")
+                    logger.info(f"更新默认 SubAgent role_prompt: {defn['name']}")
+                # 更新 max_tool_rounds
+                default_rounds = defn.get("max_tool_rounds", 8)
+                if existing.max_tool_rounds != default_rounds:
+                    existing.max_tool_rounds = default_rounds
+                    logger.info(f"更新默认 SubAgent max_tool_rounds: {defn['name']} -> {default_rounds}")
         await self._db.flush()
 
     async def list_agents(self) -> list[dict[str, Any]]:

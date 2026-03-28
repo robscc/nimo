@@ -134,6 +134,9 @@ def _create_reme_light(settings: Any, **kwargs: Any) -> BaseMemory:
         or getattr(settings, "memory_reme_light_working_dir", ".reme")
     )
 
+    # 获取 db 参数（用于双写持久化）
+    db = kwargs.get("db")
+
     # LLM key 回退
     llm_api_key = (
         kwargs.get("reme_light_llm_api_key")
@@ -177,6 +180,7 @@ def _create_reme_light(settings: Any, **kwargs: Any) -> BaseMemory:
 
     return ReMeLightMemory(
         working_dir=working_dir,
+        db=db,
         llm_api_key=llm_api_key,
         llm_base_url=llm_base_url,
         embedding_api_key=embedding_api_key,
