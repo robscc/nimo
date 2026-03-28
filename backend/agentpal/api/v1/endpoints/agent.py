@@ -77,6 +77,7 @@ class TaskStatusResponse(BaseModel):
     error: str | None
     agent_name: str | None = None
     task_type: str | None = None
+    task_prompt: str | None = None
     priority: int = 5
     retry_count: int = 0
     max_retries: int = 3
@@ -89,18 +90,6 @@ class TaskListResponse(BaseModel):
     limit: int
     offset: int
 
-
-class TaskListItem(BaseModel):
-    task_id: str
-    status: str
-    agent_name: str | None
-    task_type: str | None
-    task_prompt: str
-    parent_session_id: str
-    result: str | None
-    error: str | None
-    created_at: str
-    finished_at: str | None
 
 
 @router.post("/chat")
@@ -344,6 +333,7 @@ async def _dispatch_via_zmq(req: DispatchRequest, zmq_manager: Any, db: AsyncSes
         error=task.error,
         agent_name=task.agent_name,
         task_type=task.task_type,
+        task_prompt=task.task_prompt,
         priority=task.priority,
         retry_count=task.retry_count,
         max_retries=task.max_retries,
@@ -388,6 +378,7 @@ async def _dispatch_direct(req: DispatchRequest, db: AsyncSession) -> TaskStatus
             error=getattr(task, "error", None),
             agent_name=getattr(task, "agent_name", None),
             task_type=getattr(task, "task_type", None),
+            task_prompt=getattr(task, "task_prompt", None),
             priority=getattr(task, "priority", 5),
             retry_count=getattr(task, "retry_count", 0),
             max_retries=getattr(task, "max_retries", 3),
@@ -411,6 +402,7 @@ async def _dispatch_direct(req: DispatchRequest, db: AsyncSession) -> TaskStatus
             error=task.error,
             agent_name=task.agent_name,
             task_type=task.task_type,
+            task_prompt=task.task_prompt,
             priority=task.priority,
             retry_count=task.retry_count,
             max_retries=task.max_retries,
@@ -432,6 +424,7 @@ async def get_task_status(task_id: str, db: AsyncSession = Depends(get_db)):
         error=task.error,
         agent_name=task.agent_name,
         task_type=task.task_type,
+        task_prompt=task.task_prompt,
         priority=task.priority,
         retry_count=task.retry_count,
         max_retries=task.max_retries,
@@ -490,6 +483,7 @@ async def list_tasks(
             error=t.error,
             agent_name=t.agent_name,
             task_type=t.task_type,
+            task_prompt=t.task_prompt,
             priority=t.priority,
             retry_count=t.retry_count,
             max_retries=t.max_retries,

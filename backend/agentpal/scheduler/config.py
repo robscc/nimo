@@ -28,3 +28,6 @@ class SchedulerConfig:
     process_start_timeout: int = 15
     heartbeat_interval: int = 10
     reaper_interval: int = 60
+    use_subprocess: bool = True  # False = 旧 in-process daemon 模式（方便测试）
+    scheduler_start_timeout: int = 30  # Scheduler 进程启动超时（秒）
+    cron_auto_restart: bool = True  # Cron 进程崩溃后是否自动重启

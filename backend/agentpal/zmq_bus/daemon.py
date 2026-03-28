@@ -20,7 +20,7 @@ import zmq
 import zmq.asyncio
 from loguru import logger
 
-from agentpal.zmq_bus.protocol import Envelope
+from agentpal.zmq_bus.protocol import Envelope, MessageType
 
 
 class AgentDaemon:
@@ -228,6 +228,12 @@ class AgentDaemon:
 
                 self.last_active_at = time.time()
 
+                # 拦截 CONFIG_RELOAD 消息 — 在基类层统一处理
+                if envelope.msg_type == MessageType.CONFIG_RELOAD:
+                    self._handle_config_reload()
+                    self._task_queue.task_done()
+                    continue
+
                 try:
                     await self.handle_message(envelope)
                 except Exception as e:
@@ -244,3 +250,13 @@ class AgentDaemon:
             except Exception as e:
                 if self._running:
                     logger.error(f"AgentDaemon [{self.identity}] work_loop 异常: {e}")
+
+    def _handle_config_reload(self) -> None:
+        """处理 CONFIG_RELOAD 消息：清除 Settings LRU 缓存。"""
+        try:
+            from agentpal.config import get_settings
+
+            get_settings.cache_clear()
+            logger.info(f"AgentDaemon [{self.identity}] 已刷新 Settings 缓存 (CONFIG_RELOAD)")
+        except Exception as e:
+            logger.warning(f"AgentDaemon [{self.identity}] CONFIG_RELOAD 处理失败: {e}")

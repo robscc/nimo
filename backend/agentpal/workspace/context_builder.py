@@ -50,6 +50,7 @@ class ContextBuilder:
         enabled_tools: list[str] | None = None,
         skill_prompts: list[dict[str, Any]] | None = None,
         runtime_context: dict[str, Any] | None = None,
+        sub_agent_roster: str | None = None,
     ) -> str:
         """构建完整 system prompt。
 
@@ -58,6 +59,7 @@ class ContextBuilder:
             enabled_tools:   当前已启用工具名称列表（可选，用于提示）
             skill_prompts:   prompt 型技能列表（可选），每项包含 name, content
             runtime_context: 运行时环境信息（session_id、OS、时区等）
+            sub_agent_roster: 动态 SubAgent roster（可选，由 SubAgentRegistry 生成）
 
         Returns:
             拼接好的 system prompt 字符串
@@ -91,6 +93,10 @@ class ContextBuilder:
             if len(agents_text) > self.MAX_AGENTS_CHARS:
                 agents_text = agents_text[: self.MAX_AGENTS_CHARS] + "\n\n[...已截断...]"
             sections.append(f"# Agent Configuration\n\n{agents_text}")
+
+        # 4.5 动态 SubAgent roster
+        if sub_agent_roster and sub_agent_roster.strip():
+            sections.append(f"# SubAgent Roster\n\n{sub_agent_roster.strip()}")
 
         # 5. 长期记忆（保留最新部分）
         if ws.memory.strip():

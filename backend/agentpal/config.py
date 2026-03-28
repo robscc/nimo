@@ -155,9 +155,9 @@ class Settings(BaseSettings):
     async_result_max_inject: int = 5      # system prompt 注入最近 N 条完成任务的完整结果
     async_result_max_chars: int = 500     # 每条结果最大字符数
 
-    # ── ZMQ 消息总线 ─────────────────────────────────────
-    zmq_router_addr: str = "inproc://agent-router"   # ROUTER socket 地址
-    zmq_events_addr: str = "inproc://agent-events"   # PUB/SUB 事件 broker 地址
+    # ── ZMQ 消息总线（已废弃，使用 scheduler_* 系列配置）───
+    zmq_router_addr: str = "ipc:///tmp/agentpal-router.sock"   # ROUTER socket 地址
+    zmq_events_addr: str = "ipc:///tmp/agentpal-events.sock"   # PUB/SUB 事件 broker 地址
     zmq_pa_idle_timeout: int = 1800   # PA daemon 空闲回收超时（秒），默认 30 分钟
     zmq_sub_idle_timeout: int = 300   # SubAgent daemon 空闲回收超时（秒），默认 5 分钟
 

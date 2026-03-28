@@ -49,6 +49,43 @@ class PersonalAssistant(BaseAgent):
         self._context_builder = ContextBuilder()
         self._memory_writer = MemoryWriter()
 
+    # ── @mention 确定性拦截 ─────────────────────────────────
+
+    async def _extract_mention_hint(self, user_input: str) -> str | None:
+        """检测 @mention 模式，返回 dispatch hint 或 None。
+
+        当用户消息以 @<display_name|name> 开头时，查找匹配的已启用 SubAgent，
+        生成强制派遣指令注入 system prompt 末尾，确保 LLM 调用 dispatch_sub_agent。
+        """
+        import re
+
+        m = re.match(r"^@(\S+)\s*(.*)", user_input, re.DOTALL)
+        if not m or self._db is None:
+            return None
+        mention_name = m.group(1)
+
+        try:
+            from agentpal.agents.registry import SubAgentRegistry
+
+            registry = SubAgentRegistry(self._db)
+            agents = await registry.get_enabled_agents()
+            for agent in agents:
+                if mention_name in (agent.display_name, agent.name):
+                    return (
+                        f"[DISPATCH DIRECTIVE] The user explicitly addressed "
+                        f"@{agent.display_name} ({agent.name}). "
+                        f"You MUST call `dispatch_sub_agent("
+                        f'agent_name="{agent.name}", '
+                        f"task_prompt=<the user's request>, "
+                        f'parent_session_id="{self.session_id}", '
+                        f"blocking=false)` "
+                        f"to delegate this task. Do NOT answer the task yourself. "
+                        f"Do NOT use blocking=true."
+                    )
+        except Exception:
+            pass
+        return None
+
     # ── System Prompt 动态构建 ────────────────────────────
 
     async def _build_system_prompt(
@@ -75,9 +112,21 @@ class PersonalAssistant(BaseAgent):
         except Exception:
             pass
 
+        # 动态生成 SubAgent roster
+        roster_prompt = ""
+        if self._db is not None:
+            try:
+                from agentpal.agents.registry import SubAgentRegistry
+
+                registry = SubAgentRegistry(self._db)
+                roster_prompt = await registry.build_roster_prompt()
+            except Exception:
+                pass
+
         return self._context_builder.build_system_prompt(
             ws, enabled_tool_names, skill_prompts=skill_prompts,
             runtime_context=runtime_context,
+            sub_agent_roster=roster_prompt,
         )
 
     # ── 核心对话（含工具调用循环）────────────────────────
@@ -96,6 +145,11 @@ class PersonalAssistant(BaseAgent):
         system_prompt = await self._build_system_prompt(
             enabled_tool_names or None, skill_prompts=skill_prompts or None,
         )
+
+        # @mention 确定性路由
+        mention_hint = await self._extract_mention_hint(user_input)
+        if mention_hint:
+            system_prompt += f"\n\n---\n\n{mention_hint}"
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
@@ -215,6 +269,11 @@ class PersonalAssistant(BaseAgent):
             system_prompt = await self._build_system_prompt(
                 enabled_tool_names or None, skill_prompts=skill_prompts or None,
             )
+
+            # @mention 确定性路由
+            mention_hint = await self._extract_mention_hint(user_input)
+            if mention_hint:
+                system_prompt += f"\n\n---\n\n{mention_hint}"
 
             messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
             # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
@@ -536,7 +595,7 @@ class PersonalAssistant(BaseAgent):
             max_retries=max_retries,
         )
         db.add(task)
-        await db.flush()
+        await db.commit()
 
         # 将需要传入后台任务的参数提前快照，避免闭包引用请求级 db
         _sub_session_id = sub_session_id
@@ -577,7 +636,17 @@ class PersonalAssistant(BaseAgent):
                 await sub_agent.run(task_prompt)
                 await bg_db.commit()
 
-        asyncio.create_task(_run_sub_agent())
+        task_handle = asyncio.create_task(_run_sub_agent())
+
+        def _on_bg_done(fut: asyncio.Task) -> None:  # type: ignore[type-arg]
+            from loguru import logger as _bg_logger
+
+            if fut.cancelled():
+                _bg_logger.warning(f"SubAgent bg task {_task_id} was cancelled")
+            elif exc := fut.exception():
+                _bg_logger.error(f"SubAgent bg task {_task_id} unhandled error: {exc}")
+
+        task_handle.add_done_callback(_on_bg_done)
         return task
 
     # ── Tool Guard 辅助 ────────────────────────────────────

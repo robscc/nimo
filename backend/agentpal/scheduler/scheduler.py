@@ -7,6 +7,7 @@
 - 管理 ZMQ broker（ROUTER + XPUB/XSUB）
 - 管理 Agent 子进程生命周期（spawn / monitor / reap）
 - 消息路由（API → Agent、Agent → Agent）
+- 拦截 SubAgent AGENT_RESPONSE，在主进程内投递结果（写 DB + 推 SSE）
 - 空闲进程回收
 - 状态查询（Dashboard API 用）
 """
@@ -46,7 +47,11 @@ class ManagedProcess:
 
 
 class AgentScheduler:
-    """Agent 进程调度器。
+    """Agent 进程调度器（旧版 inline 模式）。
+
+    .. deprecated::
+        使用 ``SchedulerClient`` + ``SchedulerBroker`` 独立进程模式替代。
+        此类仍可用于测试（inproc 模式）或向后兼容场景。
 
     在 FastAPI lifespan 中 start/stop，通过 app.state 供 endpoint 访问。
     兼容 AgentDaemonManager 的接口，实现平滑迁移。
@@ -81,6 +86,9 @@ class AgentScheduler:
 
         # 启动时间（统计用）
         self._started_at: float = 0.0
+
+        # ── 子进程 REGISTER 等待 ──
+        self._register_events: dict[str, asyncio.Event] = {}
 
         # ── 兼容旧 AgentDaemonManager 的 daemon 注册表 ──
         # 在 inproc 模式下仍然使用 daemon 直接管理
@@ -145,7 +153,8 @@ class AgentScheduler:
 
         logger.info(
             f"AgentScheduler 已启动 "
-            f"(router={self._config.router_addr}, events={self._config.events_addr})"
+            f"(router={self._config.router_addr}, events={self._config.events_addr}, "
+            f"use_subprocess={self._config.use_subprocess})"
         )
 
     async def stop(self) -> None:
@@ -170,6 +179,9 @@ class AgentScheduler:
         for identity, _managed in list(self._processes.items()):
             await self._stop_process(identity, timeout=5.0)
         self._processes.clear()
+
+        # 清理 register events
+        self._register_events.clear()
 
         # 取消后台任务
         for task in (
@@ -257,8 +269,49 @@ class AgentScheduler:
         role_prompt: str = "",
         max_tool_rounds: int = 8,
     ) -> AgentProcessInfo:
-        """启动 SubAgent 并派发任务。"""
+        """启动 SubAgent 并派发任务。
+
+        根据 use_subprocess 配置选择子进程模式或 inproc daemon 模式。
+        """
         process_id = f"sub:{agent_name}:{task_id}"
+
+        if self._config.use_subprocess and self._use_ipc:
+            return await self._dispatch_sub_subprocess(
+                process_id=process_id,
+                task_id=task_id,
+                task_prompt=task_prompt,
+                parent_session_id=parent_session_id,
+                agent_name=agent_name,
+                model_config=model_config,
+                role_prompt=role_prompt,
+                max_tool_rounds=max_tool_rounds,
+            )
+        else:
+            return await self._dispatch_sub_inproc(
+                process_id=process_id,
+                task_id=task_id,
+                task_prompt=task_prompt,
+                parent_session_id=parent_session_id,
+                agent_name=agent_name,
+                model_config=model_config,
+                role_prompt=role_prompt,
+                max_tool_rounds=max_tool_rounds,
+            )
+
+    async def _dispatch_sub_subprocess(
+        self,
+        process_id: str,
+        task_id: str,
+        task_prompt: str,
+        parent_session_id: str,
+        agent_name: str = "default",
+        model_config: dict | None = None,
+        role_prompt: str = "",
+        max_tool_rounds: int = 8,
+    ) -> AgentProcessInfo:
+        """通过独立子进程启动 SubAgent。"""
+        from agentpal.config import get_settings
+        from agentpal.scheduler.worker import worker_main
 
         info = AgentProcessInfo(
             process_id=process_id,
@@ -268,8 +321,92 @@ class AgentScheduler:
             agent_name=agent_name,
             state=AgentState.PENDING,
         )
+        info.transition_to(AgentState.STARTING)
 
-        # 使用 daemon 模式
+        # 准备子进程参数（都必须可 pickle）
+        settings = get_settings()
+        config_dict = settings.model_dump()
+
+        process = self._mp_ctx.Process(
+            target=worker_main,
+            kwargs={
+                "identity": process_id,
+                "agent_type": "sub_agent",
+                "router_addr": self._config.router_addr,
+                "events_addr": self._xsub_addr,
+                "config_dict": config_dict,
+                "agent_name": agent_name,
+                "task_id": task_id,
+                "model_config": model_config or {},
+                "role_prompt": role_prompt,
+                "max_tool_rounds": max_tool_rounds,
+                "parent_session_id": parent_session_id,
+            },
+            name=f"sub-agent-{agent_name}-{task_id[:8]}",
+            daemon=True,
+        )
+
+        # 注册等待事件
+        register_event = asyncio.Event()
+        self._register_events[process_id] = register_event
+
+        # 启动子进程
+        process.start()
+        info.os_pid = process.pid
+        logger.info(f"SubAgent 子进程已启动: {process_id} pid={process.pid}")
+
+        # 将 ManagedProcess 注册到进程表
+        self._processes[process_id] = ManagedProcess(process=process, info=info)
+
+        # 等待 AGENT_REGISTER（子进程连接确认）
+        try:
+            await self._wait_for_register(process_id, timeout=self._config.process_start_timeout)
+        except TimeoutError:
+            logger.warning(
+                f"SubAgent 子进程注册超时: {process_id}，进程可能仍在启动中"
+            )
+
+        # 发送 DISPATCH_TASK 消息
+        envelope = Envelope(
+            msg_type=MessageType.DISPATCH_TASK,
+            source=f"pa:{parent_session_id}",
+            target=process_id,
+            session_id=parent_session_id,
+            payload={
+                "task_id": task_id,
+                "task_prompt": task_prompt,
+                "parent_session_id": parent_session_id,
+                "model_config": model_config or {},
+                "role_prompt": role_prompt,
+                "max_tool_rounds": max_tool_rounds,
+            },
+        )
+        await self._send_to_daemon(process_id, envelope)
+
+        logger.info(f"SubAgent 子进程已派发任务: {process_id}")
+        return info
+
+    async def _dispatch_sub_inproc(
+        self,
+        process_id: str,
+        task_id: str,
+        task_prompt: str,
+        parent_session_id: str,
+        agent_name: str = "default",
+        model_config: dict | None = None,
+        role_prompt: str = "",
+        max_tool_rounds: int = 8,
+    ) -> AgentProcessInfo:
+        """使用 inproc daemon 模式启动 SubAgent（fallback）。"""
+        info = AgentProcessInfo(
+            process_id=process_id,
+            agent_type="sub_agent",
+            session_id=parent_session_id,
+            task_id=task_id,
+            agent_name=agent_name,
+            state=AgentState.PENDING,
+        )
+
         await self.create_sub_daemon(
             agent_name=agent_name,
             task_id=task_id,
@@ -289,6 +426,30 @@ class AgentScheduler:
 
         return info
 
+    async def _wait_for_register(
+        self,
+        identity: str,
+        timeout: float = 15.0,
+    ) -> None:
+        """等待子进程发送 AGENT_REGISTER。
+
+        Raises:
+            TimeoutError: 超时未收到注册消息
+        """
+        event = self._register_events.get(identity)
+        if event is None:
+            return
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"SubAgent {identity} 注册超时（{timeout}s）"
+            )
+        finally:
+            # 清理事件
+            self._register_events.pop(identity, None)
+
     async def create_sub_daemon(
         self,
         agent_name: str,
@@ -299,7 +460,7 @@ class AgentScheduler:
         role_prompt: str = "",
         max_tool_rounds: int = 8,
     ) -> Any:
-        """创建并启动 SubAgent daemon（兼容旧 API）。"""
+        """创建并启动 SubAgent daemon（兼容旧 API / inproc fallback）。"""
         from agentpal.zmq_bus.sub_daemon import SubAgentDaemon
 
         identity = f"sub:{agent_name}:{task_id}"
@@ -310,6 +471,16 @@ class AgentScheduler:
         )
         await daemon.start(self._ctx, self._config.router_addr, self._xsub_addr)
         self._sub_daemons[identity] = daemon
+
+        # 注册到 _processes，使 /scheduler/agents 可见
+        self._ensure_process_info(
+            process_id=identity,
+            agent_type="sub_agent",
+            state=AgentState.RUNNING,
+            session_id=parent_session_id,
+            task_id=task_id,
+            agent_name=agent_name,
+        )
 
         # 发送 DISPATCH_TASK 消息
         envelope = Envelope(
@@ -416,11 +587,18 @@ class AgentScheduler:
             if identity in self._processes:
                 result.append(self._processes[identity].info)
             else:
+                # 解析 identity = "sub:{agent_name}:{task_id}"
+                parts = identity.split(":", 2)
+                agent_name = parts[1] if len(parts) > 1 else None
+                task_id = parts[2] if len(parts) > 2 else None
                 info = AgentProcessInfo(
                     process_id=identity,
                     agent_type="sub_agent",
                     state=AgentState.RUNNING if daemon.is_running else AgentState.STOPPED,
                     last_active_at=daemon.last_active_at,
+                    session_id=getattr(daemon, "_parent_session_id", None),
+                    task_id=task_id,
+                    agent_name=agent_name,
                 )
                 result.append(info)
 
@@ -577,7 +755,11 @@ class AgentScheduler:
     # ── ROUTER 路由循环 ──────────────────────────────────
 
     async def _router_loop(self) -> None:
-        """ROUTER 接收循环：按 target identity 转发消息。"""
+        """ROUTER 接收循环：按 target identity 转发消息。
+
+        拦截 SubAgent 的 AGENT_RESPONSE（source 以 "sub:" 开头），
+        在主进程中执行结果投递（写 MemoryRecord + 推 SSE）。
+        """
         assert self._router is not None
 
         while self._running:
@@ -611,6 +793,20 @@ class AgentScheduler:
                     await self._handle_dispatch_from_router(envelope)
                     continue
 
+                # AGENT_RESPONSE from SubAgent — 拦截并投递结果到父 Session
+                if envelope.msg_type == MessageType.AGENT_RESPONSE:
+                    source = envelope.source or ""
+                    if source.startswith("sub:"):
+                        # 在主进程中投递结果（写 DB + 推 SSE）
+                        asyncio.create_task(
+                            self._deliver_sub_result(envelope),
+                            name=f"deliver-sub-result-{source}",
+                        )
+                    # 继续转发给 PA daemon（如果有 target）
+                    if target and target != "scheduler":
+                        await self._send_to_daemon(target, envelope)
+                    continue
+
                 # 普通消息：转发到目标
                 await self._send_to_daemon(target, envelope)
 
@@ -624,6 +820,88 @@ class AgentScheduler:
             except Exception as e:
                 if self._running:
                     logger.error(f"ROUTER loop 异常: {e}", exc_info=True)
+
+    async def _deliver_sub_result(self, envelope: Envelope) -> None:
+        """在主进程中将 SubAgent 结果投递到父 Session。
+
+        1. 解析 payload: task_id, status, result, agent_name, parent_session_id
+        2. 仅 status == "done" 且有 result 时执行
+        3. 写 MemoryRecord 到父 Session
+        4. session_event_bus.publish() 推 SSE new_message 事件
+        5. 更新 ProcessInfo last_active_at
+        """
+        payload = envelope.payload
+        task_id = payload.get("task_id", "")
+        status = payload.get("status", "")
+        result = payload.get("result", "")
+        agent_name = payload.get("agent_name", "SubAgent")
+        source = envelope.source or ""
+
+        # 从 envelope 或 ProcessInfo 获取 parent_session_id
+        parent_session_id = envelope.session_id
+        if not parent_session_id and source in self._processes:
+            parent_session_id = self._processes[source].info.session_id
+
+        # 更新 ProcessInfo 活跃时间
+        if source in self._processes:
+            self._processes[source].info.last_active_at = time.time()
+
+        # 仅在任务完成且有结果时投递
+        if status != "done" or not result or not parent_session_id:
+            return
+
+        try:
+            import uuid
+
+            from agentpal.database import AsyncSessionLocal
+            from agentpal.models.memory import MemoryRecord
+            from agentpal.services.session_event_bus import session_event_bus
+
+            display = agent_name or "SubAgent"
+            content = (
+                f"\U0001f4cb SubAgent\u300c{display}\u300d\u4efb\u52a1\u5b8c\u6210\n\n"
+                f"\u4efb\u52a1 ID: {task_id}\n"
+                f"\u7ed3\u679c:\n{result[:4000]}"
+            )
+
+            async with AsyncSessionLocal() as db:
+                record = MemoryRecord(
+                    id=str(uuid.uuid4()),
+                    session_id=parent_session_id,
+                    role="assistant",
+                    content=content,
+                )
+                db.add(record)
+                await db.flush()
+                await db.commit()
+
+                await session_event_bus.publish(
+                    parent_session_id,
+                    {
+                        "type": "new_message",
+                        "message": {
+                            "id": record.id,
+                            "role": "assistant",
+                            "content": content,
+                            "created_at": (
+                                record.created_at.isoformat()
+                                if record.created_at
+                                else None
+                            ),
+                        },
+                    },
+                )
+
+            logger.info(
+                f"SubAgent 结果已投递到 session {parent_session_id} "
+                f"(task={task_id}, agent={agent_name})"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"投递 SubAgent 结果失败: task={task_id} error={e}",
+                exc_info=True,
+            )
 
     async def _handle_agent_register(self, envelope: Envelope) -> None:
         """处理子进程的 AGENT_REGISTER 消息。"""
@@ -642,6 +920,11 @@ class AgentScheduler:
             except ValueError:
                 info.state = AgentState.IDLE
             info.last_active_at = time.time()
+
+        # 唤醒 _wait_for_register
+        register_event = self._register_events.get(source)
+        if register_event is not None:
+            register_event.set()
 
     def _handle_heartbeat(self, envelope: Envelope) -> None:
         """更新 Agent 活跃时间。"""
@@ -665,11 +948,12 @@ class AgentScheduler:
         role_prompt = payload.get("role_prompt", "")
         max_tool_rounds = payload.get("max_tool_rounds", 8)
 
-        await self.create_sub_daemon(
-            agent_name=agent_name,
+        # 使用 dispatch_sub_agent 统一入口（自动选择子进程/inproc）
+        await self.dispatch_sub_agent(
             task_id=task_id,
             task_prompt=task_prompt,
             parent_session_id=parent_session_id,
+            agent_name=agent_name,
             model_config=model_config,
             role_prompt=role_prompt,
             max_tool_rounds=max_tool_rounds,
@@ -731,7 +1015,7 @@ class AgentScheduler:
                         self._processes[pid].info.state = AgentState.STOPPED
                     logger.info(f"回收 PA daemon: session={sid} (空闲超时)")
 
-                # 回收 SubAgent daemons
+                # 回收 SubAgent daemons（inproc 模式）
                 expired_sub = [
                     ident for ident, d in self._sub_daemons.items()
                     if (now - d.last_active_at) > self._config.sub_idle_timeout
@@ -744,6 +1028,30 @@ class AgentScheduler:
                     if ident in self._processes:
                         self._processes[ident].info.state = AgentState.STOPPED
                     logger.info(f"回收 SubAgent daemon: {ident}")
+
+                # 回收 SubAgent 子进程（subprocess 模式）
+                for identity, managed in list(self._processes.items()):
+                    if not identity.startswith("sub:"):
+                        continue
+                    if identity in self._sub_daemons:
+                        # 已由上面的 inproc 回收处理
+                        continue
+                    if managed.info.state in (AgentState.STOPPED, AgentState.FAILED):
+                        continue
+                    # 检查是否是真实子进程（非 DummyProcess）
+                    if isinstance(managed.process, _DummyProcess):
+                        continue
+                    idle_secs = now - managed.info.last_active_at
+                    if idle_secs > self._config.sub_idle_timeout:
+                        logger.info(
+                            f"回收 SubAgent 子进程: {identity} "
+                            f"(空闲 {idle_secs:.0f}s > {self._config.sub_idle_timeout}s)"
+                        )
+                        await self._stop_process(identity, timeout=5.0)
+                    elif not managed.process.is_alive():
+                        # 进程已退出但状态未更新
+                        managed.info.state = AgentState.STOPPED
+                        logger.info(f"SubAgent 子进程已退出: {identity}")
 
                 # 清理已停止的 ProcessInfo（保留一段时间供查询）
                 stale = [

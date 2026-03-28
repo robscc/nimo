@@ -102,6 +102,11 @@ export interface HistoryMessageMeta {
   compressed?: boolean;           // 是否已被压缩
   type?: string;                  // 'context_summary' 表示摘要消息
   compressed_count?: number;      // 被压缩的消息数量
+  card_type?: string;             // 'sub_agent_result' | 'cron_result'
+  agent_name?: string;
+  task_id?: string;
+  job_name?: string;
+  [key: string]: unknown;         // 允许额外字段
 }
 
 export interface HistoryMessage {

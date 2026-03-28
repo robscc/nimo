@@ -43,6 +43,20 @@ class MessageType(StrEnum):
     AGENT_SHUTDOWN = "agent_shutdown"
     AGENT_STATE_CHANGE = "agent_state_change"  # Scheduler → Dashboard SSE
 
+    # Client ↔ Scheduler 控制通信
+    ENSURE_PA = "ensure_pa"              # Client → Scheduler: 请求确保 PA 进程就绪
+    ENSURE_PA_ACK = "ensure_pa_ack"      # Scheduler → Client: PA 就绪确认
+    DISPATCH_SUB = "dispatch_sub"        # Client → Scheduler: 派遣 SubAgent
+    DISPATCH_SUB_ACK = "dispatch_sub_ack"  # Scheduler → Client: SubAgent 派遣确认
+    LIST_AGENTS = "list_agents"          # Client → Scheduler: 查询 Agent 列表
+    LIST_AGENTS_RESP = "list_agents_resp"  # Scheduler → Client: Agent 列表响应
+    GET_STATS = "get_stats"              # Client → Scheduler: 获取统计信息
+    GET_STATS_RESP = "get_stats_resp"    # Scheduler → Client: 统计信息响应
+    STOP_AGENT_REQ = "stop_agent_req"    # Client → Scheduler: 停止指定 Agent
+    STOP_AGENT_RESP = "stop_agent_resp"  # Scheduler → Client: 停止 Agent 响应
+    SCHEDULER_SHUTDOWN = "scheduler_shutdown"  # Client → Scheduler: 关闭 Scheduler 进程
+    CONFIG_RELOAD = "config_reload"      # 广播: 配置重载通知到所有子进程
+
 
 class Envelope(BaseModel):
     """所有 ZMQ 消息的统一信封。
