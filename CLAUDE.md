@@ -24,7 +24,15 @@ agentpal/                       ← 项目根目录（本地路径）
 │   │   │   ├── cron_agent.py          ← 定时任务 Agent（轻量，只加载 SOUL.md + AGENTS.md）
 │   │   │   ├── base.py               ← Agent 基类，共享功能
 │   │   │   ├── registry.py            ← SubAgent 角色注册（CRUD + 任务路由）
-│   │   │   └── message_bus.py         ← Agent 间异步消息总线
+│   │   │   └── message_bus.py         ← Agent 间异步消息总线（DB + ZMQ 混合）
+│   │   ├── scheduler/           ← 多进程 Scheduler 架构（新）
+│   │   │   ├── broker.py              ← SchedulerBroker — 中央调度器（进程管理 + 消息路由）
+│   │   │   ├── client.py             ← SchedulerClient — FastAPI 进程内薄客户端
+│   │   │   ├── worker.py             ← worker_main — Worker 子进程入口
+│   │   │   ├── process.py            ← scheduler_process_main — Scheduler 进程入口
+│   │   │   ├── config.py             ← SchedulerConfig — 地址/超时/策略配置
+│   │   │   ├── state.py              ← AgentState / AgentProcessInfo — 进程状态机
+│   │   │   └── scheduler.py          ← AgentScheduler — 过渡兼容层
 │   │   ├── api/v1/endpoints/   ← agent, tools, session, channel, sub_agents, cron, skills, workspace, config, dashboard, memory, notifications, providers, tasks
 │   │   ├── channels/           ← dingtalk.py, feishu.py, imessage.py
 │   │   ├── memory/             ← base / buffer / sqlite / hybrid / factory / reme_light_adapter
@@ -32,7 +40,7 @@ agentpal/                       ← 项目根目录（本地路径）
 │   │   ├── providers/          ← Provider 管理（manager.py, provider.py, openai_provider.py, retry_model.py）
 │   │   ├── runtimes/           ← SubAgent 运行时抽象（base.py, internal.py, http.py, registry.py）
 │   │   ├── zmq_bus/            ← ZMQ 消息总线（manager.py, protocol.py, daemon.py, pa_daemon.py, sub_daemon.py, cron_daemon.py, event_subscriber.py）
-│   │   ├── cli/                ← 命令行工具（app.py, console.py, process.py, utils.py, commands/）
+│   │   ├── cli/                ← 命令行工具（app.py, commands/start|stop|restart|status）
 │   │   ├── workspace/          ← 工作空间管理（manager.py, context_builder.py, defaults.py, memory_writer.py）
 │   │   ├── services/           ← config_file.py, cron_scheduler.py, notification_bus.py, task_event_bus.py, session_event_bus.py, skill_event_bus.py
 │   │   ├── tools/              ← builtin.py (12个工具), registry.py
@@ -188,6 +196,33 @@ llm:
 - `init_db()` 在 lifespan 里调用，idempotent
 - **重要**：Service 层用 `flush()`，API 层负责 `commit()`。工具执行前需 `commit()` 避免 SQLite 锁
 
+### 12. 多进程 Scheduler 架构（新）
+系统采用 **多进程 + ZMQ 消息总线** 架构，每个 Agent 运行在独立 OS 进程中：
+
+- **SchedulerClient**（`scheduler/client.py`）：FastAPI 进程内薄客户端，通过 ZMQ DEALER 连接 Scheduler 进程
+- **SchedulerBroker**（`scheduler/broker.py`）：独立进程中的中央调度器，管理所有 Worker 进程生命周期
+  - 使用 `multiprocessing.get_context("spawn")` 创建子进程
+  - ROUTER 路由请求，XPUB/XSUB 代理事件
+  - 健康检查 + 空闲回收 + 自动重启
+  - 拦截 SubAgent 结果写入父 Session 记忆
+- **Worker**（`scheduler/worker.py`）：子进程入口，根据 `agent_type` 创建对应 Daemon
+- **AgentState**（`scheduler/state.py`）：进程状态机 `PENDING → STARTING → RUNNING → IDLE → STOPPING → STOPPED → FAILED`
+- **AgentProcessInfo**：每个 Worker 的元数据（PID、类型、状态、时间戳）
+
+进程模型：
+| Worker 类型 | 身份标识 | 生命周期 | Daemon 类 |
+|------------|---------|---------|-----------|
+| PA Worker | `pa:{session_id}` | 按 Session 按需创建，空闲回收 | `PersonalAssistantDaemon` |
+| Sub Worker | `sub:{agent_name}:{task_id}` | 按 Task 创建，完成后回收 | `SubAgentDaemon` |
+| Cron Worker | `cron:scheduler` | 全局单例，随 Scheduler 启动 | `CronDaemon` |
+
+ZMQ 消息协议（`zmq_bus/protocol.py`）：
+- `Envelope`：统一消息封装（`msg_id`, `msg_type`, `source`, `target`, `payload`），`msgpack` 序列化
+- 控制消息：`ENSURE_PA`, `DISPATCH_SUB`, `SCHEDULER_SHUTDOWN`, `CONFIG_RELOAD`
+- 生命周期：`AGENT_REGISTER`, `AGENT_HEARTBEAT`, `AGENT_SHUTDOWN`, `AGENT_STATE_CHANGE`
+- 工作消息：`CHAT_REQUEST`, `DISPATCH_TASK`, `CRON_TRIGGER`
+- Agent 通信：`AGENT_REQUEST`, `AGENT_RESPONSE`, `AGENT_NOTIFY`, `AGENT_BROADCAST`
+
 ---
 
 ## API 路由
@@ -299,6 +334,117 @@ POST   /api/v1/channels/feishu/webhook            ← 飞书 Webhook
 
 GET    /health
 ```
+
+---
+
+## Agent 数据流
+
+系统包含 3 种 Agent 类型，各自运行在独立进程中，通过 ZMQ + MessageBus 协作。
+
+### PA (PersonalAssistant) 对话流
+
+```
+用户消息 → FastAPI → SchedulerClient
+    │  CHAT_REQUEST (ZMQ)
+    ▼
+PA Worker (pa:{session_id})
+    │
+    ├─ 1. _remember_user() → 存储到 Memory
+    ├─ 2. _build_system_prompt() → 动态组装
+    │     ├─ WorkspaceManager 上下文 (SOUL.md / AGENTS.md)
+    │     ├─ SubAgentRegistry.build_roster_prompt() → 可用角色花名册
+    │     ├─ _build_active_toolkit() → 启用工具列表 (Session 级覆盖)
+    │     ├─ _load_prompt_skills() → Prompt 技能注入
+    │     └─ _extract_mention_hint() → @mention 强制派遣指令
+    ├─ 3. _get_history_with_meta(limit=20) → 压缩感知历史重建
+    │     (过滤 compressed=true，保留 context_summary)
+    ├─ 4. LLM 工具循环 (MAX_TOOL_ROUNDS=32)
+    │     ├─ _build_model() → 实例化 OpenAIChatModel
+    │     ├─ 解析 tool_calls (OpenAI 格式)
+    │     ├─ ToolGuardManager 安全检查 (流式模式等待确认)
+    │     ├─ _run_tool() → commit DB + 执行 + 记录日志
+    │     └─ 追加 tool result → 继续循环
+    ├─ 5. reply_stream() → SSE 事件流
+    │     (thinking_delta / text_delta / tool_start / tool_done /
+    │      tool_guard_request / tool_guard_resolved / file / done / error)
+    ├─ 6. _remember_assistant() → 存储回复
+    ├─ 7. _record_turn_usage() → LLMCallLog + Token 统计
+    └─ 8. MemoryWriter.maybe_flush() → 记忆压缩 (超阈值时)
+```
+
+### SubAgent 任务委派流
+
+```
+PA 调用 dispatch_sub_agent 工具
+    │  (或 @mention 触发 _extract_mention_hint → 强制派遣)
+    │
+    ├─ 路由: agent_name 直接指定 (优先级最高)
+    │        或 task_type → SubAgentRegistry.find_agent_for_task()
+    │
+    ▼
+PA → SchedulerBroker (DISPATCH_SUB) → spawn 新 Worker 进程
+    │
+    ▼
+Sub Worker (sub:{agent_name}:{task_id})
+    │
+    ├─ 1. 加载 SubAgentTask + SubAgentDefinition
+    ├─ 2. 创建隔离上下文
+    │     ├─ session_id = "sub:{parent_session}:{task_id}"
+    │     ├─ 独立 BufferMemory (不污染主对话)
+    │     ├─ 独立 AsyncSession (避免 SQLite 锁)
+    │     └─ 独立模型配置 (get_model_config + fallback)
+    ├─ 3. _check_incoming_messages() → MessageBus 待处理消息
+    ├─ 4. reply() → LLM 工具循环
+    │     ├─ 每轮检查 MessageBus 新消息 → 注入上下文
+    │     ├─ 执行工具 → _log() 记录 execution_log
+    │     ├─ _emit_progress() → task_event_bus 实时推送
+    │     └─ 超出轮次 → 强制 text-only 摘要调用
+    ├─ 5. produce_artifact() → TaskArtifact 持久化 (可选)
+    ├─ 6. _update_status(DONE/FAILED)
+    │     ├─ 写入 execution_log + result 到 DB
+    │     ├─ task_event_bus.emit() → SSE 推送
+    │     └─ notification_bus → WebSocket 通知
+    ├─ 7. 失败处理: retry_count < max → asyncio.create_task(_retry) 指数退避
+    └─ 8. AGENT_RESPONSE → SchedulerBroker
+              ├─ 写入父 Session Memory (任务完成摘要)
+              └─ 发送 SSE 任务完成卡片到前端
+```
+
+### CronAgent 定时任务流
+
+```
+CronDaemon (cron:scheduler) — 全局单例 Worker
+    │  后台循环: 每 30 秒 get_due_jobs()
+    │  (也支持 API CRON_TRIGGER 手动触发)
+    ▼
+发现到期任务
+    │
+    ├─ 1. CronManager.create_execution() → CronJobExecution (RUNNING)
+    ├─ 2. CronManager.mark_job_executed() → 更新 last_run_at + next_run_at
+    ├─ 3. 实例化 CronAgent
+    │     ├─ _build_cron_system_prompt()
+    │     │   ├─ 轻量模式: SOUL.md + AGENTS.md (默认)
+    │     │   └─ 心跳模式: full_context=True → ContextBuilder 完整上下文
+    │     └─ _build_toolkit() → 启用工具
+    ├─ 4. reply() → LLM 工具循环
+    │     ├─ 执行工具 → _log() 记录到 execution_log
+    │     └─ 返回最终结果文本
+    ├─ 5. CronManager.finish_execution(DONE/FAILED)
+    │     └─ 写入 result + execution_log + finished_at
+    └─ 6. 通知 PA Session
+          ├─ MessageBus.send(NOTIFY) → pa:{session_id}
+          ├─ ZMQ AGENT_NOTIFY → PA Daemon
+          └─ session_event_bus → SSE 推送到前端
+```
+
+### Agent 间通信 (MessageBus)
+
+`MessageBus`（`agents/message_bus.py`）采用 **DB 持久化 + ZMQ 实时投递** 混合模式：
+
+- **消息生命周期**：`PENDING → DELIVERED → PROCESSED`
+- **消息模式**：`request`（请求等待响应）/ `response`（回复）/ `notify`（单向通知）/ `broadcast`（广播）
+- **身份解析**：`pa:{session_id}` / `sub:{name}:{task_id}` / `cron:{name}` — 自动路由到对应 Daemon
+- **DB 审计**：所有消息持久化到 `agent_messages` 表，ZMQ 仅用于实时投递加速
 
 ---
 

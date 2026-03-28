@@ -29,40 +29,68 @@
 ## 🏗️ 架构概览
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                     消息渠道层                             │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐               │
-│  │ DingTalk │  │  Feishu  │  │ iMessage │  ...           │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘               │
-└───────┼──────────────┼─────────────┼─────────────────────┘
-        │              │             │
-┌───────▼──────────────▼─────────────▼─────────────────────┐
-│                    FastAPI Backend                         │
-│  ┌────────────────────────────────────────┐               │
-│  │       PersonalAssistant Agent          │               │
-│  │  ┌─────────────────────────────────┐  │               │
-│  │  │   SubAgent Pool (Async Tasks)   │  │               │
-│  │  │  [researcher] [coder] [ops] ... │  │               │
-│  │  └─────────────────────────────────┘  │               │
-│  └────────────────────────────────────────┘               │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐   │
-│  │ Provider Mgr │  │ Tool System  │  │ Tool Guard    │   │
-│  └──────────────┘  └──────────────┘  └───────────────┘   │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐   │
-│  │ Session Mgr  │  │ Cron Sched.  │  │ Notification  │   │
-│  └──────────────┘  └──────────────┘  │ Bus           │   │
-│  ┌──────────────┐  ┌──────────────┐  └───────────────┘   │
-│  │ Runtime Mgr  │  │ ZMQ Bus      │                      │
-│  └──────────────┘  └──────────────┘                      │
-│                         SQLite (WAL)                      │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                        消息渠道层                               │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
+│  │   Web    │  │ DingTalk │  │  Feishu  │  │ iMessage │     │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘     │
+└───────┼──────────────┼─────────────┼─────────────┼───────────┘
+        │              │             │             │
+┌───────▼──────────────▼─────────────▼─────────────▼───────────┐
+│                     FastAPI Backend                            │
+│  ┌─────────────────────────────────────────────────────────┐ │
+│  │                  SchedulerClient                         │ │
+│  │  (FastAPI 进程内客户端，连接独立 Scheduler 进程)          │ │
+│  └────────────────────────┬────────────────────────────────┘ │
+│                           │ ZMQ (DEALER ↔ ROUTER)            │
+│  ┌────────────────────────▼────────────────────────────────┐ │
+│  │              Scheduler 进程 (SchedulerBroker)            │ │
+│  │  ┌──────────────────────────────────────────────────┐   │ │
+│  │  │  ROUTER (请求路由) + XPUB/XSUB (事件代理)        │   │ │
+│  │  └──────────┬──────────────┬──────────────┬─────────┘   │ │
+│  │             │              │              │              │ │
+│  │  ┌──────────▼───┐  ┌──────▼───────┐  ┌──▼──────────┐   │ │
+│  │  │  PA Worker   │  │  Sub Worker  │  │ Cron Worker │   │ │
+│  │  │  (per session)│  │  (per task)  │  │ (singleton) │   │ │
+│  │  │  pa:{sid}    │  │  sub:{n}:{t} │  │ cron:sched  │   │ │
+│  │  └──────────────┘  └──────────────┘  └─────────────┘   │ │
+│  └─────────────────────────────────────────────────────────┘ │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐      │
+│  │ Provider Mgr │  │ Tool System  │  │ Tool Guard    │      │
+│  └──────────────┘  └──────────────┘  └───────────────┘      │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐      │
+│  │ Session Mgr  │  │ Skill Mgr   │  │ Notification  │      │
+│  └──────────────┘  └──────────────┘  │ Bus (WS)      │      │
+│  ┌──────────────┐  ┌──────────────┐  └───────────────┘      │
+│  │ Workspace    │  │ Memory       │                          │
+│  │ Manager      │  │ (Hybrid)     │                          │
+│  └──────────────┘  └──────────────┘                          │
+│                         SQLite (WAL)                          │
+└──────────────────────────────────────────────────────────────┘
         │
-┌───────▼──────────────────────────────────────────────────┐
-│          React Frontend (Dashboard)                       │
-│  Chat · Sessions · Tools · Skills · Tasks · Cron ·       │
-│  Workspace · Dashboard                                    │
-└──────────────────────────────────────────────────────────┘
+┌───────▼──────────────────────────────────────────────────────┐
+│          React Frontend (Vite + TypeScript + Tailwind)        │
+│  Chat · Sessions · Tools · Skills · Tasks · Cron ·           │
+│  Workspace · Dashboard                                        │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+### 多进程 Scheduler 架构
+
+系统采用 **多进程 + ZMQ 消息总线** 架构，每个 Agent 运行在独立的 OS 进程中：
+
+| 组件 | 进程模型 | 说明 |
+|------|---------|------|
+| **SchedulerClient** | FastAPI 主进程内 | 薄客户端，通过 ZMQ DEALER 连接 Scheduler |
+| **SchedulerBroker** | 独立进程 | 中央调度器，管理所有 Worker 进程的生命周期 |
+| **PA Worker** | 每 Session 一个进程 | 运行 `PersonalAssistantDaemon`，处理用户对话 |
+| **Sub Worker** | 每 Task 一个进程 | 运行 `SubAgentDaemon`，执行委派任务 |
+| **Cron Worker** | 全局单例进程 | 运行 `CronDaemon`，调度和执行定时任务 |
+
+ZMQ 通信模型：
+- **ROUTER/DEALER** — 请求/控制路由（`Envelope` + `msgpack` 序列化）
+- **XPUB/XSUB** — 事件发布/订阅代理（SSE 流式推送）
+- Worker 生命周期：`PENDING → STARTING → RUNNING → IDLE → STOPPING → STOPPED`
 
 ## 🚀 快速开始
 
@@ -138,6 +166,110 @@ LLM_API_KEY=your_api_key
 | DingTalk | [docs/channels/dingtalk.md](docs/channels/dingtalk.md) | ✅ 支持 |
 | 飞书 Feishu | [docs/channels/feishu.md](docs/channels/feishu.md) | ✅ 支持 |
 | iMessage | [docs/channels/imessage.md](docs/channels/imessage.md) | ✅ 支持（需 macOS）|
+
+## 🔄 Agent 数据流
+
+系统包含 3 种 Agent，各自运行在独立进程中，通过 ZMQ + MessageBus 协作：
+
+### 1. PersonalAssistant (PA) — 用户对话
+
+```
+用户消息 (Web/DingTalk/飞书/iMessage)
+    │
+    ▼
+FastAPI API → SchedulerClient → CHAT_REQUEST (ZMQ)
+    │
+    ▼
+PA Worker (pa:{session_id})
+    │
+    ├─ 1. 存储用户消息到 Memory
+    ├─ 2. 构建动态 System Prompt
+    │     ├─ Workspace 上下文 (SOUL.md / AGENTS.md)
+    │     ├─ SubAgent 花名册 (Registry 动态生成)
+    │     ├─ 启用的工具列表 + Prompt Skills
+    │     └─ @mention 路由提示 (如有)
+    ├─ 3. 重建对话历史 (压缩感知，保留摘要)
+    ├─ 4. 调用 LLM (最多 32 轮工具循环)
+    │     ├─ 解析工具调用 (OpenAI 格式)
+    │     ├─ Tool Guard 安全检查
+    │     ├─ 执行工具 → 记录日志 → 追加到对话
+    │     └─ 循环直到无工具调用
+    ├─ 5. 流式输出 SSE 事件
+    │     (thinking_delta / text_delta / tool_start / tool_done / done)
+    ├─ 6. 存储助手回复 + 记录 Token 用量
+    └─ 7. 触发记忆压缩 (超阈值时)
+```
+
+### 2. SubAgent — 任务委派
+
+```
+PA 调用 dispatch_sub_agent 工具 (或 @mention 触发)
+    │
+    ├─ 路由: agent_name 直接指定 (优先)
+    │        或 task_type 匹配 Registry
+    │
+    ▼
+SchedulerBroker 收到 DISPATCH_SUB → spawn 新进程
+    │
+    ▼
+Sub Worker (sub:{agent_name}:{task_id})
+    │
+    ├─ 1. 加载 SubAgentTask + 角色定义
+    ├─ 2. 创建独立上下文
+    │     ├─ 独立 session_id: "sub:{parent}:{task_id}"
+    │     ├─ 独立 BufferMemory (不污染主对话)
+    │     └─ 独立模型配置 (未配置回退到全局)
+    ├─ 3. 检查 MessageBus 待处理消息
+    ├─ 4. 调用 LLM + 多轮工具循环
+    │     ├─ 每轮检查 MessageBus 新消息
+    │     ├─ 执行工具 → 记录 execution_log
+    │     └─ 超出轮次 → 强制摘要
+    ├─ 5. 发布 task_event (SSE 实时推送)
+    ├─ 6. 更新 Task 状态 (DONE/FAILED)
+    │     ├─ 写入 execution_log + result
+    │     └─ 失败时: 指数退避重试
+    └─ 7. 通知 PA
+              │  AGENT_RESPONSE (ZMQ)
+              ▼
+         SchedulerBroker 拦截结果
+              ├─ 写入父 Session 记忆
+              └─ 发送 SSE 任务完成卡片
+```
+
+### 3. CronAgent — 定时任务
+
+```
+CronDaemon (cron:scheduler) 后台循环
+    │  每 30 秒检查 get_due_jobs()
+    ▼
+发现到期任务
+    │
+    ├─ 1. 创建 CronJobExecution 记录 (RUNNING)
+    ├─ 2. 实例化 CronAgent
+    │     ├─ 轻量模式: 只加载 SOUL.md + AGENTS.md
+    │     └─ 心跳模式: 加载完整 Workspace 上下文
+    ├─ 3. 调用 LLM + 工具循环
+    │     ├─ 执行工具 → 记录 execution_log
+    │     └─ 返回最终结果
+    ├─ 4. 更新执行记录 (DONE/FAILED)
+    │     ├─ 写入 result + execution_log
+    │     └─ 更新 next_run_at (croniter 计算)
+    └─ 5. 通知 PA Session
+          ├─ ZMQ AGENT_NOTIFY → pa:{session_id}
+          └─ 发布 session 级 SSE 事件
+```
+
+### Agent 间通信 (MessageBus)
+
+```
+┌──────────┐   send()    ┌──────────────┐   ZMQ AGENT_NOTIFY   ┌──────────┐
+│    PA    │────────────▶│  MessageBus  │──────────────────────▶│ SubAgent │
+│          │◀────────────│  (DB + ZMQ)  │◀──────────────────────│          │
+└──────────┘  receive()  └──────────────┘   AGENT_RESPONSE     └──────────┘
+                               │
+                               │  消息生命周期: PENDING → DELIVERED → PROCESSED
+                               │  消息模式: request / response / notify / broadcast
+```
 
 ## 🤖 SubAgent
 
@@ -340,8 +472,9 @@ nimo/
 │   │   ├── models/       # SQLAlchemy ORM 模型（13 张表）
 │   │   ├── providers/    # 模型提供方管理（Provider Manager、重试模型）
 │   │   ├── runtimes/     # SubAgent 运行时抽象（Internal / HTTP）
+│   │   ├── scheduler/    # 多进程 Scheduler（Broker / Client / Worker / Process）
 │   │   ├── zmq_bus/      # ZMQ 消息总线（守护进程、协议、事件订阅）
-│   │   ├── cli/          # 命令行工具（进程管理、控制台、命令）
+│   │   ├── cli/          # 命令行工具（start / stop / restart / status / config）
 │   │   ├── workspace/    # 工作空间管理（上下文构建、记忆写入）
 │   │   ├── tools/        # 工具注册与内置工具（12 个）
 │   │   └── services/     # 配置、Cron 调度、通知总线、事件总线
