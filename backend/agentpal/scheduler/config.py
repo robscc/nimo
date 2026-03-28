@@ -14,6 +14,7 @@ class SchedulerConfig:
         events_addr:           ZMQ XPUB/XSUB 事件 broker 地址（ipc://）
         pa_idle_timeout:       PA 空闲超时（秒），默认 30 分钟
         sub_idle_timeout:      SubAgent 空闲超时（秒），默认 5 分钟
+        max_running_duration:  Agent RUNNING 状态最大持续时间（秒），超时强制标记 FAILED
         health_check_interval: 健康检查间隔（秒）
         process_start_timeout: 子进程启动超时（秒）
         heartbeat_interval:    子进程心跳间隔（秒）
@@ -24,6 +25,7 @@ class SchedulerConfig:
     events_addr: str = "ipc:///tmp/agentpal-events.sock"
     pa_idle_timeout: int = 1800  # 30 分钟
     sub_idle_timeout: int = 300  # 5 分钟
+    max_running_duration: int = 1800  # 30 分钟
     health_check_interval: int = 30
     process_start_timeout: int = 15
     heartbeat_interval: int = 10

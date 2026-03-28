@@ -89,6 +89,7 @@ async def _scheduler_async_main(
         sub_idle_timeout=settings.scheduler_sub_idle_timeout,
         health_check_interval=settings.scheduler_health_check_interval,
         process_start_timeout=settings.scheduler_process_start_timeout,
+        max_running_duration=settings.scheduler_max_running_duration,
     )
 
     # 2. 计算 XSUB 内部地址

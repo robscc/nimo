@@ -168,6 +168,7 @@ class Settings(BaseSettings):
     scheduler_sub_idle_timeout: int = 300     # SubAgent 空闲超时（秒），默认 5 分钟
     scheduler_health_check_interval: int = 30  # 健康检查间隔（秒）
     scheduler_process_start_timeout: int = 15  # 子进程启动超时（秒）
+    scheduler_max_running_duration: int = 1800  # Agent RUNNING 最大持续时间（秒），超时强制 FAILED，默认 30 分钟
 
     @property
     def is_dev(self) -> bool:
