@@ -243,10 +243,15 @@ class SubAgentDaemon(AgentDaemon):
         独立 session 确保不与请求级 session 冲突，
         执行完毕后自动 commit 并关闭连接。
         """
+        import os
+
         from agentpal.agents.sub_agent import SubAgent
         from agentpal.database import AsyncSessionLocal
         from agentpal.memory.factory import MemoryFactory
         from agentpal.models.session import SubAgentTask
+
+        # 设置环境变量，供 produce_artifact 工具获取当前任务 ID
+        os.environ["AGENTPAL_CURRENT_TASK_ID"] = task_id
 
         sub_session_id = f"sub:{parent_session_id}:{task_id}"
 

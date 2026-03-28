@@ -354,18 +354,22 @@ async def get_session_messages(
     db: AsyncSession = Depends(get_db),
 ):
     """加载指定 session 的历史消息（user/assistant 角色）。"""
-    result = await db.execute(
-        select(MemoryRecord)
-        .where(
-            MemoryRecord.session_id == session_id,
-            MemoryRecord.role.in_(["user", "assistant"]),
-        )
-        .order_by(MemoryRecord.created_at.asc())
-    )
-    records = result.scalars().all()
+    settings = get_settings()
+    memory = MemoryFactory.create(settings.memory_backend, db=db)
+
+    # 使用 memory 的 get_recent 方法（支持所有 memory backend）
+    messages = await memory.get_recent(session_id, limit=1000)
+
+    # 过滤只返回 user/assistant 角色
     return [
-        MessageOut(role=r.role, content=r.content, created_at=utc_isoformat(r.created_at), meta=r.meta or None)
-        for r in records
+        MessageOut(
+            role=str(m.role),
+            content=m.content,
+            created_at=m.created_at.isoformat() if m.created_at else None,
+            meta=m.metadata or None,
+        )
+        for m in messages
+        if str(m.role) in ("user", "assistant")
     ]
 
 

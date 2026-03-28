@@ -26,6 +26,11 @@ from agentpal.tools.builtin import BUILTIN_TOOLS
 
 TOOL_CATALOG: dict[str, dict] = {t["name"]: t for t in BUILTIN_TOOLS}
 
+# SubAgent 专用工具（不在 PA 工具列表中显示）
+SUBAGENT_ONLY_TOOLS: set[str] = {
+    t["name"] for t in BUILTIN_TOOLS if t.get("subagent_only", False)
+}
+
 
 # ── 数据库操作 ────────────────────────────────────────────
 
@@ -65,7 +70,10 @@ async def set_tool_enabled(db: AsyncSession, name: str, enabled: bool) -> ToolCo
 
 
 async def list_tool_configs(db: AsyncSession) -> list[dict]:
-    """返回所有工具的完整信息（含启用状态）。"""
+    """返回所有工具的完整信息（含启用状态）。
+
+    注意：subagent_only 工具不在此列表中显示（如 produce_artifact）。
+    """
     await ensure_tool_configs(db)
     result = await db.execute(select(ToolConfig))
     configs: dict[str, bool] = {row.name: row.enabled for row in result.scalars().all()}
@@ -79,6 +87,7 @@ async def list_tool_configs(db: AsyncSession) -> list[dict]:
             "enabled": configs.get(t["name"], not t.get("dangerous", False)),
         }
         for t in BUILTIN_TOOLS
+        if not t.get("subagent_only", False)  # 过滤 SubAgent 专用工具
     ]
 
 
@@ -88,12 +97,15 @@ async def list_tool_configs(db: AsyncSession) -> list[dict]:
 def build_toolkit(
     enabled_names: list[str],
     extra_tools: list[dict] | None = None,
+    *,
+    is_subagent: bool = False,
 ) -> Toolkit | None:
     """根据已启用工具集构建 agentscope Toolkit。
 
     Args:
         enabled_names: 已启用的内置工具名列表
         extra_tools: 额外工具（如 Skill 工具），每项含 name/func/description
+        is_subagent: 是否是 SubAgent 上下文（决定是否包含 subagent_only 工具）
 
     Returns:
         Toolkit 实例（无工具时返回 None）
@@ -110,6 +122,9 @@ def build_toolkit(
     for name in enabled_names:
         meta = TOOL_CATALOG.get(name)
         if meta:
+            # 过滤 SubAgent 专用工具
+            if meta.get("subagent_only", False) and not is_subagent:
+                continue
             toolkit.register_tool_function(
                 meta["func"],
                 func_name=name,

@@ -1003,9 +1003,14 @@ async def dispatch_sub_agent(
 
                     async def run_in_background() -> None:
                         """Fallback: 在进程内独立 AsyncSession 中运行 SubAgent。"""
+                        import os
+
                         from loguru import logger as _logger
 
                         from agentpal.database import AsyncSessionLocal as _ASL
+
+                        # 设置环境变量，供 produce_artifact 工具获取当前任务 ID
+                        os.environ["AGENTPAL_CURRENT_TASK_ID"] = _task_id
 
                         async with _ASL() as bg_db:
                             bg_task = await bg_db.get(SubAgentTask, _task_id)
@@ -1250,94 +1255,9 @@ def execute_python_code(
                 pass
 
 
-# ── 工具元数据注册表 ──────────────────────────────────────
+# ── 工具元数据注册表（移到文件末尾，确保所有函数已定义）────────
 
-BUILTIN_TOOLS: list[dict] = [
-    {
-        "name": "execute_shell_command",
-        "func": execute_shell_command,
-        "description": "执行 Shell 命令",
-        "icon": "Terminal",
-        "dangerous": True,
-    },
-    {
-        "name": "read_file",
-        "func": read_file,
-        "description": "读取本地文件内容",
-        "icon": "FileText",
-        "dangerous": False,
-    },
-    {
-        "name": "write_file",
-        "func": write_file,
-        "description": "写入文件（覆盖模式）",
-        "icon": "FilePlus",
-        "dangerous": True,
-    },
-    {
-        "name": "edit_file",
-        "func": edit_file,
-        "description": "精确替换文件中的文本片段",
-        "icon": "FileEdit",
-        "dangerous": True,
-    },
-    {
-        "name": "browser_use",
-        "func": browser_use,
-        "description": "访问网页并与之交互（支持 JS 渲染、点击、填表、截图等）",
-        "icon": "Globe",
-        "dangerous": False,
-    },
-    {
-        "name": "send_file_to_user",
-        "func": send_file_to_user,
-        "description": "将本地文件发送给聊天界面中的用户（图片直接展示，其他提供下载）",
-        "icon": "FileImage",
-        "dangerous": False,
-    },
-    {
-        "name": "get_current_time",
-        "func": get_current_time,
-        "description": "获取当前时间",
-        "icon": "Clock",
-        "dangerous": False,
-    },
-    {
-        "name": "skill_cli",
-        "func": skill_cli,
-        "description": "管理技能包（列出、安装、启用、禁用、卸载）",
-        "icon": "Puzzle",
-        "dangerous": False,
-    },
-    {
-        "name": "cron_cli",
-        "func": cron_cli,
-        "description": "管理定时任务（列出、创建、更新、删除、启用禁用、查看历史）",
-        "icon": "Timer",
-        "dangerous": False,
-    },
-    {
-        "name": "plan_cli",
-        "func": plan_cli,
-        "description": "管理执行计划（列出、查看状态、取消计划）",
-        "icon": "ClipboardList",
-        "dangerous": False,
-    },
-    {
-        "name": "execute_python_code",
-        "func": execute_python_code,
-        "description": "在独立子进程中动态执行 Python 代码，支持安装依赖包",
-        "icon": "Code2",
-        "dangerous": True,
-    },
-    {
-        "name": "dispatch_sub_agent",
-        "func": dispatch_sub_agent,
-        "description": "将子任务委托给专业 SubAgent（coder/researcher）执行，支持阻塞/非阻塞模式",
-        "icon": "Bot",
-        "dangerous": False,
-    },
-]
+# BUILTIN_TOOLS 定义在文件末尾，确保所有工具函数已定义
 
 # ── 12. produce_artifact ──────────────────────────────────
 
@@ -1428,19 +1348,24 @@ def produce_artifact(
             db.add(artifact)
             db.commit()
 
-        # 发射事件
-        import asyncio
+        # 尝试发射事件（如果在异步环境中运行）
+        try:
+            import asyncio
 
-        from agentpal.services.task_event_bus import task_event_bus
+            from agentpal.services.task_event_bus import task_event_bus
 
-        asyncio.create_task(
-            task_event_bus.emit(
-                task_id,
-                "task.artifact_created",
-                {"artifact_id": artifact_id, "name": name, "type": artifact_type},
-                f"已创建产出物：{name}",
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                task_event_bus.emit(
+                    task_id,
+                    "task.artifact_created",
+                    {"artifact_id": artifact_id, "name": name, "type": artifact_type},
+                    f"已创建产出物：{name}",
+                )
             )
-        )
+        except RuntimeError:
+            # 没有运行的事件循环，跳过事件发射
+            pass
 
         return _text_response(
             f"[产出物已创建]\n名称：{name}\nID: {artifact_id}\n类型：{artifact_type}\n大小：{size_bytes or 0} 字节"
@@ -1448,6 +1373,105 @@ def produce_artifact(
 
     except Exception as e:
         return _text_response(f"<error>产出物创建失败：{e}</error>")
+
+
+# ── 工具元数据注册表 ──────────────────────────────────────
+# 放在文件末尾，确保所有工具函数已定义
+
+BUILTIN_TOOLS: list[dict] = [
+    {
+        "name": "execute_shell_command",
+        "func": execute_shell_command,
+        "description": "执行 Shell 命令",
+        "icon": "Terminal",
+        "dangerous": True,
+    },
+    {
+        "name": "read_file",
+        "func": read_file,
+        "description": "读取本地文件内容",
+        "icon": "FileText",
+        "dangerous": False,
+    },
+    {
+        "name": "write_file",
+        "func": write_file,
+        "description": "写入文件（覆盖模式）",
+        "icon": "FilePlus",
+        "dangerous": True,
+    },
+    {
+        "name": "edit_file",
+        "func": edit_file,
+        "description": "精确替换文件中的文本片段",
+        "icon": "FileEdit",
+        "dangerous": True,
+    },
+    {
+        "name": "browser_use",
+        "func": browser_use,
+        "description": "访问网页并与之交互（支持 JS 渲染、点击、填表、截图等）",
+        "icon": "Globe",
+        "dangerous": False,
+    },
+    {
+        "name": "send_file_to_user",
+        "func": send_file_to_user,
+        "description": "将本地文件发送给聊天界面中的用户（图片直接展示，其他提供下载）",
+        "icon": "FileImage",
+        "dangerous": False,
+    },
+    {
+        "name": "get_current_time",
+        "func": get_current_time,
+        "description": "获取当前时间",
+        "icon": "Clock",
+        "dangerous": False,
+    },
+    {
+        "name": "skill_cli",
+        "func": skill_cli,
+        "description": "管理技能包（列出、安装、启用、禁用、卸载）",
+        "icon": "Puzzle",
+        "dangerous": False,
+    },
+    {
+        "name": "cron_cli",
+        "func": cron_cli,
+        "description": "管理定时任务（列出、创建、更新、删除、启用禁用、查看历史）",
+        "icon": "Timer",
+        "dangerous": False,
+    },
+    {
+        "name": "plan_cli",
+        "func": plan_cli,
+        "description": "管理执行计划（列出、查看状态、取消计划）",
+        "icon": "ClipboardList",
+        "dangerous": False,
+    },
+    {
+        "name": "execute_python_code",
+        "func": execute_python_code,
+        "description": "在独立子进程中动态执行 Python 代码，支持安装依赖包",
+        "icon": "Code2",
+        "dangerous": True,
+    },
+    {
+        "name": "dispatch_sub_agent",
+        "func": dispatch_sub_agent,
+        "description": "将子任务委托给专业 SubAgent（coder/researcher）执行，支持阻塞/非阻塞模式",
+        "icon": "Bot",
+        "dangerous": False,
+    },
+    {
+        "name": "produce_artifact",
+        "func": produce_artifact,
+        "description": "创建任务产出物（代码文件、报告、图表等），SubAgent 完成任务后调用此工具保存成果",
+        "icon": "FileOutput",
+        "dangerous": False,
+        "subagent_only": True,  # 仅 SubAgent 可用
+    },
+]
 
 
 

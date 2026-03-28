@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from contextlib import contextmanager
 
-from sqlalchemy import event
+from sqlalchemy import create_engine, event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from agentpal.config import get_settings
 
@@ -22,10 +23,26 @@ engine = create_async_engine(
     connect_args={"check_same_thread": False, "timeout": 60},  # SQLite 专用
 )
 
+# 同步引擎（供 produce_artifact 等同步工具使用）
+_sync_engine = create_engine(
+    settings.database_url.replace("+aiosqlite", ""),
+    echo=settings.is_dev,
+    connect_args={"check_same_thread": False, "timeout": 60},
+)
+
 
 # 启用 WAL 模式，允许并发读写（解决 skill_cli 工具调用时 database locked 问题）
 @event.listens_for(engine.sync_engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=15000")
+    cursor.close()
+
+
+# 同步引擎也启用 WAL
+@event.listens_for(_sync_engine, "connect")
+def _set_sqlite_pragma_sync(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA busy_timeout=15000")
@@ -36,6 +53,31 @@ AsyncSessionLocal = async_sessionmaker(
     class_=AsyncSession,
     expire_on_commit=False,
 )
+
+# 同步 Session 工厂（供 produce_artifact 等同步工具使用）
+SyncSessionLocal = sessionmaker(
+    bind=_sync_engine,
+    class_=Session,
+    expire_on_commit=False,
+)
+
+
+@contextmanager
+def get_sync_db():
+    """同步数据库 session 上下文管理器。
+
+    供 produce_artifact 等同步工具使用。
+    自动 commit，异常时 rollback。
+    """
+    session = SyncSessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 class Base(DeclarativeBase):
