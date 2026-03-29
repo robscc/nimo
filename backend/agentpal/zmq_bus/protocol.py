@@ -26,6 +26,7 @@ class MessageType(StrEnum):
     CHAT_REQUEST = "chat_request"
     DISPATCH_TASK = "dispatch_task"
     CRON_TRIGGER = "cron_trigger"
+    TOOL_GUARD_RESOLVE = "tool_guard_resolve"  # API → PA: 工具安全确认转发
 
     # Agent → HTTP (via PUB/SUB)
     STREAM_EVENT = "stream_event"

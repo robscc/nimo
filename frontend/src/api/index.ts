@@ -517,9 +517,12 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 
 export async function resolveToolGuard(
   requestId: string,
-  approved: boolean
+  approved: boolean,
+  sessionId?: string
 ): Promise<void> {
-  await api.post(`/agent/tool-guard/${requestId}/resolve`, { approved });
+  await api.post(`/agent/tool-guard/${requestId}/resolve`, { approved }, {
+    params: sessionId ? { session_id: sessionId } : {},
+  });
 }
 
 // ── Task Cancel API ────────────────────────────────────────

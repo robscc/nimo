@@ -258,6 +258,10 @@ class SchedulerClient:
             logger.warning("DEALER socket 未就绪，丢弃消息")
             return
         try:
+            logger.info(
+                f"[ToolGuard] SchedulerClient.send_to_agent: "
+                f"target={target_identity} msg_type={envelope.msg_type}"
+            )
             await self._dealer.send_multipart([b"", envelope.serialize()])
         except zmq.ZMQError as e:
             logger.error(f"发送消息到 {target_identity} 失败: {e}")

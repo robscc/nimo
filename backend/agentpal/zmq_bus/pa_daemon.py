@@ -16,6 +16,10 @@ from typing import Any
 
 from loguru import logger
 
+import asyncio
+
+import zmq
+
 from agentpal.zmq_bus.daemon import AgentDaemon
 from agentpal.zmq_bus.protocol import Envelope, MessageType
 
@@ -45,6 +49,8 @@ class PersonalAssistantDaemon(AgentDaemon):
             await self._handle_notify(envelope)
         elif envelope.msg_type == MessageType.AGENT_REQUEST:
             await self._handle_agent_request(envelope)
+        elif envelope.msg_type == MessageType.TOOL_GUARD_RESOLVE:
+            await self._handle_tool_guard_resolve(envelope)
         elif envelope.msg_type == MessageType.PLAN_STEP_DONE:
             await self._handle_plan_step_done(envelope)
         elif envelope.msg_type == MessageType.DISPATCH_SUB_ACK:
@@ -153,6 +159,27 @@ class PersonalAssistantDaemon(AgentDaemon):
         )
         await self.send_to_router(response)
 
+    # ── TOOL_GUARD_RESOLVE 处理 ────────────────────────────
+
+    async def _handle_tool_guard_resolve(self, envelope: Envelope) -> None:
+        """处理从 API 转发的工具安全确认。"""
+        from agentpal.tools.tool_guard import ToolGuardManager
+
+        request_id = envelope.payload.get("request_id", "")
+        approved = envelope.payload.get("approved", False)
+        guard = ToolGuardManager.get_instance()
+        resolved = guard.resolve(request_id, approved)
+        if resolved:
+            logger.info(
+                f"PA daemon [{self._session_id}] tool guard resolved: "
+                f"request_id={request_id} approved={approved}"
+            )
+        else:
+            logger.warning(
+                f"PA daemon [{self._session_id}] tool guard resolve 未找到: "
+                f"request_id={request_id}（可能已过期）"
+            )
+
     # ── PLAN_STEP_DONE 处理 ────────────────────────────────
 
     async def _handle_plan_step_done(self, envelope: Envelope) -> None:
@@ -184,6 +211,50 @@ class PersonalAssistantDaemon(AgentDaemon):
             await self._publish_sse_event(
                 topic, msg_id, {"type": "error", "message": str(exc)}
             )
+
+    # ── recv_loop override ─────────────────────────────────
+
+    async def _recv_loop(self) -> None:
+        """Override: TOOL_GUARD_RESOLVE 绕过队列直接处理，避免死锁。
+
+        _work_loop 串行处理消息，CHAT_REQUEST 处理中 tool guard 的
+        event.wait() 会阻塞 work loop。如果 TOOL_GUARD_RESOLVE 也入队，
+        就永远等不到被处理 — 死锁。所以在 recv 层直接 resolve。
+        """
+        assert self._dealer is not None
+
+        while self._running:
+            try:
+                frames = await self._dealer.recv_multipart()
+                if len(frames) < 2:
+                    logger.warning(
+                        f"AgentDaemon [{self.identity}] 收到格式异常帧: {len(frames)} frames"
+                    )
+                    continue
+
+                envelope = Envelope.deserialize(frames[-1])
+
+                if envelope.msg_type == MessageType.TOOL_GUARD_RESOLVE:
+                    # 直接处理，不入队 — 避免与 CHAT_REQUEST 死锁
+                    logger.info(
+                        f"[ToolGuard] _recv_loop 拦截到 TOOL_GUARD_RESOLVE: "
+                        f"request_id={envelope.payload.get('request_id')} "
+                        f"approved={envelope.payload.get('approved')}"
+                    )
+                    await self._handle_tool_guard_resolve(envelope)
+                else:
+                    await self._task_queue.put(envelope)
+
+            except zmq.ZMQError as e:
+                if e.errno == zmq.ETERM:
+                    break
+                if self._running:
+                    logger.error(f"AgentDaemon [{self.identity}] recv 异常: {e}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                if self._running:
+                    logger.error(f"AgentDaemon [{self.identity}] recv_loop 异常: {e}")
 
     # ── 辅助方法 ──────────────────────────────────────────
 

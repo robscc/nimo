@@ -137,7 +137,7 @@ export default function ChatPage() {
   // Tool Guard resolve handler
   const handleGuardResolve = async (requestId: string, approved: boolean) => {
     try {
-      await resolveToolGuard(requestId, approved);
+      await resolveToolGuard(requestId, approved, sessionId ?? undefined);
     } catch (err) {
       console.error("Failed to resolve tool guard:", err);
     }

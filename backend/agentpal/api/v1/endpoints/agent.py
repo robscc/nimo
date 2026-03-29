@@ -504,8 +504,36 @@ class ToolGuardResolveRequest(BaseModel):
 
 
 @router.post("/tool-guard/{request_id}/resolve")
-async def resolve_tool_guard(request_id: str, req: ToolGuardResolveRequest):
+async def resolve_tool_guard(
+    request_id: str,
+    req: ToolGuardResolveRequest,
+    request: Request,
+    session_id: str | None = Query(None, description="会话 ID（ZMQ 模式下必传）"),
+):
     """用户确认或拒绝工具调用安全请求。"""
+    zmq_manager = _get_zmq_manager(request)
+
+    if zmq_manager is not None and session_id:
+        # ZMQ 模式：转发到 PA Worker 进程
+        from loguru import logger as _guard_logger
+
+        from agentpal.zmq_bus.protocol import Envelope, MessageType
+
+        _guard_logger.info(
+            f"[ToolGuard] ZMQ 模式转发 resolve: request_id={request_id} "
+            f"approved={req.approved} session_id={session_id}"
+        )
+        envelope = Envelope(
+            msg_type=MessageType.TOOL_GUARD_RESOLVE,
+            source="api:tool_guard",
+            target=f"pa:{session_id}",
+            session_id=session_id,
+            payload={"request_id": request_id, "approved": req.approved},
+        )
+        await zmq_manager.send_to_agent(f"pa:{session_id}", envelope)
+        return {"status": "ok", "request_id": request_id, "approved": req.approved}
+
+    # 直接模式：本地 resolve
     from agentpal.tools.tool_guard import ToolGuardManager
 
     guard = ToolGuardManager.get_instance()

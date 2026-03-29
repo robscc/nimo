@@ -567,6 +567,11 @@ class SchedulerBroker:
                     # CHAT_REQUEST 等工作消息 → 标记为 RUNNING
                     if envelope.msg_type == MessageType.CHAT_REQUEST:
                         self._mark_running(target)
+                    if envelope.msg_type == MessageType.TOOL_GUARD_RESOLVE:
+                        logger.info(
+                            f"[ToolGuard] Broker 转发 TOOL_GUARD_RESOLVE → {target} "
+                            f"(request_id={envelope.payload.get('request_id')})"
+                        )
                     await self._send_to_daemon(target, envelope)
 
             except zmq.ZMQError as e:
