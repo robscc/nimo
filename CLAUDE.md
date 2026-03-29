@@ -497,6 +497,42 @@ CI 矩阵：Python 3.10 / 3.11 / 3.12，覆盖率要求 ≥ 75%。
 
 ---
 
+## 日志与 Debug 规范
+
+### 原则
+
+多进程 + ZMQ 架构下，问题定位高度依赖日志。**每个关键操作必须有日志**，特别是跨进程通信的发送/接收两端。
+
+### 日志位置
+
+| 进程 | 日志文件 |
+|------|----------|
+| FastAPI 主进程 | 控制台（uvicorn stdout） |
+| Scheduler 进程 | `~/.nimo/logs/scheduler.log` |
+| PA Worker | `~/.nimo/logs/worker-pa_{session_id}.log` |
+| SubAgent Worker | `~/.nimo/logs/worker-sub_{agent}_{task_id}.log` |
+| Cron Worker | `~/.nimo/logs/worker-cron_scheduler.log` |
+
+### 必须记录日志的场景
+
+1. **进程生命周期**：spawn / register / IDLE / RUNNING / STOPPING / STOPPED / FAILED，每次状态转换都要记录 `identity + old_state → new_state`
+2. **ZMQ 消息收发**：
+   - 发送端：`logger.info(f"发送 {msg_type} → {target}")`
+   - 接收端：`logger.info(f"收到 {msg_type} from {source}")`
+   - 转发：`logger.info(f"转发 {msg_type}: {source} → {target}")`
+3. **进程启动失败**：必须记录 exitcode + 日志文件路径，方便快速定位
+4. **消息投递失败**：ZMQ ROUTER 对未知 identity 会静默丢弃，转发前必须检查目标进程存活状态
+5. **超时/异常**：所有 `asyncio.wait_for` 超时、ZMQ 错误、DB 锁等待都要记录
+
+### 进程间通信 Debug 要点
+
+- **不要在 `_router_loop` 中做阻塞等待**（如 `asyncio.sleep` 循环），这会阻塞所有 ZMQ 消息处理
+- Scheduler 进程是独立 OS 进程，**uvicorn --reload 不会重启它**，修改 broker/worker 代码后需要完全重启后端
+- 子进程的 `init_db()` 会争抢 SQLite 写锁，子进程只需 `import agentpal.database` 触发 engine 创建，不要调用 `create_all`
+- ZMQ ROUTER 对未连接的 identity 发送消息会**静默丢弃**，必须在转发前检查 `managed.process.is_alive()`
+
+---
+
 ## Git 工作流
 
 **必须走 Feature Branch → PR，禁止直接提交 main。**

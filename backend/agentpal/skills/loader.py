@@ -73,11 +73,16 @@ class SkillLoader:
 
         name = frontmatter.get("name", skill_dir.name)
         description = frontmatter.get("description", "")
+        version = frontmatter.get("version", "")
+
+        # Fallback: read version from _meta.json (ClawhHub packages)
+        if not version:
+            version = SkillLoader._read_meta_json_version(skill_dir)
 
         return {
             "name": name,
             "description": description,
-            "version": frontmatter.get("version", "0.0.0"),
+            "version": version or "0.0.0",
             "author": frontmatter.get("author", ""),
             "skill_type": "prompt",
             "prompt_content": body.strip(),
@@ -100,6 +105,22 @@ class SkillLoader:
         raise FileNotFoundError(
             f"目录中既没有 skill.json 也没有 SKILL.md: {skill_dir}"
         )
+
+    @staticmethod
+    def _read_meta_json_version(skill_dir: Path) -> str:
+        """Read version from _meta.json if it exists (ClawhHub packages).
+
+        Returns:
+            Version string, or empty string if not found.
+        """
+        meta_json = skill_dir / "_meta.json"
+        if meta_json.exists():
+            try:
+                data = json.loads(meta_json.read_text(encoding="utf-8"))
+                return data.get("version", "")
+            except (json.JSONDecodeError, OSError):
+                pass
+        return ""
 
     @staticmethod
     def _parse_frontmatter(content: str) -> tuple[dict[str, str], str]:

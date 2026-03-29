@@ -249,16 +249,22 @@ async def _init_subprocess_db() -> None:
     """在子进程中初始化独立的数据库引擎。
 
     spawn 模式下子进程不继承主进程的 SQLAlchemy engine，
-    需要重新 import 触发模块级别的 engine 创建，然后调用 init_db
-    确保表存在（幂等操作）。
+    需要重新 import 触发模块级别的 engine 创建。
+
+    注意：不调用 init_db()（create_all + WAL 验证），因为：
+    1. 表已由主进程（FastAPI lifespan）创建，无需重复
+    2. create_all 需要 SQLite 写锁，当其他进程持有锁时会阻塞数秒，
+       导致 AGENT_REGISTER 延迟发送，broker 的 _wait_for_register 超时，
+       PA 子进程启动卡住
+    3. WAL 模式通过 _set_sqlite_pragma event listener 在每个连接上自动设置
     """
     from loguru import logger
 
     try:
-        from agentpal.database import init_db
+        # 仅 import 触发模块级 engine/session 工厂创建，不做 DDL
+        import agentpal.database  # noqa: F401
 
-        await init_db()
-        logger.info("子进程 DB 引擎初始化完成")
+        logger.info("子进程 DB 引擎初始化完成（跳过 create_all）")
     except Exception as e:
         logger.error(f"子进程 DB 初始化失败: {e}", exc_info=True)
         raise

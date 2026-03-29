@@ -179,13 +179,16 @@ async def _scheduler_async_main(
 
 
 async def _init_subprocess_db() -> None:
-    """在子进程中初始化独立的数据库引擎。"""
+    """在子进程中初始化独立的数据库引擎。
+
+    仅 import 触发模块级 engine 创建，不调用 init_db()（create_all），
+    因为表已由主进程创建，且 create_all 可能因 SQLite 锁而阻塞。
+    """
     from loguru import logger
 
     try:
-        from agentpal.database import init_db
+        import agentpal.database  # noqa: F401
 
-        await init_db()
         logger.info("Scheduler 子进程 DB 引擎初始化完成")
     except Exception as e:
         logger.error(f"Scheduler 子进程 DB 初始化失败: {e}", exc_info=True)

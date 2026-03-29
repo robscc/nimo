@@ -458,6 +458,7 @@ class SkillManager:
             "enabled": record.enabled,
             "install_path": record.install_path,
             "tools": [t.get("name", "") for t in (record.meta or {}).get("tools", [])],
+            "skill_type": (record.meta or {}).get("skill_type", "python"),
             "meta": record.meta,
             "created_at": record.created_at.isoformat() if record.created_at else None,
             "updated_at": record.updated_at.isoformat() if record.updated_at else None,

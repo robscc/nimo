@@ -77,9 +77,6 @@ class SchedulerBroker:
         self._health_check_task: asyncio.Task | None = None
         self._running = False
 
-        # 子进程 REGISTER 等待
-        self._register_events: dict[str, asyncio.Event] = {}
-
         # 启动时间
         self._started_at: float = 0.0
 
@@ -104,8 +101,7 @@ class SchedulerBroker:
             self._health_check_loop(), name="broker-health-check"
         )
 
-        # 自动 spawn Cron 进程（background task，不阻塞 start()，
-        # 因为 _wait_for_register 需要 _router_loop 已运行来处理 AGENT_REGISTER）
+        # 自动 spawn Cron 进程（background task，不阻塞 start()）
         asyncio.create_task(
             self._spawn_cron_process(),
             name="spawn-cron",
@@ -121,9 +117,6 @@ class SchedulerBroker:
         for identity in list(self._processes.keys()):
             await self._stop_process(identity, timeout=5.0)
         self._processes.clear()
-
-        # 清理 register events
-        self._register_events.clear()
 
         # 取消后台任务
         for task in (
@@ -158,7 +151,13 @@ class SchedulerBroker:
         return await self._spawn_pa_process(session_id)
 
     async def _spawn_pa_process(self, session_id: str) -> AgentProcessInfo:
-        """Spawn PA 子进程。"""
+        """Spawn PA 子进程。
+
+        spawn 后短暂等待（最多 2s）确认进程没有立即 crash。
+        如果进程 crash，读取 exitcode 并抛异常。
+        如果进程成功注册（IDLE），立即返回。
+        如果 2s 内仍在 STARTING，也返回（后续 CHAT_REQUEST 转发时会再检查）。
+        """
         from agentpal.scheduler.worker import worker_main
 
         process_id = f"pa:{session_id}"
@@ -169,10 +168,6 @@ class SchedulerBroker:
             state=AgentState.PENDING,
         )
         info.transition_to(AgentState.STARTING)
-
-        # 注册等待事件
-        register_event = asyncio.Event()
-        self._register_events[process_id] = register_event
 
         process = self._mp_ctx.Process(
             target=worker_main,
@@ -193,11 +188,24 @@ class SchedulerBroker:
         self._processes[process_id] = ManagedProcess(process=process, info=info)
         logger.info(f"PA 子进程已启动: {process_id} pid={process.pid}")
 
-        # 等待 AGENT_REGISTER
-        try:
-            await self._wait_for_register(process_id, timeout=self._config.process_start_timeout)
-        except TimeoutError:
-            logger.warning(f"PA 子进程注册超时: {process_id}，进程可能仍在启动中")
+        # 短暂等待确认进程没有立即 crash（最多 2s）
+        log_hint = f"~/.nimo/logs/worker-{process_id.replace(':', '_')}.log"
+        for _ in range(20):
+            await asyncio.sleep(0.1)
+            if not process.is_alive():
+                exitcode = process.exitcode
+                info.state = AgentState.FAILED
+                info.error = f"process crashed during startup (exitcode={exitcode})"
+                logger.error(
+                    f"PA 子进程启动失败: {process_id} pid={process.pid} "
+                    f"exitcode={exitcode}，请检查日志: {log_hint}"
+                )
+                raise RuntimeError(
+                    f"PA 子进程启动失败 (exitcode={exitcode})，"
+                    f"日志: {log_hint}"
+                )
+            if info.state == AgentState.IDLE:
+                break  # 已注册成功
 
         return info
 
@@ -215,10 +223,6 @@ class SchedulerBroker:
                 state=AgentState.PENDING,
             )
             info.transition_to(AgentState.STARTING)
-
-            # 注册等待事件
-            register_event = asyncio.Event()
-            self._register_events[process_id] = register_event
 
             process = self._mp_ctx.Process(
                 target=worker_main,
@@ -238,11 +242,21 @@ class SchedulerBroker:
             self._processes[process_id] = ManagedProcess(process=process, info=info)
             logger.info(f"Cron 子进程已启动: pid={process.pid}")
 
-            # 等待 AGENT_REGISTER
-            try:
-                await self._wait_for_register(process_id, timeout=self._config.process_start_timeout)
-            except TimeoutError:
-                logger.warning("Cron 子进程注册超时，进程可能仍在启动中")
+            # 短暂等待确认进程没有立即 crash（最多 2s）
+            log_hint = "~/.nimo/logs/worker-cron_scheduler.log"
+            for _ in range(20):
+                await asyncio.sleep(0.1)
+                if not process.is_alive():
+                    exitcode = process.exitcode
+                    info.state = AgentState.FAILED
+                    info.error = f"process crashed during startup (exitcode={exitcode})"
+                    logger.error(
+                        f"Cron 子进程启动失败: pid={process.pid} "
+                        f"exitcode={exitcode}，请检查日志: {log_hint}"
+                    )
+                    return
+                if info.state == AgentState.IDLE:
+                    break
 
         except Exception as e:
             logger.error(f"Cron 子进程启动失败: {e}", exc_info=True)
@@ -259,7 +273,11 @@ class SchedulerBroker:
         role_prompt: str = "",
         max_tool_rounds: int = 8,
     ) -> AgentProcessInfo:
-        """Spawn SubAgent 子进程并派发任务。"""
+        """Spawn SubAgent 子进程并派发任务。
+
+        不等待 AGENT_REGISTER — 立即 spawn 并发送 DISPATCH_TASK。
+        ZMQ ROUTER 会在 worker 连接后投递消息。
+        """
         from agentpal.scheduler.worker import worker_main
 
         process_id = f"sub:{agent_name}:{task_id}"
@@ -273,10 +291,6 @@ class SchedulerBroker:
             state=AgentState.PENDING,
         )
         info.transition_to(AgentState.STARTING)
-
-        # 注册等待事件
-        register_event = asyncio.Event()
-        self._register_events[process_id] = register_event
 
         process = self._mp_ctx.Process(
             target=worker_main,
@@ -302,11 +316,24 @@ class SchedulerBroker:
         self._processes[process_id] = ManagedProcess(process=process, info=info)
         logger.info(f"SubAgent 子进程已启动: {process_id} pid={process.pid}")
 
-        # 等待 AGENT_REGISTER
-        try:
-            await self._wait_for_register(process_id, timeout=self._config.process_start_timeout)
-        except TimeoutError:
-            logger.warning(f"SubAgent 子进程注册超时: {process_id}")
+        # 短暂等待确认进程没有立即 crash（最多 2s）
+        log_hint = f"~/.nimo/logs/worker-{process_id.replace(':', '_')}.log"
+        for _ in range(20):
+            await asyncio.sleep(0.1)
+            if not process.is_alive():
+                exitcode = process.exitcode
+                info.state = AgentState.FAILED
+                info.error = f"process crashed during startup (exitcode={exitcode})"
+                logger.error(
+                    f"SubAgent 子进程启动失败: {process_id} pid={process.pid} "
+                    f"exitcode={exitcode}，请检查日志: {log_hint}"
+                )
+                raise RuntimeError(
+                    f"SubAgent 子进程启动失败 (exitcode={exitcode})，"
+                    f"日志: {log_hint}"
+                )
+            if info.state == AgentState.IDLE:
+                break  # 已注册成功
 
         # 发送 DISPATCH_TASK 消息
         envelope = Envelope(
@@ -324,7 +351,6 @@ class SchedulerBroker:
             },
         )
         await self._send_to_daemon(process_id, envelope)
-        # 派发任务后立即标记为 RUNNING（修复：之前漏掉导致 SubAgent 一直显示 IDLE）
         self._mark_running(process_id)
         logger.info(f"SubAgent 子进程已派发任务: {process_id}")
 
@@ -429,23 +455,6 @@ class SchedulerBroker:
         except zmq.ZMQError as e:
             logger.error(f"发送消息到 {target_identity} 失败: {e}")
 
-    async def _wait_for_register(
-        self,
-        identity: str,
-        timeout: float = 15.0,
-    ) -> None:
-        """等待子进程发送 AGENT_REGISTER。"""
-        event = self._register_events.get(identity)
-        if event is None:
-            return
-
-        try:
-            await asyncio.wait_for(event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Agent {identity} 注册超时（{timeout}s）") from None
-        finally:
-            self._register_events.pop(identity, None)
-
     # ── CONFIG_RELOAD 广播 ────────────────────────────────
 
     async def broadcast_config_reload(self) -> None:
@@ -484,9 +493,8 @@ class SchedulerBroker:
                 target = envelope.target
 
                 # ── Client 控制消息处理 ──
-                # 注意：ensure_pa / dispatch_sub / dispatch_from_router
-                # 涉及 spawn 子进程 + _wait_for_register，必须以 background task
-                # 运行，否则会阻塞 router_loop 导致无法处理 AGENT_REGISTER 消息（死锁）。
+                # 注意：ensure_pa / dispatch_sub 涉及 spawn 子进程，
+                # 以 background task 运行避免阻塞 router_loop。
                 if envelope.msg_type == MessageType.ENSURE_PA:
                     asyncio.create_task(
                         self._handle_ensure_pa(sender_identity, envelope),
@@ -564,8 +572,11 @@ class SchedulerBroker:
 
                 # ── 普通消息：转发到目标 ──
                 if target and target != "scheduler":
-                    # CHAT_REQUEST 等工作消息 → 标记为 RUNNING
+                    # CHAT_REQUEST 需要确认目标进程可用，否则消息会被 ZMQ 静默丢弃
                     if envelope.msg_type == MessageType.CHAT_REQUEST:
+                        delivery_error = await self._check_chat_target(target, envelope)
+                        if delivery_error:
+                            continue
                         self._mark_running(target)
                     if envelope.msg_type == MessageType.TOOL_GUARD_RESOLVE:
                         logger.info(
@@ -710,16 +721,20 @@ class SchedulerBroker:
         if source in self._processes:
             info = self._processes[source].info
             info.os_pid = pid
+            old_state = info.state
             try:
                 info.transition_to(AgentState.IDLE)
             except ValueError:
                 info.state = AgentState.IDLE
             info.last_active_at = time.time()
-
-        # 唤醒 _wait_for_register
-        register_event = self._register_events.get(source)
-        if register_event is not None:
-            register_event.set()
+            logger.info(
+                f"Agent 状态更新: {source} {old_state} → {info.state}"
+            )
+        else:
+            logger.warning(
+                f"Agent 注册但未找到进程记录: {source}，"
+                f"已知进程: {list(self._processes.keys())}"
+            )
 
     def _handle_heartbeat(self, envelope: Envelope) -> None:
         """更新 Agent 活跃时间。"""
@@ -748,6 +763,77 @@ class SchedulerBroker:
                     info.running_since = 0.0
                 except ValueError:
                     pass
+
+    async def _check_chat_target(self, target: str, envelope: Envelope) -> bool:
+        """检查 CHAT_REQUEST 目标进程是否可用。
+
+        如果进程不可用，通过 XPUB 发布 error 事件让前端 SSE 收到错误。
+
+        Returns:
+            True 表示有错误（已发送 error 事件），调用方应 continue。
+            False 表示目标可用，可以转发。
+        """
+        managed = self._processes.get(target)
+
+        # 进程不存在
+        if not managed:
+            log_hint = f"~/.nimo/logs/worker-{target.replace(':', '_')}.log"
+            logger.error(
+                f"CHAT_REQUEST 目标进程不存在: {target}，"
+                f"请检查日志: {log_hint}"
+            )
+            await self._publish_error_event(
+                target, envelope,
+                f"Agent 进程不存在，请重试",
+            )
+            return True
+
+        # 进程已死
+        if not managed.process.is_alive():
+            exitcode = managed.process.exitcode
+            managed.info.state = AgentState.FAILED
+            managed.info.error = f"process not alive when chat requested (exitcode={exitcode})"
+            log_hint = f"~/.nimo/logs/worker-{target.replace(':', '_')}.log"
+            logger.error(
+                f"CHAT_REQUEST 目标进程已死: {target} "
+                f"exitcode={exitcode}，请检查日志: {log_hint}"
+            )
+            await self._publish_error_event(
+                target, envelope,
+                f"Agent 进程已退出 (exitcode={exitcode})，日志: {log_hint}",
+            )
+            return True
+
+        # 进程活着但还在 STARTING — 允许转发
+        # ZMQ ROUTER 会在 worker DEALER 连接后投递消息
+        if managed.info.state == AgentState.STARTING:
+            logger.info(
+                f"CHAT_REQUEST 目标进程仍在启动中，允许转发: {target} "
+                f"(state={managed.info.state}, pid={managed.process.pid})"
+            )
+
+        return False
+
+    async def _publish_error_event(
+        self, target: str, envelope: Envelope, message: str,
+    ) -> None:
+        """通过 XPUB 发布 error 事件，让前端 EventSubscriber 收到。"""
+        error_reply = Envelope(
+            msg_type=MessageType.STREAM_EVENT,
+            source=target,
+            target="",
+            session_id=envelope.session_id,
+            msg_id=envelope.msg_id,
+            payload={
+                "type": "error",
+                "message": message,
+            },
+        )
+        topic = f"session:{envelope.session_id}"
+        await self._xpub.send_multipart([
+            topic.encode("utf-8"),
+            error_reply.serialize(),
+        ])
 
     async def _handle_dispatch_from_router(self, envelope: Envelope) -> None:
         """处理从 PA daemon 发来的 DISPATCH_TASK 请求。"""
