@@ -113,6 +113,18 @@ DEFAULT_TOOL_GUARD_CONFIG: dict[str, Any] = {
             "level": 1,
         },
         {
+            "name": "network_download",
+            "tool": "execute_shell_command",
+            "pattern": r"(\bcurl\b|\bwget\b|\bscp\b|\brsync\b)",
+            "level": 1,
+        },
+        {
+            "name": "readonly_commands",
+            "tool": "execute_shell_command",
+            "pattern": r"^\s*(ls|cat|head|tail|echo|pwd|whoami|date|uname|df|du|wc|grep|find|which|env|printenv|id|hostname|uptime|free|top|ps|file|stat|realpath|dirname|basename)\b",
+            "level": 3,
+        },
+        {
             "name": "write_system_path",
             "tool": "write_file",
             "field": "file_path",
