@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import agentpal.tools.builtin as builtin_module
+import agentpal.tools.builtin_browser as builtin_module
 from agentpal.tools.builtin import _browser_use_httpx, browser_use
 
 
