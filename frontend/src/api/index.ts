@@ -273,6 +273,7 @@ export interface SessionMeta {
   enabled_tools: string[] | null;
   enabled_skills: string[] | null;
   tool_guard_threshold: number | null;
+  sub_agent_mode: string | null;
   message_count: number;
   created_at: string;
   updated_at: string;
@@ -283,6 +284,7 @@ export interface SessionConfigUpdate {
   enabled_skills?: string[] | null;
   // model_name 不再通过 Session 配置，统一从 config.yaml 读取
   tool_guard_threshold?: number | null;
+  sub_agent_mode?: string | null;
 }
 
 export interface ServiceConfig {
