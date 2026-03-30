@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentpal.channels import DingTalkChannel, FeishuChannel, IMessageChannel
+from agentpal.channels.dingtalk_api import is_duplicate_msg
 from agentpal.config import get_settings
 from agentpal.database import get_db
 from agentpal.memory.factory import MemoryFactory
@@ -15,19 +16,26 @@ from agentpal.agents.personal_assistant import PersonalAssistant
 
 router = APIRouter()
 
+# 模块级单例，避免每次请求重建
+_channels = {
+    "dingtalk": DingTalkChannel(),
+    "feishu": FeishuChannel(),
+    "imessage": IMessageChannel(),
+}
+
 
 async def _handle_incoming(channel_name: str, payload: dict[str, Any], db: AsyncSession) -> dict:
     """公共处理逻辑：解析消息 → 调用助手 → 返回回复。"""
     import re as _re
 
-    channels = {
-        "dingtalk": DingTalkChannel(),
-        "feishu": FeishuChannel(),
-        "imessage": IMessageChannel(),
-    }
-    ch = channels.get(channel_name)
+    ch = _channels.get(channel_name)
     if ch is None:
         raise HTTPException(status_code=400, detail=f"Unknown channel: {channel_name}")
+
+    # 消息去重（DingTalk 可能重试投递）
+    msg_id = payload.get("msgId")
+    if msg_id and is_duplicate_msg(msg_id):
+        return {"status": "duplicate"}
 
     incoming = await ch.parse_incoming(payload)
     if incoming is None:
@@ -76,7 +84,7 @@ async def _handle_incoming(channel_name: str, payload: dict[str, Any], db: Async
 @router.post("/dingtalk/webhook")
 async def dingtalk_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """钉钉消息 Webhook。"""
-    ch = DingTalkChannel()
+    ch = _channels["dingtalk"]
     body = await request.body()
     headers = dict(request.headers)
     if not await ch.verify_signature(headers, body):
@@ -92,7 +100,7 @@ async def feishu_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     # 处理飞书 URL 验证挑战
     if "challenge" in payload:
         return {"challenge": payload["challenge"]}
-    ch = FeishuChannel()
+    ch = _channels["feishu"]
     body = await request.body()
     if not await ch.verify_signature(dict(request.headers), body):
         raise HTTPException(status_code=401, detail="Invalid signature")

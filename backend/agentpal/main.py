@@ -109,7 +109,7 @@ async def lifespan(app: FastAPI):
     # 启动 DingTalk Stream 客户端（dingtalk_enabled=True 时才真正启动）
     from agentpal.channels.dingtalk_stream_worker import dingtalk_stream_worker
 
-    await dingtalk_stream_worker.start()
+    await dingtalk_stream_worker.start(scheduler=scheduler)
 
     yield
 

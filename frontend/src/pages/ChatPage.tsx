@@ -604,7 +604,6 @@ export default function ChatPage() {
             <CalendarClock size={18} />
           </Link>
           )}
-          {!isReadOnly && (
           <button
             onClick={() => setShowMeta((v) => !v)}
             className={clsx(
@@ -617,7 +616,6 @@ export default function ChatPage() {
           >
             <Settings size={18} />
           </button>
-          )}
           </div>
         </div>
 
@@ -852,7 +850,7 @@ export default function ChatPage() {
       </div>
 
       {/* Session Meta Panel */}
-      {showMeta && sessionId && !isReadOnly && (
+      {showMeta && sessionId && (
         <SessionMetaPanel
           sessionId={sessionId}
           onClose={() => setShowMeta(false)}

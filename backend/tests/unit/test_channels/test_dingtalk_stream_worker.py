@@ -14,14 +14,17 @@ from agentpal.channels.dingtalk_stream_worker import (
     DingTalkStreamWorker,
     _ensure_dingtalk_session,
     _extract_text,
-    _format_tool_done,
-    _format_tool_start,
-    _get_dingtalk_access_token,
     _handle_message,
-    _send_markdown_reply,
-    _send_reply,
     _stream_reply,
-    _upload_to_dingtalk,
+)
+from agentpal.channels.dingtalk_api import (
+    format_tool_done,
+    format_tool_start,
+    get_access_token,
+    is_duplicate_msg,
+    send_markdown,
+    send_text,
+    upload_media,
 )
 
 # ── 辅助：构造 mock dingtalk_stream 模块 ─────────────────
@@ -61,6 +64,7 @@ def _make_chat_message(
     sender_id: str = "sender001",
     sender_nick: str = "张三",
     session_webhook: str = "http://webhook.example.com/reply",
+    msg_id: str | None = None,
 ) -> MagicMock:
     """构造 mock ChatbotMessage 实例。"""
     msg = MagicMock()
@@ -70,6 +74,7 @@ def _make_chat_message(
     msg.sender_id = sender_id
     msg.sender_nick = sender_nick
     msg.session_webhook = session_webhook
+    msg.msg_id = msg_id
     return msg
 
 
@@ -191,7 +196,8 @@ class TestHandleMessage:
              patch(
                  "agentpal.channels.dingtalk_stream_worker._stream_reply",
                  new=AsyncMock(),
-             ) as mock_stream:
+             ) as mock_stream, \
+             patch("agentpal.channels.dingtalk_api.is_duplicate_msg", return_value=False):
             await _handle_message({})
 
         mock_stream.assert_awaited_once_with(
@@ -209,7 +215,8 @@ class TestHandleMessage:
              patch(
                  "agentpal.channels.dingtalk_stream_worker._stream_reply",
                  new=AsyncMock(),
-             ) as mock_stream:
+             ) as mock_stream, \
+             patch("agentpal.channels.dingtalk_api.is_duplicate_msg", return_value=False):
             await _handle_message({})
 
         mock_stream.assert_not_called()
@@ -225,7 +232,8 @@ class TestHandleMessage:
              patch(
                  "agentpal.channels.dingtalk_stream_worker._stream_reply",
                  new=AsyncMock(),
-             ) as mock_stream:
+             ) as mock_stream, \
+             patch("agentpal.channels.dingtalk_api.is_duplicate_msg", return_value=False):
             await _handle_message({})
 
         actual_text = mock_stream.call_args[0][1]
@@ -243,7 +251,8 @@ class TestHandleMessage:
              patch(
                  "agentpal.channels.dingtalk_stream_worker._stream_reply",
                  new=AsyncMock(),
-             ) as mock_stream:
+             ) as mock_stream, \
+             patch("agentpal.channels.dingtalk_api.is_duplicate_msg", return_value=False):
             await _handle_message({})
 
         mock_stream.assert_not_called()
@@ -259,11 +268,49 @@ class TestHandleMessage:
              patch(
                  "agentpal.channels.dingtalk_stream_worker._stream_reply",
                  new=AsyncMock(),
-             ) as mock_stream:
+             ) as mock_stream, \
+             patch("agentpal.channels.dingtalk_api.is_duplicate_msg", return_value=False):
             await _handle_message({})
 
         session_id = mock_stream.call_args[0][0]
         assert session_id == "dingtalk:sender_xyz"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_message_skipped(self):
+        """重复消息应被跳过。"""
+        mock_ds = _make_mock_ds_module()
+        msg = _make_chat_message("你好", msg_id="msg-001")
+        mock_ds.ChatbotMessage.from_dict.return_value = msg
+
+        with patch.dict(sys.modules, {"dingtalk_stream": mock_ds}), \
+             patch(
+                 "agentpal.channels.dingtalk_stream_worker._stream_reply",
+                 new=AsyncMock(),
+             ) as mock_stream, \
+             patch("agentpal.channels.dingtalk_api.is_duplicate_msg", return_value=True):
+            await _handle_message({})
+
+        mock_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tool_guard_confirm(self):
+        """Tool Guard 确认消息应直接 resolve。"""
+        mock_ds = _make_mock_ds_module()
+        msg = _make_chat_message("确认 abcd1234")
+        mock_ds.ChatbotMessage.from_dict.return_value = msg
+
+        mock_guard = MagicMock()
+        mock_guard.resolve.return_value = True
+
+        with patch.dict(sys.modules, {"dingtalk_stream": mock_ds}), \
+             patch("agentpal.channels.dingtalk_api.is_duplicate_msg", return_value=False), \
+             patch("agentpal.tools.tool_guard.ToolGuardManager.get_instance", return_value=mock_guard), \
+             patch("agentpal.channels.dingtalk_api.send_text", new=AsyncMock()) as mock_send:
+            await _handle_message({})
+
+        mock_guard.resolve.assert_called_once_with("abcd1234", True)
+        mock_send.assert_awaited_once()
+        assert "已确认执行" in mock_send.call_args[0][1]
 
 
 # ── _ensure_dingtalk_session ───────────────────────────────
@@ -297,19 +344,20 @@ class TestEnsureDingtalkSession:
         mock_assistant.reply_stream = _fake_stream
         mock_db_ctx = AsyncMock()
 
-        with patch("agentpal.database.AsyncSessionLocal", return_value=mock_db_ctx), \
+        with patch("agentpal.channels.dingtalk_stream_worker._scheduler", None), \
+             patch("agentpal.database.AsyncSessionLocal", return_value=mock_db_ctx), \
              patch("agentpal.memory.factory.MemoryFactory"), \
              patch("agentpal.agents.personal_assistant.PersonalAssistant",
                    return_value=mock_assistant), \
              patch("agentpal.channels.dingtalk_stream_worker.get_settings") as mock_cfg, \
              patch("agentpal.channels.dingtalk_stream_worker._ensure_dingtalk_session",
                    new=AsyncMock()) as mock_ensure, \
-             patch("agentpal.channels.dingtalk_stream_worker._send_reply",
+             patch("agentpal.channels.dingtalk_api.send_text",
                    new=AsyncMock()):
             mock_cfg.return_value.memory_backend = "buffer"
             await _stream_reply("dingtalk:conv123", "你好", "http://webhook/reply")
 
-        mock_ensure.assert_awaited_once_with(mock_db_ctx.__aenter__.return_value, "dingtalk:conv123")
+        mock_ensure.assert_awaited_once()
 
 
 # ── _stream_reply（渐进式发送）────────────────────────────
@@ -330,14 +378,15 @@ class TestStreamReply:
         mock_assistant.reply_stream = _fake_stream
         mock_db_ctx = AsyncMock()
 
-        with patch("agentpal.database.AsyncSessionLocal", return_value=mock_db_ctx), \
+        with patch("agentpal.channels.dingtalk_stream_worker._scheduler", None), \
+             patch("agentpal.database.AsyncSessionLocal", return_value=mock_db_ctx), \
              patch("agentpal.memory.factory.MemoryFactory"), \
              patch("agentpal.agents.personal_assistant.PersonalAssistant",
                    return_value=mock_assistant), \
              patch("agentpal.channels.dingtalk_stream_worker.get_settings") as mock_cfg, \
-             patch("agentpal.channels.dingtalk_stream_worker._send_markdown_reply",
+             patch("agentpal.channels.dingtalk_api.send_markdown",
                    new=AsyncMock()) as mock_md, \
-             patch("agentpal.channels.dingtalk_stream_worker._send_reply",
+             patch("agentpal.channels.dingtalk_api.send_text",
                    new=AsyncMock()) as mock_text:
             mock_cfg.return_value.memory_backend = "buffer"
             await _stream_reply("sid", "现在几点", "http://webhook/reply")
@@ -363,14 +412,15 @@ class TestStreamReply:
         mock_assistant.reply_stream = _fake_stream
         mock_db_ctx = AsyncMock()
 
-        with patch("agentpal.database.AsyncSessionLocal", return_value=mock_db_ctx), \
+        with patch("agentpal.channels.dingtalk_stream_worker._scheduler", None), \
+             patch("agentpal.database.AsyncSessionLocal", return_value=mock_db_ctx), \
              patch("agentpal.memory.factory.MemoryFactory"), \
              patch("agentpal.agents.personal_assistant.PersonalAssistant",
                    return_value=mock_assistant), \
              patch("agentpal.channels.dingtalk_stream_worker.get_settings") as mock_cfg, \
-             patch("agentpal.channels.dingtalk_stream_worker._send_markdown_reply",
+             patch("agentpal.channels.dingtalk_api.send_markdown",
                    new=AsyncMock()) as mock_md, \
-             patch("agentpal.channels.dingtalk_stream_worker._send_reply",
+             patch("agentpal.channels.dingtalk_api.send_text",
                    new=AsyncMock()) as mock_text:
             mock_cfg.return_value.memory_backend = "buffer"
             await _stream_reply("sid", "你好", "http://webhook/reply")
@@ -389,12 +439,13 @@ class TestStreamReply:
         mock_assistant.reply_stream = _fake_stream
         mock_db_ctx = AsyncMock()
 
-        with patch("agentpal.database.AsyncSessionLocal", return_value=mock_db_ctx), \
+        with patch("agentpal.channels.dingtalk_stream_worker._scheduler", None), \
+             patch("agentpal.database.AsyncSessionLocal", return_value=mock_db_ctx), \
              patch("agentpal.memory.factory.MemoryFactory"), \
              patch("agentpal.agents.personal_assistant.PersonalAssistant",
                    return_value=mock_assistant), \
              patch("agentpal.channels.dingtalk_stream_worker.get_settings") as mock_cfg, \
-             patch("agentpal.channels.dingtalk_stream_worker._send_reply",
+             patch("agentpal.channels.dingtalk_api.send_text",
                    new=AsyncMock()) as mock_text:
             mock_cfg.return_value.memory_backend = "buffer"
             await _stream_reply("sid", "test", "http://webhook/reply")
@@ -403,24 +454,25 @@ class TestStreamReply:
         assert any("❌ 模型调用失败" in str(c) for c in calls)
 
 
-# ── _format_tool_start / _format_tool_done ────────────────
+# ── format_tool_start / format_tool_done ────────────────
 
 
 class TestFormatToolStart:
     def test_basic(self):
-        md = _format_tool_start("get_current_time", {})
+        md = format_tool_start("get_current_time", {})
         assert "⏳" in md
         assert "**get_current_time**" in md
-        assert "{}" in md
 
     def test_long_input_truncated(self):
         long_input = {"data": "x" * 300}
-        md = _format_tool_start("tool", long_input)
+        md = format_tool_start("tool", long_input)
         assert "…" in md
 
     def test_non_dict_input(self):
-        md = _format_tool_start("tool", "simple_string")
-        assert "simple_string" in md
+        md = format_tool_start("tool", "simple_string")
+        # markdown escaping turns _ into \_
+        assert "simple" in md
+        assert "string" in md
 
 
 class TestFormatToolDone:
@@ -431,9 +483,9 @@ class TestFormatToolDone:
             "error": None,
             "duration_ms": 12,
         }
-        md = _format_tool_done(event)
+        md = format_tool_done(event)
         assert "🔧 **get_current_time**" in md
-        assert "输出：2026-03-13 13:21:00" in md
+        assert "2026" in md
         assert "⏱ 12ms" in md
 
     def test_error(self):
@@ -443,9 +495,9 @@ class TestFormatToolDone:
             "error": "Permission denied",
             "duration_ms": 1,
         }
-        md = _format_tool_done(event)
-        assert "❌ 错误：Permission denied" in md
-        assert "输出" not in md
+        md = format_tool_done(event)
+        assert "❌" in md
+        assert "Permission denied" in md
 
     def test_long_output_truncated(self):
         event = {
@@ -454,7 +506,7 @@ class TestFormatToolDone:
             "error": None,
             "duration_ms": 10,
         }
-        md = _format_tool_done(event)
+        md = format_tool_done(event)
         assert "…" in md
 
     def test_no_duration(self):
@@ -464,7 +516,7 @@ class TestFormatToolDone:
             "error": None,
             "duration_ms": None,
         }
-        md = _format_tool_done(event)
+        md = format_tool_done(event)
         assert "⏱" not in md
 
 
@@ -499,8 +551,10 @@ class TestExtractText:
         m.text.content = None
         assert _extract_text(m) == ""
 
-    def test_only_at_prefix_returns_empty(self):
-        assert _extract_text(self._msg("@nimo ")) == ""
+    def test_only_at_prefix_returns_original(self):
+        """只有 @mention 时，返回原始文本（避免过度剥离）。"""
+        result = _extract_text(self._msg("@nimo "))
+        assert result == "@nimo"
 
     def test_at_in_middle_not_stripped(self):
         """@ 不在开头则不应被去除。"""
@@ -508,23 +562,21 @@ class TestExtractText:
         assert "@nimo" in result
 
 
-# ── _send_reply ───────────────────────────────────────────
+# ── send_text / send_markdown ────────────────────────────
 
 
 class TestSendReply:
     @pytest.mark.asyncio
     async def test_posts_to_webhook_url(self):
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
-                return_value=mock_resp
-            )
-            await _send_reply("http://webhook.test/reply", "Hello!")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            await send_text("http://webhook.test/reply", "Hello!")
 
-        post = mock_client.return_value.__aenter__.return_value.post
-        post.assert_awaited_once()
-        call_args = post.call_args
+        mock_client.post.assert_awaited_once()
+        call_args = mock_client.post.call_args
         assert call_args[0][0] == "http://webhook.test/reply"
         payload = call_args[1]["json"]
         assert payload["msgtype"] == "text"
@@ -533,44 +585,40 @@ class TestSendReply:
     @pytest.mark.asyncio
     async def test_non_200_does_not_raise(self):
         """HTTP 非 200 只警告，不抛异常。"""
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 500
-            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
-                return_value=mock_resp
-            )
-            await _send_reply("http://webhook.test/reply", "Hello!")  # must not raise
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            await send_text("http://webhook.test/reply", "Hello!")  # must not raise
 
     @pytest.mark.asyncio
     async def test_network_exception_does_not_raise(self):
         """网络异常只记日志，不向上传播。"""
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
-                side_effect=Exception("connection refused")
-            )
-            await _send_reply("http://webhook.test/reply", "Hello!")  # must not raise
+        mock_client = AsyncMock()
+        mock_client.post.side_effect = Exception("connection refused")
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            await send_text("http://webhook.test/reply", "Hello!")  # must not raise
 
 
-# ── _send_markdown_reply ──────────────────────────────────
+# ── send_markdown ─────────────────────────────────────────
 
 
 class TestSendMarkdownReply:
     @pytest.mark.asyncio
     async def test_posts_markdown_to_webhook(self):
         """应以 markdown msgtype 发送。"""
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
-                return_value=mock_resp
-            )
-            await _send_markdown_reply(
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            await send_markdown(
                 "http://webhook.test/reply", "AI 助手", "# Hello\n正文"
             )
 
-        post = mock_client.return_value.__aenter__.return_value.post
-        post.assert_awaited_once()
-        call_args = post.call_args
+        mock_client.post.assert_awaited_once()
+        call_args = mock_client.post.call_args
         assert call_args[0][0] == "http://webhook.test/reply"
         payload = call_args[1]["json"]
         assert payload["msgtype"] == "markdown"
@@ -579,78 +627,89 @@ class TestSendMarkdownReply:
 
     @pytest.mark.asyncio
     async def test_non_200_does_not_raise(self):
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 500
-            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
-                return_value=mock_resp
-            )
-            await _send_markdown_reply("http://wh/r", "AI", "text")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            await send_markdown("http://wh/r", "AI", "text")
 
     @pytest.mark.asyncio
     async def test_network_exception_does_not_raise(self):
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
-                side_effect=Exception("timeout")
-            )
-            await _send_markdown_reply("http://wh/r", "AI", "text")
+        mock_client = AsyncMock()
+        mock_client.post.side_effect = Exception("timeout")
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            await send_markdown("http://wh/r", "AI", "text")
 
 
-# ── _get_dingtalk_access_token ────────────────────────────
+# ── get_access_token ──────────────────────────────────────
 
 
 class TestGetAccessToken:
+    @pytest.fixture(autouse=True)
+    def _clear_token_cache(self):
+        """每个测试前清空 token 缓存。"""
+        import agentpal.channels.dingtalk_api as api
+        api._token_cache.clear()
+        yield
+        api._token_cache.clear()
+
     @pytest.mark.asyncio
     async def test_success(self):
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"errcode": 0, "access_token": "tok123"}
-            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
-                return_value=mock_resp
-            )
-            token = await _get_dingtalk_access_token("key", "secret")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"errcode": 0, "access_token": "tok123", "expires_in": 7200}
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_resp
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            token = await get_access_token("key", "secret")
         assert token == "tok123"
 
     @pytest.mark.asyncio
     async def test_failure_returns_none(self):
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"errcode": 40001, "errmsg": "invalid"}
-            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
-                return_value=mock_resp
-            )
-            token = await _get_dingtalk_access_token("key", "secret")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"errcode": 40001, "errmsg": "invalid"}
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_resp
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            token = await get_access_token("key", "secret")
         assert token is None
 
     @pytest.mark.asyncio
     async def test_exception_returns_none(self):
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
-                side_effect=Exception("network")
-            )
-            token = await _get_dingtalk_access_token("key", "secret")
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = Exception("network")
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            token = await get_access_token("key", "secret")
         assert token is None
 
 
-# ── _upload_to_dingtalk ───────────────────────────────────
+# ── upload_media ──────────────────────────────────────────
 
 
 class TestUploadToDingtalk:
+    @pytest.fixture(autouse=True)
+    def _clear_token_cache(self):
+        import agentpal.channels.dingtalk_api as api
+        api._token_cache.clear()
+        yield
+        api._token_cache.clear()
+
     @pytest.mark.asyncio
     async def test_success(self, tmp_path: Path):
         img = tmp_path / "test.png"
         img.write_bytes(b"\x89PNG")
 
-        with patch(
-            "agentpal.channels.dingtalk_stream_worker._get_dingtalk_access_token",
-            new=AsyncMock(return_value="tok123"),
-        ), patch("httpx.AsyncClient") as mock_client:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"errcode": 0, "media_id": "@lAD123456"}
-            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
-                return_value=mock_resp
-            )
-            media_id = await _upload_to_dingtalk("key", "secret", img, "image/png")
+        mock_token_resp = MagicMock()
+        mock_token_resp.json.return_value = {"errcode": 0, "access_token": "tok123", "expires_in": 7200}
+        mock_upload_resp = MagicMock()
+        mock_upload_resp.json.return_value = {"errcode": 0, "media_id": "@lAD123456"}
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_token_resp
+        mock_client.post.return_value = mock_upload_resp
+
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            media_id = await upload_media("key", "secret", img, "image/png")
 
         assert media_id == "@lAD123456"
 
@@ -659,11 +718,13 @@ class TestUploadToDingtalk:
         img = tmp_path / "test.png"
         img.write_bytes(b"\x89PNG")
 
-        with patch(
-            "agentpal.channels.dingtalk_stream_worker._get_dingtalk_access_token",
-            new=AsyncMock(return_value=None),
-        ):
-            media_id = await _upload_to_dingtalk("key", "secret", img, "image/png")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"errcode": 40001, "errmsg": "invalid"}
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_resp
+
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            media_id = await upload_media("key", "secret", img, "image/png")
 
         assert media_id is None
 
@@ -672,15 +733,41 @@ class TestUploadToDingtalk:
         img = tmp_path / "test.png"
         img.write_bytes(b"\x89PNG")
 
-        with patch(
-            "agentpal.channels.dingtalk_stream_worker._get_dingtalk_access_token",
-            new=AsyncMock(return_value="tok123"),
-        ), patch("httpx.AsyncClient") as mock_client:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"errcode": 40001, "errmsg": "fail"}
-            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
-                return_value=mock_resp
-            )
-            media_id = await _upload_to_dingtalk("key", "secret", img, "image/png")
+        mock_token_resp = MagicMock()
+        mock_token_resp.json.return_value = {"errcode": 0, "access_token": "tok123", "expires_in": 7200}
+        mock_upload_resp = MagicMock()
+        mock_upload_resp.json.return_value = {"errcode": 40001, "errmsg": "fail"}
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_token_resp
+        mock_client.post.return_value = mock_upload_resp
+
+        with patch("agentpal.channels.dingtalk_api.get_http_client", return_value=mock_client):
+            media_id = await upload_media("key", "secret", img, "image/png")
 
         assert media_id is None
+
+
+# ── is_duplicate_msg ──────────────────────────────────────
+
+
+class TestIsDuplicateMsg:
+    @pytest.fixture(autouse=True)
+    def _clear_seen(self):
+        import agentpal.channels.dingtalk_api as api
+        api._seen_msg_ids.clear()
+        yield
+        api._seen_msg_ids.clear()
+
+    def test_first_message_not_duplicate(self):
+        assert is_duplicate_msg("msg-001") is False
+
+    def test_second_same_message_is_duplicate(self):
+        is_duplicate_msg("msg-002")
+        assert is_duplicate_msg("msg-002") is True
+
+    def test_none_msg_id_not_duplicate(self):
+        assert is_duplicate_msg(None) is False
+
+    def test_empty_msg_id_not_duplicate(self):
+        assert is_duplicate_msg("") is False

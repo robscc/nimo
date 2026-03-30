@@ -94,11 +94,11 @@ class TestDingTalkParseIncoming:
 class TestDingTalkSend:
     @pytest.mark.asyncio
     async def test_send_success(self, channel: DingTalkChannel):
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"errcode": 0, "errmsg": "ok"}
-            mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_resp)
-
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"errcode": 0, "errmsg": "ok"}
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+        with patch("agentpal.channels.dingtalk.get_http_client", return_value=mock_client):
             result = await channel.send(
                 OutgoingMessage(session_id="dingtalk:conv123", text="回复内容")
             )
@@ -106,11 +106,11 @@ class TestDingTalkSend:
 
     @pytest.mark.asyncio
     async def test_send_failure(self, channel: DingTalkChannel):
-        with patch("httpx.AsyncClient") as mock_client:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"errcode": 400023, "errmsg": "error"}
-            mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_resp)
-
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"errcode": 400023, "errmsg": "error"}
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+        with patch("agentpal.channels.dingtalk.get_http_client", return_value=mock_client):
             result = await channel.send(
                 OutgoingMessage(session_id="dingtalk:conv123", text="test")
             )

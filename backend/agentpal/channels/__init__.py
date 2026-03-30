@@ -1,3 +1,4 @@
+from agentpal.channels import dingtalk_api
 from agentpal.channels.base import BaseChannel, IncomingMessage, OutgoingMessage
 from agentpal.channels.dingtalk import DingTalkChannel
 from agentpal.channels.dingtalk_stream_worker import DingTalkStreamWorker
@@ -12,4 +13,5 @@ __all__ = [
     "DingTalkStreamWorker",
     "FeishuChannel",
     "IMessageChannel",
+    "dingtalk_api",
 ]

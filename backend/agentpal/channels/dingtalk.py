@@ -14,9 +14,8 @@ import time
 import urllib.parse
 from typing import Any
 
-import httpx
-
 from agentpal.channels.base import BaseChannel, IncomingMessage, OutgoingMessage
+from agentpal.channels.dingtalk_api import get_http_client
 from agentpal.config import get_settings
 
 
@@ -64,10 +63,10 @@ class DingTalkChannel(BaseChannel):
             "text": {"content": message.text},
             "at": {"isAtAll": False},
         }
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(webhook_url, json=body)
-            result = resp.json()
-            return result.get("errcode", -1) == 0
+        client = get_http_client()
+        resp = await client.post(webhook_url, json=body)
+        result = resp.json()
+        return result.get("errcode", -1) == 0
 
     async def verify_signature(self, headers: dict[str, str], body: bytes) -> bool:
         """验证钉钉 Webhook 签名（timestamp + sign）。

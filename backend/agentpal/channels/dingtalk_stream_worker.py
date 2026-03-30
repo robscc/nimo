@@ -5,10 +5,10 @@
                                           |
                                   _handle_message()
                                           |
-                              PersonalAssistant.reply_stream()
+                          SchedulerClient (ZMQ) → PA Worker
                                           |
                       sessionWebhook --HTTP--> DingTalk 云
-                      （逐条发送：工具开始 → 工具完成 → 图片 → 最终回复）
+                      （逐条发送：工具/思考/计划/安全确认 → 最终回复）
 
 配置（.env 或 ~/.nimo/config.yaml）：
     DINGTALK_ENABLED=true
@@ -30,7 +30,11 @@ from typing import Any
 
 from loguru import logger
 
+from agentpal.channels import dingtalk_api
 from agentpal.config import get_settings
+
+# 模块级 Scheduler 引用（由 start() 注入）
+_scheduler: Any = None
 
 
 class DingTalkStreamWorker:
@@ -47,8 +51,16 @@ class DingTalkStreamWorker:
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    async def start(self) -> None:
-        """检查配置并在后台启动 DingTalk Stream 客户端。"""
+    async def start(self, *, scheduler: Any = None) -> None:
+        """检查配置并在后台启动 DingTalk Stream 客户端。
+
+        Args:
+            scheduler: SchedulerClient 实例，用于通过 ZMQ 路由到 PA Worker。
+                       为 None 时回退到直接 PersonalAssistant 调用。
+        """
+        global _scheduler
+        _scheduler = scheduler
+
         settings = get_settings()
 
         if not settings.dingtalk_enabled:
@@ -89,6 +101,7 @@ class DingTalkStreamWorker:
             except (asyncio.CancelledError, Exception):
                 pass
         self._task = None
+        await dingtalk_api.close_http_client()
         logger.info("DingTalk Stream 客户端已停止")
 
 
@@ -131,17 +144,16 @@ async def _run_stream_client(app_key: str, app_secret: str) -> None:
     await client.start()  # SDK 内部 while True 处理重连
 
 
-# ── 核心消息处理逻辑（纯函数，方便单元测试）─────────────────
+# ── 核心消息处理逻辑 ──────────────────────────────────────
 
 
 async def _handle_message(callback_data: dict[str, Any]) -> None:
     """解析 ChatbotMessage，调用助手，逐条发送回复。
 
-    流程：
-        1. tool_start  → 立即发一条 Markdown "⏳ 正在调用 xxx …"
-        2. tool_done   → 立即发一条 Markdown 展示工具结果
-        3. file (图片) → 上传到钉钉获取 mediaId，发 Markdown 内嵌图片
-        4. 最终文本    → 纯文本 / Markdown 回复
+    支持：
+        - 普通对话消息 → 路由到 PA Worker
+        - Tool Guard 确认/取消 → 直接 resolve
+        - 消息去重 → 跳过重复 msgId
 
     Args:
         callback_data: CallbackMessage.data dict（来自 DingTalk SDK）
@@ -149,6 +161,12 @@ async def _handle_message(callback_data: dict[str, Any]) -> None:
     import dingtalk_stream
 
     message = dingtalk_stream.ChatbotMessage.from_dict(callback_data)
+
+    # 消息去重
+    msg_id = getattr(message, "msg_id", None) or callback_data.get("msgId")
+    if dingtalk_api.is_duplicate_msg(msg_id):
+        logger.debug(f"DingTalk Stream: 重复消息 msgId={msg_id}，跳过")
+        return
 
     # 提取纯文本，去除 @机器人 前缀
     text = _extract_text(message)
@@ -172,6 +190,25 @@ async def _handle_message(callback_data: dict[str, Any]) -> None:
     session_webhook = getattr(message, "session_webhook", None)
     if not session_webhook:
         logger.warning("DingTalk Stream: 消息缺少 session_webhook，无法回复")
+        return
+
+    # ── Tool Guard 确认拦截 ──────────────────────────
+    guard_match = re.match(
+        r"^(confirm|cancel|确认|取消)\s+([a-f0-9-]+)$",
+        text.strip(),
+        re.IGNORECASE,
+    )
+    if guard_match:
+        from agentpal.tools.tool_guard import ToolGuardManager
+
+        action, request_id = guard_match.groups()
+        approved = action.lower() in ("confirm", "确认")
+        guard = ToolGuardManager.get_instance()
+        if guard.resolve(request_id, approved):
+            reply = f"{'✅ 已确认执行' if approved else '❌ 已取消执行'} [{request_id[:8]}]"
+        else:
+            reply = f"⚠️ 未找到确认请求 [{request_id[:8]}]，可能已过期"
+        await dingtalk_api.send_text(session_webhook, reply)
         return
 
     await _stream_reply(session_id, text, session_webhook)
@@ -208,7 +245,83 @@ async def _ensure_dingtalk_session(db: Any, session_id: str) -> None:
 async def _stream_reply(
     session_id: str, text: str, session_webhook: str
 ) -> None:
-    """消费 reply_stream() 事件，逐条通过 sessionWebhook 发送消息。"""
+    """消费事件流，逐条通过 sessionWebhook 发送消息。
+
+    优先通过 SchedulerClient (ZMQ) 路由到 PA Worker；
+    Scheduler 不可用时回退到直接 PersonalAssistant 调用。
+    """
+    from agentpal.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        await _ensure_dingtalk_session(db, session_id)
+
+    if _scheduler is not None:
+        await _stream_reply_via_scheduler(session_id, text, session_webhook)
+    else:
+        await _stream_reply_direct(session_id, text, session_webhook)
+
+
+async def _stream_reply_via_scheduler(
+    session_id: str, text: str, session_webhook: str
+) -> None:
+    """通过 SchedulerClient (ZMQ) 路由到 PA Worker 处理对话。"""
+    import uuid
+
+    from agentpal.zmq_bus.protocol import Envelope, MessageType
+
+    msg_id = str(uuid.uuid4())
+
+    # 1. 确保 PA daemon 运行
+    await _scheduler.ensure_pa_daemon(session_id)
+
+    # 2. 创建事件订阅者
+    subscriber = _scheduler.create_event_subscriber(
+        topic=f"session:{session_id}",
+        filter_msg_id=msg_id,
+    )
+
+    # 3. 发送 CHAT_REQUEST
+    envelope = Envelope(
+        msg_id=msg_id,
+        msg_type=MessageType.CHAT_REQUEST,
+        source="dingtalk:stream",
+        target=f"pa:{session_id}",
+        session_id=session_id,
+        payload={
+            "message": text,
+            "channel": "dingtalk",
+        },
+    )
+    await _scheduler.send_to_agent(f"pa:{session_id}", envelope)
+
+    # 4. 订阅事件 → 逐条发送到钉钉
+    reply_parts: list[str] = []
+    settings = get_settings()
+
+    try:
+        async with subscriber:
+            async for event in subscriber:
+                event_clean = {k: v for k, v in event.items() if not k.startswith("_")}
+                await _dispatch_event(event_clean, session_webhook, reply_parts, settings)
+
+                etype = event_clean.get("type", "")
+                if etype in ("done", "error"):
+                    break
+    except Exception as exc:
+        logger.error(f"DingTalk Stream: Scheduler 事件流异常 — {exc}")
+        await dingtalk_api.send_text(session_webhook, f"❌ 内部错误: {exc}")
+        return
+
+    # 发送最终文本回复
+    final_text = "".join(reply_parts)
+    if final_text.strip():
+        await dingtalk_api.send_text(session_webhook, final_text)
+
+
+async def _stream_reply_direct(
+    session_id: str, text: str, session_webhook: str
+) -> None:
+    """直接调用 PersonalAssistant（Scheduler 不可用时的回退路径）。"""
     from agentpal.agents.personal_assistant import PersonalAssistant
     from agentpal.database import AsyncSessionLocal
     from agentpal.memory.factory import MemoryFactory
@@ -217,81 +330,120 @@ async def _stream_reply(
     reply_parts: list[str] = []
 
     async with AsyncSessionLocal() as db:
-        await _ensure_dingtalk_session(db, session_id)
         memory = MemoryFactory.create(settings.memory_backend, db=db)
         assistant = PersonalAssistant(session_id=session_id, memory=memory, db=db)
 
         async for event in assistant.reply_stream(text):
-            etype = event.get("type")
-
-            if etype == "tool_start":
-                # 立即发送 "正在调用" 提示
-                tc_name = event.get("name", "")
-                tc_input = event.get("input", {})
-                md = _format_tool_start(tc_name, tc_input)
-                await _send_markdown_reply(session_webhook, "⏳ 工具调用", md)
-
-            elif etype == "tool_done":
-                # 立即发送工具结果
-                md = _format_tool_done(event)
-                await _send_markdown_reply(session_webhook, "✅ 工具结果", md)
-
-                # 如果是 send_file_to_user 且成功，尝试发送图片
-                if (
-                    event.get("name") == "send_file_to_user"
-                    and not event.get("error")
-                ):
-                    await _try_send_image(session_webhook, event, settings)
-
-            elif etype == "text_delta":
-                reply_parts.append(event.get("delta", ""))
-
-            elif etype == "error":
-                err_msg = event.get("message", "未知错误")
-                await _send_reply(session_webhook, f"❌ {err_msg}")
+            await _dispatch_event(event, session_webhook, reply_parts, settings)
 
     # 发送最终文本回复
     final_text = "".join(reply_parts)
     if final_text.strip():
-        await _send_reply(session_webhook, final_text)
+        await dingtalk_api.send_text(session_webhook, final_text)
 
 
-# ── 工具消息格式化 ────────────────────────────────────────
+# ── 事件分发（统一处理所有 SSE 事件类型）──────────────────
 
 
-def _format_tool_start(name: str, tc_input: Any) -> str:
-    """格式化 tool_start 事件为钉钉 Markdown。"""
-    if isinstance(tc_input, dict):
-        input_str = json.dumps(tc_input, ensure_ascii=False, separators=(",", ":"))
-    else:
-        input_str = str(tc_input)
+async def _dispatch_event(
+    event: dict[str, Any],
+    session_webhook: str,
+    reply_parts: list[str],
+    settings: Any,
+) -> None:
+    """将单个 SSE 事件转化为钉钉消息发送。"""
+    etype = event.get("type", "")
 
-    if len(input_str) > 200:
-        input_str = input_str[:200] + "…"
+    if etype == "thinking_delta":
+        # thinking 不逐条发送，避免刷屏（收集后可选发送摘要）
+        pass
 
-    return f"⏳ 正在调用 **{name}** …\n\n> 输入：{input_str}"
+    elif etype == "tool_start":
+        tc_name = event.get("name", "")
+        tc_input = event.get("input", {})
+        md = dingtalk_api.format_tool_start(tc_name, tc_input)
+        await dingtalk_api.send_markdown(session_webhook, "⏳ 工具调用", md)
 
+    elif etype == "tool_done":
+        md = dingtalk_api.format_tool_done(event)
+        await dingtalk_api.send_markdown(session_webhook, "✅ 工具结果", md)
 
-def _format_tool_done(event: dict[str, Any]) -> str:
-    """格式化 tool_done 事件为钉钉 Markdown。"""
-    name = event.get("name", "unknown")
-    output = event.get("output", "")
-    error = event.get("error")
-    duration = event.get("duration_ms")
+        # 如果是 send_file_to_user 且成功，尝试发送图片
+        if event.get("name") == "send_file_to_user" and not event.get("error"):
+            await _try_send_image(session_webhook, event, settings)
 
-    output_str = str(output)
-    if len(output_str) > 500:
-        output_str = output_str[:500] + "…"
+    elif etype == "tool_guard_request":
+        md = dingtalk_api.format_tool_guard_request(event)
+        await dingtalk_api.send_markdown(session_webhook, "🔒 安全确认", md)
 
-    section = f"🔧 **{name}**\n"
-    if error:
-        section += f"> ❌ 错误：{error}\n"
-    else:
-        section += f"> 输出：{output_str}\n"
-    if duration is not None:
-        section += f"> ⏱ {duration}ms"
+    elif etype == "tool_guard_resolved":
+        approved = event.get("approved", False)
+        status = "✅ 已确认执行" if approved else "❌ 已取消"
+        await dingtalk_api.send_markdown(session_webhook, "🔒 安全确认", status)
 
-    return section
+    elif etype == "retry":
+        attempt = event.get("attempt", 0)
+        max_attempts = event.get("max_attempts", 0)
+        error = event.get("error", "")
+        md = f"⏳ 第 {attempt}/{max_attempts} 次重试…\n\n> {error}"
+        await dingtalk_api.send_markdown(session_webhook, "⏳ 重试", md)
+
+    elif etype == "plan_generating":
+        await dingtalk_api.send_markdown(
+            session_webhook, "📋 计划", "正在生成执行计划…"
+        )
+
+    elif etype == "plan_ready":
+        plan = event.get("plan", {})
+        md = dingtalk_api.format_plan_ready(plan)
+        await dingtalk_api.send_markdown(session_webhook, "📋 执行计划", md)
+
+    elif etype == "plan_step_start":
+        step = event.get("step", {})
+        idx = event.get("step_index", 0) + 1
+        total = event.get("total_steps", "?")
+        title = step.get("title", "")
+        md = f"▶️ 步骤 {idx}/{total}: **{title}**"
+        await dingtalk_api.send_markdown(session_webhook, "📋 步骤", md)
+
+    elif etype == "plan_step_done":
+        idx = event.get("step_index", 0) + 1
+        result = event.get("result", "")
+        status = "❌" if result.startswith("失败") else "✅"
+        md = f"{status} 步骤 {idx} 完成"
+        if result:
+            md += f"\n\n> {result[:200]}"
+        await dingtalk_api.send_markdown(session_webhook, "📋 步骤", md)
+
+    elif etype == "plan_completed":
+        await dingtalk_api.send_markdown(
+            session_webhook, "📋 计划", "执行计划已完成 ✅"
+        )
+
+    elif etype == "plan_cancelled":
+        await dingtalk_api.send_markdown(
+            session_webhook, "📋 计划", "执行计划已取消"
+        )
+
+    elif etype == "text_delta":
+        reply_parts.append(event.get("delta", ""))
+
+    elif etype == "error":
+        err_msg = event.get("message", "未知错误")
+        await dingtalk_api.send_text(session_webhook, f"❌ {err_msg}")
+
+    elif etype == "file":
+        # 文件事件（来自 pa_daemon 的 send_file_to_user 处理）
+        url = event.get("url", "")
+        name = event.get("name", "文件")
+        mime = event.get("mime", "")
+        if mime and mime.startswith("image/"):
+            md = f"📷 **{name}**\n\n![{name}]({url})"
+            await dingtalk_api.send_markdown(session_webhook, "📷 图片", md)
+        elif url:
+            await dingtalk_api.send_text(session_webhook, f"📎 文件: {name} — {url}")
+
+    # done / heartbeat / tool_guard_waiting → 不发送
 
 
 # ── 图片发送 ──────────────────────────────────────────────
@@ -300,13 +452,7 @@ def _format_tool_done(event: dict[str, Any]) -> str:
 async def _try_send_image(
     session_webhook: str, tool_done_event: dict[str, Any], settings: Any
 ) -> None:
-    """尝试从 send_file_to_user 的输出中提取文件并发送图片到钉钉。
-
-    策略：
-        1. 解析 tool output 获取本地文件路径
-        2. 上传到钉钉 /media/upload 获取 mediaId
-        3. 通过 Markdown `![](mediaId)` 发送图片
-    """
+    """尝试从 send_file_to_user 的输出中提取文件并发送图片到钉钉。"""
     try:
         output_str = tool_done_event.get("output", "")
         info = json.loads(output_str)
@@ -315,7 +461,7 @@ async def _try_send_image(
 
         filename = info.get("filename", "")
 
-        # 检查是否为图片（文件名 + 文件头双重验证）
+        # 检查是否为图片
         mime, _ = mimetypes.guess_type(filename)
         if not mime or not mime.startswith("image/"):
             logger.debug(f"DingTalk Stream: 文件 {filename} 非图片类型（{mime}），跳过")
@@ -327,12 +473,12 @@ async def _try_send_image(
             logger.warning(f"DingTalk Stream: 图片文件不存在 {local_path}")
             return
 
-        # 文件头校验：确认实际内容是图片
+        # 文件头校验
         _IMAGE_MAGIC = {
             b"\x89PNG": "image/png",
             b"\xff\xd8\xff": "image/jpeg",
             b"GIF8": "image/gif",
-            b"RIFF": "image/webp",  # RIFF....WEBP
+            b"RIFF": "image/webp",
             b"BM": "image/bmp",
         }
         with open(local_path, "rb") as f:
@@ -350,70 +496,19 @@ async def _try_send_image(
             logger.debug("DingTalk Stream: 缺少 app_key/secret，跳过图片上传")
             return
 
-        media_id = await _upload_to_dingtalk(app_key, app_secret, local_path, mime)
+        media_id = await dingtalk_api.upload_media(app_key, app_secret, local_path, mime)
         if not media_id:
             return
 
-        # 用 Markdown 发送图片
         md = f"![{filename}]({media_id})"
-        await _send_markdown_reply(session_webhook, "📷 图片", md)
+        await dingtalk_api.send_markdown(session_webhook, "📷 图片", md)
         logger.info(f"DingTalk Stream → 图片已发送: {filename}")
 
     except Exception as exc:
         logger.warning(f"DingTalk Stream: 发送图片失败 — {exc}")
 
 
-async def _get_dingtalk_access_token(app_key: str, app_secret: str) -> str | None:
-    """获取钉钉 API access_token。"""
-    import httpx
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                "https://oapi.dingtalk.com/gettoken",
-                params={"appkey": app_key, "appsecret": app_secret},
-            )
-        data = resp.json()
-        if data.get("errcode") == 0:
-            return data["access_token"]
-        logger.warning(f"DingTalk Stream: 获取 access_token 失败 — {data}")
-        return None
-    except Exception as exc:
-        logger.warning(f"DingTalk Stream: 获取 access_token 异常 — {exc}")
-        return None
-
-
-async def _upload_to_dingtalk(
-    app_key: str, app_secret: str, file_path: Path, mime_type: str
-) -> str | None:
-    """上传文件到钉钉媒体接口，返回 mediaId。"""
-    import httpx
-
-    access_token = await _get_dingtalk_access_token(app_key, app_secret)
-    if not access_token:
-        return None
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            with open(file_path, "rb") as f:
-                resp = await client.post(
-                    "https://oapi.dingtalk.com/media/upload",
-                    params={"access_token": access_token, "type": "image"},
-                    files={"media": (file_path.name, f, mime_type)},
-                )
-        data = resp.json()
-        if data.get("errcode") == 0:
-            media_id = data.get("media_id", "")
-            logger.debug(f"DingTalk Stream: 图片上传成功 media_id={media_id[:20]}…")
-            return media_id
-        logger.warning(f"DingTalk Stream: 图片上传失败 — {data}")
-        return None
-    except Exception as exc:
-        logger.warning(f"DingTalk Stream: 图片上传异常 — {exc}")
-        return None
-
-
-# ── 基础发送函数 ──────────────────────────────────────────
+# ── 文本提取 ──────────────────────────────────────────────
 
 
 def _extract_text(message: Any) -> str:
@@ -423,58 +518,20 @@ def _extract_text(message: Any) -> str:
         return ""
     raw: str = getattr(text_obj, "content", "") or ""
     # 去除开头所有 @xxx 标记（群消息中机器人名可能出现在开头）
-    return re.sub(r"^(@\S+\s*)+", "", raw.strip()).strip()
+    stripped = re.sub(r"^(@\S+\s*)+", "", raw.strip()).strip()
+    # 如果剥离后为空，使用原始文本（避免过度剥离）
+    return stripped or raw.strip()
 
 
-async def _send_reply(session_webhook: str, text: str) -> None:
-    """通过 DingTalk 临时 sessionWebhook 发送文本回复（异步 HTTP）。"""
-    import httpx
+# ── 兼容旧接口（供测试使用）──────────────────────────────
 
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                session_webhook,
-                json={
-                    "msgtype": "text",
-                    "text": {"content": text},
-                    "at": {"isAtAll": False},
-                },
-            )
-        if resp.status_code != 200:
-            logger.warning(f"DingTalk Stream: 回复失败 HTTP {resp.status_code}")
-        else:
-            logger.debug(f"DingTalk Stream → 回复已发送 ({len(text)} 字符) ✅")
-    except Exception as exc:
-        logger.error(f"DingTalk Stream: 发送回复异常 — {exc}")
-
-
-async def _send_markdown_reply(
-    session_webhook: str, title: str, markdown_text: str
-) -> None:
-    """通过 DingTalk 临时 sessionWebhook 发送 Markdown 回复（异步 HTTP）。"""
-    import httpx
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                session_webhook,
-                json={
-                    "msgtype": "markdown",
-                    "markdown": {
-                        "title": title,
-                        "text": markdown_text,
-                    },
-                    "at": {"isAtAll": False},
-                },
-            )
-        if resp.status_code != 200:
-            logger.warning(f"DingTalk Stream: Markdown 回复失败 HTTP {resp.status_code}")
-        else:
-            logger.debug(
-                f"DingTalk Stream → Markdown 回复已发送 ({len(markdown_text)} 字符) ✅"
-            )
-    except Exception as exc:
-        logger.error(f"DingTalk Stream: 发送 Markdown 回复异常 — {exc}")
+# 保留旧函数名作为别名，避免破坏现有测试
+_send_reply = dingtalk_api.send_text
+_send_markdown_reply = dingtalk_api.send_markdown
+_format_tool_start = dingtalk_api.format_tool_start
+_format_tool_done = dingtalk_api.format_tool_done
+_get_dingtalk_access_token = dingtalk_api.get_access_token
+_upload_to_dingtalk = dingtalk_api.upload_media
 
 
 # ── 单例（供 main.py lifespan 调用）──────────────────────
