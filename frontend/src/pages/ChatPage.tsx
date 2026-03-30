@@ -5,7 +5,7 @@ import {
   Send, Trash2, ChevronDown, ChevronRight,
   Loader2, XCircle, Paperclip,
   Settings, Smartphone,
-  CalendarClock, ImagePlus,
+  CalendarClock, ImagePlus, Eraser,
 } from "lucide-react";
 import clsx from "clsx";
 import { clearMemory, createSession, getSessions, getSessionMessages, resolveToolGuard } from "../api";
@@ -566,6 +566,16 @@ export default function ChatPage() {
     queryClient.invalidateQueries({ queryKey: ["sessions"] });
   };
 
+  // 清除上下文（保留对话显示，重置 LLM 记忆）
+  const handleClearContext = async () => {
+    if (!sessionId) return;
+    await clearMemory(sessionId);
+    setMessages((prev) => [
+      ...prev,
+      { role: "assistant", content: "🧹 上下文已清空，下次对话将从全新状态开始。" },
+    ]);
+  };
+
   return (
     <div className="flex h-full">
       {/* Session Panel */}
@@ -586,6 +596,15 @@ export default function ChatPage() {
             <span>nimo</span>
           </h1>
           <div className="flex items-center gap-1">
+          {sessionId && (
+          <button
+            onClick={handleClearContext}
+            className="p-2 text-gray-400 hover:text-amber-500 hover:bg-amber-50 rounded-lg transition-colors"
+            title="清除上下文（保留对话）"
+          >
+            <Eraser size={18} />
+          </button>
+          )}
           {!isReadOnly && (
           <button
             onClick={handleClear}

@@ -24,7 +24,7 @@ _channels = {
 }
 
 
-async def _handle_incoming(channel_name: str, payload: dict[str, Any], db: AsyncSession) -> dict:
+async def _handle_incoming(channel_name: str, payload: dict[str, Any], db: AsyncSession, request: Request | None = None) -> dict:
     """公共处理逻辑：解析消息 → 调用助手 → 返回回复。"""
     import re as _re
 
@@ -48,14 +48,31 @@ async def _handle_incoming(channel_name: str, payload: dict[str, Any], db: Async
         _re.IGNORECASE,
     )
     if guard_match:
-        from agentpal.tools.tool_guard import ToolGuardManager
-
         action, request_id = guard_match.groups()
         approved = action.lower() in ("confirm", "确认")
-        guard = ToolGuardManager.get_instance()
         from agentpal.channels.base import OutgoingMessage
 
-        if guard.resolve(request_id, approved):
+        resolved = False
+        zmq_manager = (getattr(request.app.state, "scheduler", None) or getattr(request.app.state, "zmq_manager", None)) if request is not None else None
+        if zmq_manager is not None:
+            from agentpal.zmq_bus.protocol import Envelope, MessageType
+
+            envelope = Envelope(
+                msg_type=MessageType.TOOL_GUARD_RESOLVE,
+                source="channel:tool_guard",
+                target=f"pa:{incoming.session_id}",
+                session_id=incoming.session_id,
+                payload={"request_id": request_id, "approved": approved},
+            )
+            await zmq_manager.send_to_agent(f"pa:{incoming.session_id}", envelope)
+            resolved = True
+        else:
+            from agentpal.tools.tool_guard import ToolGuardManager
+
+            guard = ToolGuardManager.get_instance()
+            resolved = guard.resolve(request_id, approved)
+
+        if resolved:
             await ch.send(
                 OutgoingMessage(
                     session_id=incoming.session_id,
@@ -69,6 +86,22 @@ async def _handle_incoming(channel_name: str, payload: dict[str, Any], db: Async
                     text=f"⚠️ 未找到确认请求 [{request_id[:8]}]，可能已过期",
                 )
             )
+        return {"status": "ok"}
+
+    # ── 清空上下文指令 ──────────────────────────────────
+    if incoming.text.strip().lower() in ("/clear", "/reset", "清空上下文", "清空记忆"):
+        from agentpal.channels.base import OutgoingMessage
+
+        _settings = get_settings()
+        memory = MemoryFactory.create(_settings.memory_backend, db=db)
+        await memory.clear(incoming.session_id)
+        await db.commit()
+        await ch.send(
+            OutgoingMessage(
+                session_id=incoming.session_id,
+                text="🧹 上下文已清空，下次对话将从全新状态开始。",
+            )
+        )
         return {"status": "ok"}
 
     settings = get_settings()
@@ -90,7 +123,7 @@ async def dingtalk_webhook(request: Request, db: AsyncSession = Depends(get_db))
     if not await ch.verify_signature(headers, body):
         raise HTTPException(status_code=401, detail="Invalid signature")
     payload = await request.json()
-    return await _handle_incoming("dingtalk", payload, db)
+    return await _handle_incoming("dingtalk", payload, db, request)
 
 
 @router.post("/feishu/webhook")
@@ -104,4 +137,4 @@ async def feishu_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     body = await request.body()
     if not await ch.verify_signature(dict(request.headers), body):
         raise HTTPException(status_code=401, detail="Invalid signature")
-    return await _handle_incoming("feishu", payload, db)
+    return await _handle_incoming("feishu", payload, db, request)

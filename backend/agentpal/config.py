@@ -25,9 +25,20 @@ def _load_yaml_settings() -> dict[str, Any]:
 
         mgr = ConfigFileManager()
         if mgr.config_path.exists():
-            return mgr.to_settings_dict()
-    except Exception:
-        pass
+            result = mgr.to_settings_dict()
+            import sys
+            print(
+                f"[config] YAML loaded from {mgr.config_path}: "
+                f"dingtalk_app_key={result.get('dingtalk_app_key', '<MISSING>')!r}",
+                file=sys.stderr,
+            )
+            return result
+        else:
+            import sys
+            print(f"[config] YAML not found at {mgr.config_path}", file=sys.stderr)
+    except Exception as e:
+        import sys
+        print(f"[config] YAML load FAILED: {e}", file=sys.stderr)
     return {}
 
 
