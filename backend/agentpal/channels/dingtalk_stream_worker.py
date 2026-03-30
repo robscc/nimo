@@ -63,6 +63,12 @@ class DingTalkStreamWorker:
 
         settings = get_settings()
 
+        logger.info(
+            f"DingTalk Stream: dingtalk_enabled={settings.dingtalk_enabled}, "
+            f"app_key={settings.dingtalk_app_key!r}, "
+            f"app_secret={'***' if settings.dingtalk_app_secret else repr(settings.dingtalk_app_secret)}"
+        )
+
         if not settings.dingtalk_enabled:
             logger.info("DingTalk Stream: dingtalk_enabled=False，跳过启动")
             return
@@ -199,16 +205,53 @@ async def _handle_message(callback_data: dict[str, Any]) -> None:
         re.IGNORECASE,
     )
     if guard_match:
-        from agentpal.tools.tool_guard import ToolGuardManager
-
         action, request_id = guard_match.groups()
         approved = action.lower() in ("confirm", "确认")
-        guard = ToolGuardManager.get_instance()
-        if guard.resolve(request_id, approved):
+
+        resolved = False
+        if _scheduler is not None:
+            # ZMQ 模式：pending 在 PA Worker 进程中，需通过 ZMQ 转发
+            from agentpal.zmq_bus.protocol import Envelope, MessageType
+
+            envelope = Envelope(
+                msg_type=MessageType.TOOL_GUARD_RESOLVE,
+                source="dingtalk:tool_guard",
+                target=f"pa:{session_id}",
+                session_id=session_id,
+                payload={"request_id": request_id, "approved": approved},
+            )
+            await _scheduler.send_to_agent(f"pa:{session_id}", envelope)
+            resolved = True
+        else:
+            # 直接模式：本地 resolve
+            from agentpal.tools.tool_guard import ToolGuardManager
+
+            guard = ToolGuardManager.get_instance()
+            resolved = guard.resolve(request_id, approved)
+
+        if resolved:
             reply = f"{'✅ 已确认执行' if approved else '❌ 已取消执行'} [{request_id[:8]}]"
         else:
             reply = f"⚠️ 未找到确认请求 [{request_id[:8]}]，可能已过期"
         await dingtalk_api.send_text(session_webhook, reply)
+        return
+
+    # ── 清空上下文指令 ──────────────────────────────────
+    if text.strip().lower() in ("/clear", "/reset", "清空上下文", "清空记忆"):
+        try:
+            from agentpal.config import get_settings as _get_settings
+            from agentpal.database import AsyncSessionLocal
+            from agentpal.memory.factory import MemoryFactory
+
+            async with AsyncSessionLocal() as db:
+                settings = _get_settings()
+                memory = MemoryFactory.create(settings.memory_backend, db=db)
+                await memory.clear(session_id)
+                await db.commit()
+            await dingtalk_api.send_text(session_webhook, "🧹 上下文已清空，下次对话将从全新状态开始。")
+        except Exception as exc:
+            logger.error(f"DingTalk 清空上下文失败: {exc}")
+            await dingtalk_api.send_text(session_webhook, f"❌ 清空上下文失败: {exc}")
         return
 
     await _stream_reply(session_id, text, session_webhook)

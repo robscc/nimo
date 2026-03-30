@@ -337,7 +337,7 @@ class ToolGuardManager:
         return pending
 
     def resolve(self, request_id: str, approved: bool) -> bool:
-        """解决一个 pending 请求。
+        """解决一个 pending 请求。支持前缀匹配（如 8 字符短 ID）。
 
         Returns:
             True 成功，False 未找到或已过期。
@@ -345,7 +345,12 @@ class ToolGuardManager:
         with self._pending_lock:
             pending = self._pending.get(request_id)
             if pending is None:
-                return False
+                # 前缀匹配：DingTalk 等渠道使用截断的短 ID
+                matches = [k for k in self._pending if k.startswith(request_id)]
+                if len(matches) == 1:
+                    pending = self._pending[matches[0]]
+                else:
+                    return False
 
         pending.approved = approved
         pending.event.set()
