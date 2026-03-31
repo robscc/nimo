@@ -8,6 +8,12 @@ import {
   CalendarClock, ImagePlus, Eraser,
 } from "lucide-react";
 import clsx from "clsx";
+import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkBreaks from "remark-breaks";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import { clearMemory, createSession, getSessions, getSessionMessages, resolveToolGuard } from "../api";
 import NimoIcon from "../components/NimoIcon";
 import SessionPanel from "../components/SessionPanel";
@@ -28,6 +34,33 @@ import {
 } from "../components/chat";
 
 // ── Main Page ──────────────────────────────────────────────
+
+const markdownPlugins = [remarkGfm, remarkBreaks];
+const markdownRehypePlugins = [rehypeRaw, rehypeSanitize];
+
+const markdownComponents: Components = {
+  p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+  pre: ({ children }) => <pre className="my-2 overflow-x-auto rounded-lg bg-gray-50 px-3 py-2">{children}</pre>,
+  code: ({ children, className, ...props }) => (
+    <code
+      className={clsx(
+        "text-[0.92em]",
+        !className?.includes("language-") && "rounded bg-gray-100 px-1 py-0.5",
+        className,
+      )}
+      {...props}
+    >
+      {children}
+    </code>
+  ),
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noreferrer" className="text-nimo-600 underline break-all">
+      {children}
+    </a>
+  ),
+  ul: ({ children }) => <ul className="list-disc pl-5 my-2">{children}</ul>,
+  ol: ({ children }) => <ol className="list-decimal pl-5 my-2">{children}</ol>,
+};
 
 export default function ChatPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -738,8 +771,16 @@ export default function ChatPage() {
                     msg.cardType ? (
                       <TaskResultCard msg={msg} />
                     ) : (
-                    <div data-testid="assistant-message" className="bg-white border rounded-2xl px-4 py-2.5 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
-                      {msg.content || (
+                    <div data-testid="assistant-message" className="bg-white border rounded-2xl px-4 py-2.5 text-sm text-gray-800 leading-relaxed break-words">
+                      {msg.content ? (
+                        <ReactMarkdown
+                          remarkPlugins={markdownPlugins}
+                          rehypePlugins={markdownRehypePlugins}
+                          components={markdownComponents}
+                        >
+                          {msg.content}
+                        </ReactMarkdown>
+                      ) : (
                         <span className="text-gray-400 animate-pulse">思考中…</span>
                       )}
                       {/* Blinking cursor */}

@@ -1,7 +1,39 @@
 import { useState } from "react";
 import clsx from "clsx";
+import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkBreaks from "remark-breaks";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import { CheckCircle2, ChevronDown, ChevronRight, Users, CalendarClock } from "lucide-react";
 import type { Message } from "../../types/chat";
+
+const markdownPlugins = [remarkGfm, remarkBreaks];
+const markdownRehypePlugins = [rehypeRaw, rehypeSanitize];
+
+const markdownComponents: Components = {
+  p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+  code: ({ children, className, ...props }) => (
+    <code
+      className={clsx(
+        "text-[0.92em]",
+        !className?.includes("language-") && "rounded bg-gray-100 px-1 py-0.5",
+        className,
+      )}
+      {...props}
+    >
+      {children}
+    </code>
+  ),
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noreferrer" className="text-nimo-600 underline break-all">
+      {children}
+    </a>
+  ),
+  ul: ({ children }) => <ul className="list-disc pl-5 my-2">{children}</ul>,
+  ol: ({ children }) => <ol className="list-decimal pl-5 my-2">{children}</ol>,
+};
 
 export default function TaskResultCard({ msg }: { msg: Message }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -56,8 +88,14 @@ export default function TaskResultCard({ msg }: { msg: Message }) {
 
       {/* Content */}
       {!collapsed && (
-        <div className={clsx("px-3.5 py-2.5 text-sm text-gray-700 leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto", accentColor.bg)}>
-          {msg.content}
+        <div className={clsx("px-3.5 py-2.5 text-sm text-gray-700 leading-relaxed break-words max-h-64 overflow-y-auto", accentColor.bg)}>
+          <ReactMarkdown
+            remarkPlugins={markdownPlugins}
+            rehypePlugins={markdownRehypePlugins}
+            components={markdownComponents}
+          >
+            {msg.content}
+          </ReactMarkdown>
         </div>
       )}
     </div>
