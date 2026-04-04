@@ -476,15 +476,9 @@ async def _dispatch_event(
         await dingtalk_api.send_text(session_webhook, f"❌ {err_msg}")
 
     elif etype == "file":
-        # 文件事件（来自 pa_daemon 的 send_file_to_user 处理）
-        url = event.get("url", "")
-        name = event.get("name", "文件")
-        mime = event.get("mime", "")
-        if mime and mime.startswith("image/"):
-            md = f"📷 **{name}**\n\n![{name}]({url})"
-            await dingtalk_api.send_markdown(session_webhook, "📷 图片", md)
-        elif url:
-            await dingtalk_api.send_text(session_webhook, f"📎 文件: {name} — {url}")
+        # 跳过：tool_done 处理 send_file_to_user 时已通过 _try_send_image 发送，
+        # 此处的 file 事件是 pa_daemon 额外 emit 的，会导致重复发送（且 URL 为本地路径，钉钉无法访问）。
+        pass
 
     # done / heartbeat / tool_guard_waiting → 不发送
 

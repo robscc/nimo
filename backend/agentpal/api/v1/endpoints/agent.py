@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
@@ -181,6 +183,14 @@ async def _chat_via_zmq(req: ChatRequest, zmq_manager: Any) -> StreamingResponse
                     # done 或 error → 结束
                     if event_type in ("done", "error"):
                         return
+        except (asyncio.CancelledError, GeneratorExit):
+            # 客户端断开 → 通知 PA Worker 取消当前对话
+            _logger = logging.getLogger(__name__)
+            _logger.info("ZMQ SSE client disconnected for session %s, sending CHAT_CANCEL", session_id)
+            try:
+                await zmq_manager.cancel_chat(session_id, msg_id)
+            except Exception:
+                pass
         except Exception as exc:
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
 
@@ -205,27 +215,32 @@ async def _chat_direct(req: ChatRequest) -> StreamingResponse:
         async with AsyncSessionLocal() as db:
             memory = MemoryFactory.create(settings.memory_backend, db=db)
             assistant = PersonalAssistant(session_id=req.session_id, memory=memory, db=db)
-            async for event in assistant.reply_stream(req.message, images=req.images):
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            try:
+                async for event in assistant.reply_stream(req.message, images=req.images):
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
-                # send_file_to_user 成功 → 额外 emit file 事件
-                if (
-                    event.get("type") == "tool_done"
-                    and event.get("name") == "send_file_to_user"
-                    and not event.get("error")
-                ):
-                    try:
-                        info = json.loads(event.get("output", "{}"))
-                        if info.get("status") == "sent":
-                            file_event = {
-                                "type": "file",
-                                "url": info["url"],
-                                "name": info["filename"],
-                                "mime": info.get("mime", "application/octet-stream"),
-                            }
-                            yield f"data: {json.dumps(file_event, ensure_ascii=False)}\n\n"
-                    except Exception:
-                        pass
+                    # send_file_to_user 成功 → 额外 emit file 事件
+                    if (
+                        event.get("type") == "tool_done"
+                        and event.get("name") == "send_file_to_user"
+                        and not event.get("error")
+                    ):
+                        try:
+                            info = json.loads(event.get("output", "{}"))
+                            if info.get("status") == "sent":
+                                file_event = {
+                                    "type": "file",
+                                    "url": info["url"],
+                                    "name": info["filename"],
+                                    "mime": info.get("mime", "application/octet-stream"),
+                                }
+                                yield f"data: {json.dumps(file_event, ensure_ascii=False)}\n\n"
+                        except Exception:
+                            pass
+            except (asyncio.CancelledError, GeneratorExit):
+                _logger = logging.getLogger(__name__)
+                _logger.info("Client disconnected for session %s, cancelling assistant", req.session_id)
+                assistant.cancel()
 
     return StreamingResponse(
         event_stream(),

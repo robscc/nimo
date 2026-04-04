@@ -52,6 +52,11 @@ class PersonalAssistant(BaseAgent):
         self._ws_manager = WorkspaceManager(Path(settings.workspace_dir))
         self._context_builder = ContextBuilder()
         self._memory_writer = MemoryWriter()
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """标记取消，reply_stream 工具循环将在下一个检查点退出。"""
+        self._cancelled = True
 
     # ── @mention 确定性拦截 ─────────────────────────────────
 
@@ -341,6 +346,10 @@ class PersonalAssistant(BaseAgent):
                 })
 
             for round_idx in range(MAX_TOOL_ROUNDS):
+                # ── 取消检查点 1：LLM 调用前 ──
+                if self._cancelled:
+                    break
+
                 tools_schema = toolkit.get_json_schemas() if toolkit else None
                 retry_events.clear()
                 model = _build_model(self._model_config, stream=True, on_retry=_on_retry)
@@ -359,6 +368,10 @@ class PersonalAssistant(BaseAgent):
                 final_response = None
 
                 async for chunk in response_gen:
+                    # ── 取消检查点 2：流式接收中 ──
+                    if self._cancelled:
+                        break
+
                     # 刷出流式期间积累的重试事件（mid-stream retry）
                     for rev in retry_events:
                         yield rev
@@ -437,6 +450,10 @@ class PersonalAssistant(BaseAgent):
                 )
 
                 for tool_call in tool_calls:
+                    # ── 取消检查点 3：工具执行前 ──
+                    if self._cancelled:
+                        break
+
                     tc_id = tool_call.get("id", str(uuid.uuid4()))
                     tc_name = tool_call.get("name", "")
                     tc_input = tool_call.get("input", {})
@@ -557,6 +574,31 @@ class PersonalAssistant(BaseAgent):
             await self._memory_writer.maybe_flush(
                 self.session_id, self.memory, self._ws_manager, self._model_config
             )
+
+        except (asyncio.CancelledError, GeneratorExit):
+            # 客户端断开连接，保存已生成的部分内容
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info("reply_stream cancelled for session %s, saving partial content", self.session_id)
+            self._cancelled = True
+            _final = locals().get("final_text", "")
+            _tools = locals().get("accumulated_tool_calls", [])
+            _thinking = locals().get("accumulated_thinking", "")
+            _usage = locals().get("usage_rounds", [])
+            if _final or _tools:
+                _meta: dict[str, Any] = {"cancelled": True}
+                if _thinking:
+                    _meta["thinking"] = _thinking
+                if _tools:
+                    _meta["tool_calls"] = _tools
+                try:
+                    await self._remember_assistant(_final or "(cancelled)", meta=_meta)
+                    await self._record_turn_usage(_usage)
+                    if self._db is not None:
+                        await self._db.commit()
+                except Exception:
+                    pass
+            return
 
         except Exception as exc:  # noqa: BLE001
             # 刷出未发送的重试事件（重试全部失败时）
