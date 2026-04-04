@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
-  Send, Trash2, ChevronDown, ChevronRight,
+  Send, Square, Trash2, ChevronDown, ChevronRight,
   Loader2, XCircle, Paperclip,
   Settings, Smartphone,
   CalendarClock, ImagePlus, Eraser,
@@ -855,14 +855,25 @@ export default function ChatPage() {
             className="flex-1 rounded-xl border border-gray-200 px-4 py-2 text-sm outline-none focus:border-nimo-400 transition-colors"
             disabled={isStreaming}
           />
+          {isStreaming ? (
+          <button
+            type="button"
+            onClick={() => abortRef.current?.abort()}
+            className="w-10 h-10 rounded-xl bg-red-500 text-white flex items-center justify-center hover:bg-red-600 transition-colors"
+            title="停止生成"
+          >
+            <Square size={16} fill="currentColor" />
+          </button>
+          ) : (
           <button
             data-testid="chat-submit"
             type="submit"
-            disabled={isStreaming || (!input.trim() && pendingImages.length === 0)}
+            disabled={!input.trim() && pendingImages.length === 0}
             className="w-10 h-10 rounded-xl bg-nimo-500 text-white flex items-center justify-center hover:bg-nimo-600 disabled:opacity-40 transition-colors"
           >
             <Send size={18} />
           </button>
+          )}
           </div>
         </form>
         )}

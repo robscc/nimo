@@ -583,6 +583,11 @@ class SchedulerBroker:
                             f"[ToolGuard] Broker 转发 TOOL_GUARD_RESOLVE → {target} "
                             f"(request_id={envelope.payload.get('request_id')})"
                         )
+                    if envelope.msg_type == MessageType.CHAT_CANCEL:
+                        logger.info(
+                            f"Broker 转发 CHAT_CANCEL → {target} "
+                            f"(msg_id={envelope.payload.get('msg_id', '')[:8]}…)"
+                        )
                     await self._send_to_daemon(target, envelope)
 
             except zmq.ZMQError as e:

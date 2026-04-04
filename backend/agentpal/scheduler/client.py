@@ -252,6 +252,24 @@ class SchedulerClient:
 
     # ── 消息发送（兼容 AgentScheduler 接口）──────────────
 
+    async def cancel_chat(self, session_id: str, msg_id: str) -> None:
+        """发送 CHAT_CANCEL 到 PA Worker，通知其停止当前对话。"""
+        if self._dealer is None:
+            logger.warning("DEALER socket 未就绪，无法发送 CHAT_CANCEL")
+            return
+        try:
+            env = Envelope(
+                msg_type=MessageType.CHAT_CANCEL,
+                source=self._identity,
+                target=f"pa:{session_id}",
+                session_id=session_id,
+                payload={"msg_id": msg_id},
+            )
+            await self._dealer.send_multipart([b"", env.serialize()])
+            logger.info(f"已发送 CHAT_CANCEL → pa:{session_id} (msg_id={msg_id[:8]}…)")
+        except zmq.ZMQError as e:
+            logger.error(f"发送 CHAT_CANCEL 失败: {e}")
+
     async def send_to_agent(self, target_identity: str, envelope: Envelope) -> None:
         """通过 DEALER socket 转发消息到 Scheduler ROUTER。"""
         if self._dealer is None:

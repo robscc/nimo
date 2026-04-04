@@ -24,6 +24,7 @@ class MessageType(StrEnum):
 
     # HTTP API → Agent
     CHAT_REQUEST = "chat_request"
+    CHAT_CANCEL = "chat_cancel"  # API → PA: 客户端断开，取消当前对话
     DISPATCH_TASK = "dispatch_task"
     CRON_TRIGGER = "cron_trigger"
     TOOL_GUARD_RESOLVE = "tool_guard_resolve"  # API → PA: 工具安全确认转发

@@ -39,6 +39,7 @@ class PersonalAssistantDaemon(AgentDaemon):
         super().__init__(identity=f"pa:{session_id}")
         self._session_id = session_id
         self._pending_notifications: list[dict[str, Any]] = []
+        self._current_assistant: Any = None  # 当前正在执行的 PA 实例引用
 
     # ── 消息分发 ──────────────────────────────────────────
 
@@ -100,30 +101,34 @@ class PersonalAssistantDaemon(AgentDaemon):
                     memory=memory,
                     db=db,
                 )
+                self._current_assistant = assistant
 
                 # 流式对话
-                async for event in assistant.reply_stream(user_message, images=images):
-                    # 发布事件到 PUB socket
-                    await self._publish_sse_event(topic, msg_id, event)
+                try:
+                    async for event in assistant.reply_stream(user_message, images=images):
+                        # 发布事件到 PUB socket
+                        await self._publish_sse_event(topic, msg_id, event)
 
-                    # send_file_to_user 成功 → 额外 emit file 事件
-                    if (
-                        event.get("type") == "tool_done"
-                        and event.get("name") == "send_file_to_user"
-                        and not event.get("error")
-                    ):
-                        try:
-                            info = json.loads(event.get("output", "{}"))
-                            if info.get("status") == "sent":
-                                file_event = {
-                                    "type": "file",
-                                    "url": info["url"],
-                                    "name": info["filename"],
-                                    "mime": info.get("mime", "application/octet-stream"),
-                                }
-                                await self._publish_sse_event(topic, msg_id, file_event)
-                        except Exception:
-                            pass
+                        # send_file_to_user 成功 → 额外 emit file 事件
+                        if (
+                            event.get("type") == "tool_done"
+                            and event.get("name") == "send_file_to_user"
+                            and not event.get("error")
+                        ):
+                            try:
+                                info = json.loads(event.get("output", "{}"))
+                                if info.get("status") == "sent":
+                                    file_event = {
+                                        "type": "file",
+                                        "url": info["url"],
+                                        "name": info["filename"],
+                                        "mime": info.get("mime", "application/octet-stream"),
+                                    }
+                                    await self._publish_sse_event(topic, msg_id, file_event)
+                            except Exception:
+                                pass
+                finally:
+                    self._current_assistant = None
 
         except Exception as exc:
             logger.error(
@@ -242,6 +247,17 @@ class PersonalAssistantDaemon(AgentDaemon):
                         f"approved={envelope.payload.get('approved')}"
                     )
                     await self._handle_tool_guard_resolve(envelope)
+                elif envelope.msg_type == MessageType.CHAT_CANCEL:
+                    # 直接处理，不入队 — 与 TOOL_GUARD_RESOLVE 同理
+                    logger.info(
+                        f"PA daemon [{self._session_id}] 收到 CHAT_CANCEL"
+                    )
+                    if self._current_assistant is not None:
+                        self._current_assistant.cancel()
+                    else:
+                        logger.info(
+                            f"PA daemon [{self._session_id}] CHAT_CANCEL 忽略（无活跃对话）"
+                        )
                 else:
                     await self._task_queue.put(envelope)
 
