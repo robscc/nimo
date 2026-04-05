@@ -6,6 +6,11 @@ import {
 } from "lucide-react";
 import type { PlanData } from "../../types/chat";
 
+interface PlanCardProps {
+  plan?: PlanData;
+  generating?: boolean;
+}
+
 // ── Plan Step Status Icon ───────────────────────────────
 
 function PlanStepStatusIcon({ status }: { status: string }) {
@@ -106,8 +111,30 @@ function PlanStepItem({ step, index }: { step: any; index: number }) {
 
 // ── Main Plan Card ──────────────────────────────────────
 
-export default function PlanCard({ plan }: { plan: PlanData }) {
+export default function PlanCard({ plan, generating = false }: PlanCardProps) {
   const [collapsed, setCollapsed] = useState(false);
+
+  if (!plan) {
+    return (
+      <div className="max-w-full rounded-lg border border-indigo-200 bg-white shadow-sm overflow-hidden">
+        <div className="flex items-center gap-2.5 px-3.5 py-2.5 bg-indigo-50 border-b border-indigo-200">
+          <ClipboardList size={18} className="text-indigo-600 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-gray-900">执行计划</span>
+              {generating && (
+                <span className="inline-flex items-center gap-1 text-xs text-indigo-600">
+                  <Loader2 size={12} className="animate-spin" />
+                  生成中...
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-gray-600 mt-0.5">正在整理步骤，请稍候</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-full rounded-lg border border-indigo-200 bg-white shadow-sm overflow-hidden">
@@ -134,7 +161,7 @@ export default function PlanCard({ plan }: { plan: PlanData }) {
         <>
           <div className="max-h-[500px] overflow-y-auto">
             {plan.steps.map((step, index) => (
-              <PlanStepItem key={step.id || index} step={step} index={index} />
+              <PlanStepItem key={step.index ?? index} step={step} index={index} />
             ))}
           </div>
 
