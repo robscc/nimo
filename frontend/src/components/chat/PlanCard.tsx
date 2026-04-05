@@ -134,7 +134,7 @@ export default function PlanCard({ plan }: { plan: PlanData }) {
         <>
           <div className="max-h-[500px] overflow-y-auto">
             {plan.steps.map((step, index) => (
-              <PlanStepItem key={step.id || index} step={step} index={index} />
+              <PlanStepItem key={step.index ?? index} step={step} index={index} />
             ))}
           </div>
 

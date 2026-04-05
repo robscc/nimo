@@ -18,8 +18,13 @@ def _build_user_message(user_input: str, images: list[str] | None = None) -> dic
 def _rebuild_multimodal(msg_dict: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
     """如果消息有 images metadata，将 content 重建为多模态格式。"""
     images = meta.get("images")
+    file_ids = meta.get("file_ids")
+    attachment_context = meta.get("attachment_context")
     if msg_dict.get("role") == "user" and images:
-        content: list[dict[str, Any]] = [{"type": "text", "text": msg_dict["content"]}]
+        base_text = msg_dict["content"]
+        if file_ids and attachment_context and isinstance(base_text, str):
+            base_text = f"{base_text}\n\n{attachment_context}"
+        content: list[dict[str, Any]] = [{"type": "text", "text": base_text}]
         for img in images:
             content.append({"type": "image_url", "image_url": {"url": img}})
         msg_dict["content"] = content
