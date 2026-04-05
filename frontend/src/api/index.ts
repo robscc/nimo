@@ -13,6 +13,15 @@ export interface ChatRequest {
   channel?: string;
   user_id?: string;
   images?: string[];  // base64 data URI 列表（多模态图片输入）
+  file_ids?: string[];
+}
+
+export interface UploadedAgentFileResponse {
+  file_id: string;
+  name: string;
+  mime_type: string;
+  size_bytes: number;
+  status: string;
 }
 
 export interface ChatResponse {
@@ -146,6 +155,19 @@ export interface AsyncTaskDoneSSEEvent {
 
 export async function chat(req: ChatRequest): Promise<ChatResponse> {
   const { data } = await api.post<ChatResponse>("/agent/chat", req);
+  return data;
+}
+
+export async function uploadAgentFile(sessionId: string, file: File): Promise<UploadedAgentFileResponse> {
+  const form = new FormData();
+  form.append("session_id", sessionId);
+  form.append("file", file);
+
+  const { data } = await api.post<UploadedAgentFileResponse>("/agent/files/upload", form, {
+    headers: {
+      "Content-Type": "multipart/form-data",
+    },
+  });
   return data;
 }
 

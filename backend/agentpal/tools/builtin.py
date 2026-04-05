@@ -39,6 +39,7 @@ from agentpal.tools.builtin_fs import (  # noqa: F401
     edit_file,
     execute_shell_command,
     read_file,
+    read_uploaded_file,
     write_file,
 )
 from agentpal.tools.builtin_search import (  # noqa: F401
@@ -61,6 +62,13 @@ BUILTIN_TOOLS: list[dict] = [
         "func": read_file,
         "description": "读取本地文件内容",
         "icon": "FileText",
+        "dangerous": False,
+    },
+    {
+        "name": "read_uploaded_file",
+        "func": read_uploaded_file,
+        "description": "读取聊天上传文件内容（受限目录）",
+        "icon": "Paperclip",
         "dangerous": False,
     },
     {

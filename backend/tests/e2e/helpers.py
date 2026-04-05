@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shutil
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -235,3 +238,62 @@ def wait_for_assistant_reply(page: Any, *, timeout: int = 30000) -> str:
     )
     ai_bubble = page.locator("div.bg-white.border.rounded-2xl").last
     return ai_bubble.inner_text()
+
+
+def ensure_e2e_temp_assets_dir() -> Path:
+    """确保 e2e 临时素材目录存在并返回绝对路径。"""
+    base = Path(__file__).parent / "assets" / "temp"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def create_real_upload_files(prefix: str = "upload") -> list[Path]:
+    """创建真实上传测试文件（txt/pdf/csv），返回绝对路径列表。"""
+    temp_dir = ensure_e2e_temp_assets_dir() / f"{prefix}-{uuid4().hex[:8]}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    txt_path = temp_dir / "notes.txt"
+    txt_path.write_text(
+        "AgentPal upload test text file.\\n"
+        "Line2: verify file_ids passthrough.\\n"
+        "Line3: avoid LLM-content assertions.\\n",
+        encoding="utf-8",
+    )
+
+    csv_path = temp_dir / "metrics.csv"
+    csv_path.write_text(
+        "metric,value\\n"
+        "tokens,128\\n"
+        "latency_ms,42\\n"
+        "confidence,0.93\\n",
+        encoding="utf-8",
+    )
+
+    pdf_path = temp_dir / "report.pdf"
+    pdf_path.write_bytes(
+        b"%PDF-1.4\\n"
+        b"1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj\\n"
+        b"2 0 obj<< /Type /Pages /Kids [3 0 R] /Count 1 >>endobj\\n"
+        b"3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << >> >>endobj\\n"
+        b"4 0 obj<< /Length 44 >>stream\\n"
+        b"BT /F1 12 Tf 72 100 Td (AgentPal PDF upload test) Tj ET\\n"
+        b"endstream endobj\\n"
+        b"xref\\n0 5\\n0000000000 65535 f \\n"
+        b"0000000010 00000 n \\n"
+        b"0000000060 00000 n \\n"
+        b"0000000117 00000 n \\n"
+        b"0000000226 00000 n \\n"
+        b"trailer<< /Root 1 0 R /Size 5 >>\\n"
+        b"startxref\\n318\\n%%EOF\\n"
+    )
+
+    return [txt_path.resolve(), pdf_path.resolve(), csv_path.resolve()]
+
+
+def cleanup_temp_assets(paths: list[Path]) -> None:
+    """清理 create_real_upload_files 生成的临时目录。"""
+    if not paths:
+        return
+    parent = paths[0].parent
+    if parent.exists():
+        shutil.rmtree(parent, ignore_errors=True)

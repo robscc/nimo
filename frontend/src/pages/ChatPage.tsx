@@ -8,7 +8,14 @@ import {
   CalendarClock, ImagePlus, Eraser,
 } from "lucide-react";
 import clsx from "clsx";
-import { clearMemory, createSession, getSessions, getSessionMessages, resolveToolGuard } from "../api";
+import {
+  clearMemory,
+  createSession,
+  getSessions,
+  getSessionMessages,
+  resolveToolGuard,
+  uploadAgentFile,
+} from "../api";
 import NimoIcon from "../components/NimoIcon";
 import SessionPanel from "../components/SessionPanel";
 import MentionPopup from "../components/MentionPopup";
@@ -27,6 +34,13 @@ import {
   SessionMetaPanel,
 } from "../components/chat";
 
+type PendingFileAttachment = {
+  file_id: string;
+  name: string;
+  mime_type: string;
+  size_bytes: number;
+};
+
 // ── Main Page ──────────────────────────────────────────────
 
 export default function ChatPage() {
@@ -40,11 +54,11 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [pendingImages, setPendingImages] = useState<string[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<PendingFileAttachment[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const imageInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
 
@@ -94,6 +108,50 @@ export default function ChatPage() {
     setPendingImages((prev) => prev.filter((_, i) => i !== index));
   };
 
+  const removePendingFile = (fileId: string) => {
+    setPendingFiles((prev) => prev.filter((f) => f.file_id !== fileId));
+  };
+
+  const formatBytes = (size: number): string => {
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const appendUploadErrorMessage = useCallback((fileName: string) => {
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        content: `⚠️ 文件「${fileName}」上传失败，请检查网络或稍后重试。`,
+      },
+    ]);
+  }, []);
+
+  const uploadPendingFiles = useCallback(
+    async (files: File[]) => {
+      if (!sessionId) return;
+      const nonImageFiles = files.filter((f) => !f.type.startsWith("image/"));
+      for (const file of nonImageFiles) {
+        try {
+          const uploaded = await uploadAgentFile(sessionId, file);
+          setPendingFiles((prev) => [
+            ...prev,
+            {
+              file_id: uploaded.file_id,
+              name: uploaded.name,
+              mime_type: uploaded.mime_type,
+              size_bytes: uploaded.size_bytes,
+            },
+          ]);
+        } catch {
+          appendUploadErrorMessage(file.name);
+        }
+      }
+    },
+    [sessionId, appendUploadErrorMessage],
+  );
+
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData.items);
     const imageItems = items.filter((item) => item.type.startsWith("image/"));
@@ -120,19 +178,24 @@ export default function ChatPage() {
     setDragOver(false);
     const files = Array.from(e.dataTransfer.files);
     const imageFiles = files.filter((f) => f.type.startsWith("image/"));
-    const zipFile = files.find((f) => f.name.endsWith(".zip"));
+    const zipFiles = files.filter((f) => f.name.endsWith(".zip"));
+    const otherFiles = files.filter((f) => !f.type.startsWith("image/") && !f.name.endsWith(".zip"));
+
     if (imageFiles.length > 0) {
       addImageFiles(imageFiles);
-    } else if (zipFile) {
-      // 模拟 zip 上传：创建一个合成的 change event
-      const dt = new DataTransfer();
-      dt.items.add(zipFile);
-      if (fileInputRef.current) {
-        fileInputRef.current.files = dt.files;
-        fileInputRef.current.dispatchEvent(new Event("change", { bubbles: true }));
-      }
     }
-  }, [addImageFiles]);
+
+    if (zipFiles.length > 0 && fileInputRef.current) {
+      const dt = new DataTransfer();
+      dt.items.add(zipFiles[0]);
+      fileInputRef.current.files = dt.files;
+      fileInputRef.current.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    if (otherFiles.length > 0) {
+      void uploadPendingFiles(otherFiles);
+    }
+  }, [addImageFiles, uploadPendingFiles]);
 
   // Tool Guard resolve handler
   const handleGuardResolve = async (requestId: string, approved: boolean) => {
@@ -199,6 +262,7 @@ export default function ChatPage() {
     setSessionId(id);
     setSearchParams({ session: id });
     setPendingImages([]);
+    setPendingFiles([]);
     const history = await getSessionMessages(id);
     setMessages(mapHistoryToMessages(history));
   };
@@ -210,16 +274,19 @@ export default function ChatPage() {
     setSessionId(id);
     setMessages([]);
     setPendingImages([]);
+    setPendingFiles([]);
     setSearchParams({ session: id });
     queryClient.invalidateQueries({ queryKey: ["sessions"] });
   };
 
   const sendMessage = async (text: string) => {
-    if ((!text.trim() && pendingImages.length === 0) || isStreaming || !sessionId) return;
+    if ((!text.trim() && pendingImages.length === 0 && pendingFiles.length === 0) || isStreaming || !sessionId) return;
 
     const images = pendingImages.length > 0 ? [...pendingImages] : undefined;
+    const fileIds = pendingFiles.length > 0 ? pendingFiles.map((f) => f.file_id) : undefined;
     setInput("");
     setPendingImages([]);
+    setPendingFiles([]);
     setIsStreaming(true);
 
     // 一次性追加 user + assistant 占位消息
@@ -240,6 +307,7 @@ export default function ChatPage() {
           message: text,
           channel: "web",
           images,
+          file_ids: fileIds,
         }),
         signal: abortRef.current.signal,
       });
@@ -490,68 +558,75 @@ export default function ChatPage() {
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
 
-    // 图片文件 → 加入待发送列表
-    if (file.type.startsWith("image/")) {
-      addImageFiles([file]);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      return;
+    const imageFiles = files.filter((f) => f.type.startsWith("image/"));
+    const zipFiles = files.filter((f) => f.name.endsWith(".zip"));
+    const otherFiles = files.filter((f) => !f.type.startsWith("image/") && !f.name.endsWith(".zip"));
+
+    if (imageFiles.length > 0) {
+      addImageFiles(imageFiles);
     }
 
-    // zip 文件 → 走技能包安装流程
-    if (!file.name.endsWith(".zip")) return;
+    if (otherFiles.length > 0) {
+      await uploadPendingFiles(otherFiles);
+    }
 
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", content: `📦 上传技能包: ${file.name}` },
-      { role: "assistant", content: "", toolCalls: [], streaming: true },
-    ]);
-    setIsStreaming(true);
+    // zip 文件 → 走技能包安装流程（保留现有逻辑）
+    if (zipFiles.length > 0) {
+      const file = zipFiles[0];
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", content: `📦 上传技能包: ${file.name}` },
+        { role: "assistant", content: "", toolCalls: [], streaming: true },
+      ]);
+      setIsStreaming(true);
 
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      const resp = await fetch("/api/v1/skills/install/zip", {
-        method: "POST",
-        body: form,
-      });
-      const data = await resp.json();
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const resp = await fetch("/api/v1/skills/install/zip", {
+          method: "POST",
+          body: form,
+        });
+        const data = await resp.json();
 
-      if (resp.ok) {
+        if (resp.ok) {
+          setMessages((prev) =>
+            prev.map((m, i) =>
+              i === prev.length - 1
+                ? {
+                    ...m,
+                    content: `✅ 技能 **${data.name}** v${data.version} 安装成功！\n\n包含 ${data.tools.length} 个工具: ${data.tools.join(", ")}`,
+                    streaming: false,
+                  }
+                : m,
+            ),
+          );
+        } else {
+          setMessages((prev) =>
+            prev.map((m, i) =>
+              i === prev.length - 1
+                ? { ...m, content: `⚠️ 安装失败: ${data.detail || "未知错误"}`, streaming: false }
+                : m,
+            ),
+          );
+        }
+      } catch {
         setMessages((prev) =>
           prev.map((m, i) =>
             i === prev.length - 1
-              ? {
-                  ...m,
-                  content: `✅ 技能 **${data.name}** v${data.version} 安装成功！\n\n包含 ${data.tools.length} 个工具: ${data.tools.join(", ")}`,
-                  streaming: false,
-                }
+              ? { ...m, content: "⚠️ 上传失败，请检查网络", streaming: false }
               : m,
           ),
         );
-      } else {
-        setMessages((prev) =>
-          prev.map((m, i) =>
-            i === prev.length - 1
-              ? { ...m, content: `⚠️ 安装失败: ${data.detail || "未知错误"}`, streaming: false }
-              : m,
-          ),
-        );
+      } finally {
+        setIsStreaming(false);
       }
-    } catch {
-      setMessages((prev) =>
-        prev.map((m, i) =>
-          i === prev.length - 1
-            ? { ...m, content: "⚠️ 上传失败，请检查网络", streaming: false }
-            : m,
-        ),
-      );
-    } finally {
-      setIsStreaming(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
     }
+
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   // 清空当前对话并创建新 session
@@ -562,6 +637,7 @@ export default function ChatPage() {
     setSessionId(id);
     setMessages([]);
     setPendingImages([]);
+    setPendingFiles([]);
     setSearchParams({ session: id });
     queryClient.invalidateQueries({ queryKey: ["sessions"] });
   };
@@ -730,8 +806,8 @@ export default function ChatPage() {
                     </div>
                   )}
                   {/* Plan Card — priority over text bubble */}
-                  {(msg.plan || msg.planGenerating) && (
-                    <PlanCard plan={msg.plan} generating={msg.planGenerating} />
+                  {msg.plan && (
+                    <PlanCard plan={msg.plan} />
                   )}
                   {/* Text bubble — show if has content OR still streaming (and no plan) */}
                   {!msg.plan && !msg.planGenerating && (msg.content || msg.streaming) && (
@@ -814,11 +890,35 @@ export default function ChatPage() {
               ))}
             </div>
           )}
+          {pendingFiles.length > 0 && (
+            <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
+              {pendingFiles.map((file) => (
+                <div
+                  key={file.file_id}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-xs text-gray-700 shrink-0"
+                >
+                  <Paperclip size={14} className="text-gray-500" />
+                  <div className="leading-tight">
+                    <div className="font-medium">{file.name}</div>
+                    <div className="text-gray-500">{file.mime_type} · {formatBytes(file.size_bytes)}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removePendingFile(file.file_id)}
+                    className="text-gray-400 hover:text-red-500 transition-colors"
+                    aria-label={`移除附件 ${file.name}`}
+                  >
+                    <XCircle size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {/* 拖拽提示 */}
           {dragOver && (
             <div className="mb-3 flex items-center justify-center gap-2 py-3 rounded-xl border-2 border-dashed border-nimo-300 bg-nimo-50/50 text-nimo-500 text-sm">
               <ImagePlus size={18} />
-              释放以添加图片
+              释放以上传文件或添加图片
             </div>
           )}
           <div className="flex gap-3 relative">
@@ -832,13 +932,13 @@ export default function ChatPage() {
           )}
           <label
             className="w-10 h-10 rounded-xl border border-gray-200 text-gray-400 hover:text-nimo-500 hover:border-nimo-300 flex items-center justify-center cursor-pointer transition-colors shrink-0"
-            title="上传图片或技能包 (.zip)"
+            title="上传图片、文件或技能包 (.zip)"
           >
             <Paperclip size={18} />
             <input
               ref={fileInputRef}
               type="file"
-              accept=".zip,image/*"
+              accept=".zip,image/*,*/*"
               className="hidden"
               onChange={handleFileUpload}
               disabled={isStreaming}
@@ -851,7 +951,7 @@ export default function ChatPage() {
             onChange={handleInputChange}
             onKeyDown={handleInputKeyDown}
             onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
-            placeholder={pendingImages.length > 0 ? "添加描述文字...（可选）" : "输入消息...（@ 可选择 SubAgent）"}
+            placeholder={pendingImages.length > 0 || pendingFiles.length > 0 ? "添加描述文字...（可选）" : "输入消息...（@ 可选择 SubAgent）"}
             className="flex-1 rounded-xl border border-gray-200 px-4 py-2 text-sm outline-none focus:border-nimo-400 transition-colors"
             disabled={isStreaming}
           />
@@ -868,7 +968,7 @@ export default function ChatPage() {
           <button
             data-testid="chat-submit"
             type="submit"
-            disabled={!input.trim() && pendingImages.length === 0}
+            disabled={!input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
             className="w-10 h-10 rounded-xl bg-nimo-500 text-white flex items-center justify-center hover:bg-nimo-600 disabled:opacity-40 transition-colors"
           >
             <Send size={18} />
