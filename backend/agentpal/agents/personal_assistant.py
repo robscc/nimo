@@ -15,13 +15,28 @@ from agentpal.agents.base import BaseAgent
 from agentpal.config import get_settings
 from agentpal.memory.base import BaseMemory
 from agentpal.memory.factory import MemoryFactory
+from agentpal.models.cron import CronJob, CronJobExecution
 from agentpal.models.llm_usage import LLMCallLog  # noqa: F401 — 触发 Base.metadata 注册
 from agentpal.models.session import AgentMode, SessionRecord, SubAgentTask, TaskStatus
+from agentpal.models.tool import ToolCallLog
 from agentpal.plans.intent import IntentClassifier
 from agentpal.plans.store import Plan, PlanStatus, PlanStep, PlanStore
 from agentpal.workspace.context_builder import ContextBuilder
+from agentpal.workspace.disclosure_engine import (
+    DisclosureEngine,
+    DisclosureSignals,
+    SectionDecision,
+)
 from agentpal.workspace.manager import WorkspaceManager
 from agentpal.workspace.memory_writer import MemoryWriter
+from agentpal.workspace.prompt_sections import (
+    DisclosureMode,
+    PromptSection,
+    SectionState,
+    dump_section_states,
+    hash_text,
+    load_section_states,
+)
 
 MAX_TOOL_ROUNDS = 32  # 最大工具调用轮次，防止死循环
 MAX_PLAN_TOOL_ROUNDS = 8  # 计划生成阶段最大工具调用轮次
@@ -52,6 +67,14 @@ class PersonalAssistant(BaseAgent):
         self._ws_manager = WorkspaceManager(Path(settings.workspace_dir))
         self._context_builder = ContextBuilder()
         self._memory_writer = MemoryWriter()
+        self._disclosure_engine = DisclosureEngine(
+            enabled=bool(settings.prompt_disclosure_enabled)
+            and not bool(settings.prompt_disclosure_force_legacy_builder),
+            max_full_sections_per_turn=settings.prompt_disclosure_max_full_sections_per_turn,
+            default_ttl_turns=settings.prompt_disclosure_default_ttl_turns,
+        )
+        self._disclosure_rollout_stage = int(settings.prompt_disclosure_rollout_stage)
+        self._disclosure_debug = bool(settings.prompt_disclosure_debug)
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -101,16 +124,25 @@ class PersonalAssistant(BaseAgent):
         self,
         enabled_tool_names: list[str] | None = None,
         skill_prompts: list[dict] | None = None,
+        *,
+        user_input: str = "",
+        mode: str = AgentMode.NORMAL,
+        mention_hint: str | None = None,
+        async_task_results: list[dict[str, Any]] | None = None,
+        plan_context_text: str | None = None,
     ) -> str:
-        """从 workspace 读取文件，动态组装 system prompt。"""
+        """从 workspace 读取文件，动态组装 system prompt（支持渐进式揭露）。"""
         import platform
         import sys
 
+        settings = get_settings()
         ws = await self._ws_manager.load()
         runtime_context = {
             "session_id": self.session_id,
             "os": f"{platform.system()} {platform.release()} ({platform.machine()})",
             "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "async_result_max_inject": settings.async_result_max_inject,
+            "async_result_max_chars": settings.async_result_max_chars,
         }
 
         # 注入 tool_guard_threshold 供 ContextBuilder 构建安全等级说明
@@ -132,11 +164,358 @@ class PersonalAssistant(BaseAgent):
             except Exception:
                 pass
 
-        return self._context_builder.build_system_prompt(
-            ws, enabled_tool_names, skill_prompts=skill_prompts,
+        # Legacy 直出（开关关闭 / 强制回滚）
+        if not self._disclosure_engine.enabled:
+            prompt = self._context_builder.build_system_prompt(
+                ws,
+                enabled_tool_names,
+                skill_prompts=skill_prompts,
+                runtime_context=runtime_context,
+                sub_agent_roster=roster_prompt,
+                async_task_results=async_task_results,
+            )
+            if mention_hint:
+                prompt += f"\n\n---\n\n{mention_hint}"
+            if plan_context_text:
+                prompt += f"\n\n---\n\n{plan_context_text}"
+            return prompt
+
+        sections = self._context_builder.collect_sections(
+            ws,
+            enabled_tools=enabled_tool_names,
+            skill_prompts=skill_prompts,
             runtime_context=runtime_context,
             sub_agent_roster=roster_prompt,
+            async_task_results=async_task_results,
         )
+
+        # 追加 mention / plan context 作为可控 section
+        if mention_hint:
+            sections.append(
+                PromptSection(
+                    section_id="mention_hint",
+                    title="Mention Directive",
+                    content=mention_hint,
+                    priority=97,
+                    summary="[Mention Directive] 用户显式 @mention 了某个 SubAgent。",
+                    reminder="[Mention Directive] 本轮存在 @mention 路由指令。",
+                )
+            )
+        if plan_context_text:
+            sections.append(
+                PromptSection(
+                    section_id="plan_context",
+                    title="Plan Context",
+                    content=plan_context_text,
+                    priority=96,
+                    summary="[Plan Context] 当前处于计划执行上下文。",
+                    reminder="[Plan Context] 计划上下文保持生效。",
+                )
+            )
+
+        # 披露状态与轮次
+        bundle = await self._load_prompt_disclosure_bundle()
+        turn = int(bundle.get("turn", 0) or 0) + 1
+        states = load_section_states(bundle.get("sections") if isinstance(bundle, dict) else None)
+
+        signals = await self._build_disclosure_signals(
+            user_input=user_input,
+            mode=mode,
+            mention_hint=mention_hint,
+            has_plan_context=bool(plan_context_text),
+            has_recent_async_results=bool(async_task_results),
+        )
+
+        decisions: dict[str, SectionDecision] = {}
+        section_by_id = {s.section_id: s for s in sections}
+
+        for section in sections:
+            prev = states.get(section.section_id)
+            decisions[section.section_id] = self._disclosure_engine.decide(
+                section_id=section.section_id,
+                section_text=section.content,
+                turn=turn,
+                signals=signals,
+                prev_state=prev,
+            )
+
+        decisions = self._apply_rollout_stage(decisions)
+        decisions = self._disclosure_engine.enforce_full_budget(
+            decisions,
+            critical_sections={"identity", "soul", "runtime_env", "tool_security", "available_tools", "mention_hint", "plan_context"},
+        )
+
+        disclosure_modes = {sid: decision.mode.value for sid, decision in decisions.items()}
+        section_reasons = {sid: decision.reason for sid, decision in decisions.items()}
+
+        prompt, rendered = self._context_builder.render_sections(
+            sections,
+            disclosure_modes=disclosure_modes,
+            section_reasons=section_reasons,
+        )
+
+        # 更新并持久化 section state
+        new_states = dict(states)
+        for item in rendered:
+            section = section_by_id.get(item.section_id)
+            if section is None or not item.injected:
+                continue
+            state = new_states.get(item.section_id, SectionState())
+            state.last_mode = item.mode.value
+            state.last_turn = turn
+            state.reason = item.reason
+            ttl = decisions.get(item.section_id).ttl_turns if decisions.get(item.section_id) else 0
+            if ttl > 0:
+                state.ttl_turns = ttl
+            state.last_hash = hash_text(section.content)
+            new_states[item.section_id] = state
+
+        new_bundle = {
+            "turn": turn,
+            "sections": dump_section_states(new_states),
+        }
+        await self._save_prompt_disclosure_bundle(new_bundle)
+
+        if self._disclosure_debug:
+            debug_lines = ["# Prompt Disclosure Debug", ""]
+            for item in rendered:
+                debug_lines.append(f"- {item.section_id}: {item.mode.value} ({item.reason})")
+            prompt += "\n\n---\n\n" + "\n".join(debug_lines)
+
+        return prompt
+
+    async def _build_disclosure_signals(
+        self,
+        *,
+        user_input: str,
+        mode: str,
+        mention_hint: str | None,
+        has_plan_context: bool,
+        has_recent_async_results: bool,
+    ) -> DisclosureSignals:
+        """构建本轮披露信号。"""
+        tool_failures = await self._count_recent_tool_failures()
+        force_full: set[str] = set()
+        if mention_hint:
+            force_full.add("mention_hint")
+        if has_plan_context:
+            force_full.add("plan_context")
+
+        return DisclosureSignals(
+            user_input=user_input,
+            mode=mode,
+            mention_hit=bool(mention_hint),
+            tool_failures=tool_failures,
+            has_plan_context=has_plan_context,
+            has_recent_async_results=has_recent_async_results,
+            force_full_sections=force_full,
+        )
+
+    def _apply_rollout_stage(
+        self,
+        decisions: dict[str, SectionDecision],
+    ) -> dict[str, SectionDecision]:
+        """按 rollout stage 限制渐进式揭露范围。"""
+        stage = max(0, min(3, int(self._disclosure_rollout_stage)))
+
+        # Stage 3: full progressive
+        if stage >= 3:
+            return decisions
+
+        # Stage 2: expanded（在 Stage1 基础上加入 memory/user/agents）
+        if stage == 2:
+            allow_progressive = {
+                "today_log",
+                "current_context",
+                "installed_skills",
+                "async_task_results",
+                "user_profile",
+                "memory",
+                "agent_config",
+                "subagent_roster",
+            }
+            restricted = dict(decisions)
+            for sid, decision in decisions.items():
+                if sid not in allow_progressive and decision.mode != DisclosureMode.FULL:
+                    restricted[sid] = SectionDecision(
+                        mode=DisclosureMode.FULL,
+                        reason="rollout_stage_2_force_full",
+                        ttl_turns=decision.ttl_turns,
+                    )
+            return restricted
+
+        # Stage 1: 仅低风险 section
+        if stage == 1:
+            allow_progressive = {
+                "today_log",
+                "current_context",
+                "installed_skills",
+                "async_task_results",
+            }
+            restricted = dict(decisions)
+            for sid, decision in decisions.items():
+                if sid not in allow_progressive and decision.mode != DisclosureMode.FULL:
+                    restricted[sid] = SectionDecision(
+                        mode=DisclosureMode.FULL,
+                        reason="rollout_stage_1_force_full",
+                        ttl_turns=decision.ttl_turns,
+                    )
+            return restricted
+
+        # Stage 0: shadow（不改变输出）
+        shadow = dict(decisions)
+        non_full = 0
+        for sid, decision in decisions.items():
+            if decision.mode != DisclosureMode.FULL:
+                non_full += 1
+                shadow[sid] = SectionDecision(
+                    mode=DisclosureMode.FULL,
+                    reason="rollout_stage_0_shadow",
+                    ttl_turns=decision.ttl_turns,
+                )
+
+        if non_full > 0:
+            try:
+                from loguru import logger
+
+                logger.debug(
+                    "PromptDisclosure shadow stage: session={} non_full_sections={} total_sections={}",
+                    self.session_id,
+                    non_full,
+                    len(decisions),
+                )
+            except Exception:
+                pass
+        return shadow
+
+    async def _count_recent_tool_failures(self, limit: int = 3) -> int:
+        """统计最近 N 次工具调用中的失败数。"""
+        if self._db is None:
+            return 0
+        try:
+            from sqlalchemy import select
+
+            result = await self._db.execute(
+                select(ToolCallLog.error)
+                .where(ToolCallLog.session_id == self.session_id)
+                .order_by(ToolCallLog.created_at.desc())
+                .limit(limit)
+            )
+            rows = result.all()
+            return sum(1 for row in rows if row[0])
+        except Exception:
+            return 0
+
+    async def _load_prompt_disclosure_bundle(self) -> dict[str, Any]:
+        """读取 session.extra.prompt_disclosure。"""
+        if self._db is None:
+            return {}
+        try:
+            from sqlalchemy import select
+
+            result = await self._db.execute(
+                select(SessionRecord).where(SessionRecord.id == self.session_id)
+            )
+            session_record = result.scalar_one_or_none()
+            if session_record is None:
+                return {}
+            extra = session_record.extra or {}
+            pd = extra.get("prompt_disclosure")
+            return pd if isinstance(pd, dict) else {}
+        except Exception:
+            return {}
+
+    async def _save_prompt_disclosure_bundle(self, bundle: dict[str, Any]) -> None:
+        """写回 session.extra.prompt_disclosure（轻量持久化）。"""
+        if self._db is None:
+            return
+        try:
+            from sqlalchemy import select
+
+            result = await self._db.execute(
+                select(SessionRecord).where(SessionRecord.id == self.session_id)
+            )
+            session_record = result.scalar_one_or_none()
+            if session_record is None:
+                return
+            extra = dict(session_record.extra or {})
+            extra["prompt_disclosure"] = bundle
+            session_record.extra = extra
+            await self._db.flush()
+        except Exception:
+            pass
+
+    async def _load_async_task_results(self) -> list[dict[str, Any]]:
+        """加载当前 session 最近已完成的 SubAgent/Cron 异步结果。"""
+        if self._db is None:
+            return []
+
+        rows: list[dict[str, Any]] = []
+
+        # SubAgent 任务结果
+        try:
+            from sqlalchemy import select
+
+            sub_result = await self._db.execute(
+                select(SubAgentTask)
+                .where(
+                    SubAgentTask.parent_session_id == self.session_id,
+                    SubAgentTask.status.in_([TaskStatus.DONE, TaskStatus.FAILED]),
+                )
+                .order_by(SubAgentTask.finished_at.desc())
+                .limit(20)
+            )
+            for task in sub_result.scalars().all():
+                rows.append(
+                    {
+                        "source": "sub_agent",
+                        "task_id": task.id,
+                        "execution_id": None,
+                        "agent_name": task.agent_name,
+                        "task_prompt": task.task_prompt,
+                        "status": str(task.status),
+                        "result": task.result or "",
+                        "error": task.error or "",
+                        "finished_at": task.finished_at.isoformat() if task.finished_at else "",
+                    }
+                )
+        except Exception:
+            pass
+
+        # Cron 执行结果（target_session_id 命中当前会话）
+        try:
+            from agentpal.models.cron import CronStatus
+            from sqlalchemy import select
+
+            cron_result = await self._db.execute(
+                select(CronJobExecution, CronJob)
+                .join(CronJob, CronJobExecution.cron_job_id == CronJob.id)
+                .where(
+                    CronJob.target_session_id == self.session_id,
+                    CronJobExecution.status.in_([CronStatus.DONE, CronStatus.FAILED]),
+                )
+                .order_by(CronJobExecution.finished_at.desc())
+                .limit(20)
+            )
+            for execution, job in cron_result.all():
+                rows.append(
+                    {
+                        "source": "cron",
+                        "task_id": None,
+                        "execution_id": execution.id,
+                        "agent_name": execution.agent_name,
+                        "task_prompt": f"定时任务「{execution.cron_job_name or job.name}」",
+                        "status": str(execution.status),
+                        "result": execution.result or "",
+                        "error": execution.error or "",
+                        "finished_at": execution.finished_at.isoformat() if execution.finished_at else "",
+                    }
+                )
+        except Exception:
+            pass
+
+        rows.sort(key=lambda x: str(x.get("finished_at") or ""), reverse=True)
+        return rows
 
     # ── 核心对话（含工具调用循环）────────────────────────
 
@@ -151,14 +530,17 @@ class PersonalAssistant(BaseAgent):
 
         enabled_tool_names = _get_tool_names(toolkit)
         skill_prompts = await self._load_prompt_skills()
-        system_prompt = await self._build_system_prompt(
-            enabled_tool_names or None, skill_prompts=skill_prompts or None,
-        )
-
-        # @mention 确定性路由
         mention_hint = await self._extract_mention_hint(user_input)
-        if mention_hint:
-            system_prompt += f"\n\n---\n\n{mention_hint}"
+        async_task_results = await self._load_async_task_results()
+
+        system_prompt = await self._build_system_prompt(
+            enabled_tool_names or None,
+            skill_prompts=skill_prompts or None,
+            user_input=user_input,
+            mode=AgentMode.NORMAL,
+            mention_hint=mention_hint,
+            async_task_results=async_task_results,
+        )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
@@ -300,25 +682,30 @@ class PersonalAssistant(BaseAgent):
 
             enabled_tool_names = _get_tool_names(toolkit)
             skill_prompts = await self._load_prompt_skills()
-            system_prompt = await self._build_system_prompt(
-                enabled_tool_names or None, skill_prompts=skill_prompts or None,
-            )
-
-            # @mention 确定性路由
             mention_hint = await self._extract_mention_hint(user_input)
-            if mention_hint:
-                system_prompt += f"\n\n---\n\n{mention_hint}"
+            async_task_results = await self._load_async_task_results()
 
-            # Plan Mode 执行阶段：注入计划进度上下文
+            # Plan Mode 执行阶段：构建计划进度上下文（由披露引擎决定注入粒度）
+            plan_context_text: str | None = None
             if mode == AgentMode.EXECUTING:
                 try:
                     from agentpal.plans.prompts import build_execution_context
 
                     plan = await self._get_active_plan()
                     if plan:
-                        system_prompt += f"\n\n---\n\n{build_execution_context(plan)}"
+                        plan_context_text = build_execution_context(plan)
                 except Exception:
-                    pass
+                    plan_context_text = None
+
+            system_prompt = await self._build_system_prompt(
+                enabled_tool_names or None,
+                skill_prompts=skill_prompts or None,
+                user_input=user_input,
+                mode=mode,
+                mention_hint=mention_hint,
+                async_task_results=async_task_results,
+                plan_context_text=plan_context_text,
+            )
 
             messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
             # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
@@ -626,9 +1013,14 @@ class PersonalAssistant(BaseAgent):
         enabled_tool_names = _get_tool_names(toolkit)
         skill_prompts = await self._load_prompt_skills()
         base_prompt = await self._build_system_prompt(
-            enabled_tool_names or None, skill_prompts=skill_prompts or None,
+            enabled_tool_names or None,
+            skill_prompts=skill_prompts or None,
+            user_input=user_input,
+            mode=AgentMode.PLANNING,
+            plan_context_text=PLAN_GENERATION_PROMPT,
+            async_task_results=await self._load_async_task_results(),
         )
-        plan_prompt = base_prompt + "\n\n---\n\n" + PLAN_GENERATION_PROMPT
+        plan_prompt = base_prompt
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": plan_prompt},
@@ -769,8 +1161,14 @@ class PersonalAssistant(BaseAgent):
             confirm_ctx = build_confirm_context(plan)
             toolkit = await self._build_active_toolkit()
             enabled_tool_names = _get_tool_names(toolkit)
-            base_prompt = await self._build_system_prompt(enabled_tool_names or None)
-            system_prompt = base_prompt + "\n\n---\n\n" + confirm_ctx
+            base_prompt = await self._build_system_prompt(
+                enabled_tool_names or None,
+                user_input=user_input,
+                mode=AgentMode.CONFIRMING,
+                plan_context_text=confirm_ctx,
+                async_task_results=await self._load_async_task_results(),
+            )
+            system_prompt = base_prompt
 
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
@@ -1015,8 +1413,14 @@ class PersonalAssistant(BaseAgent):
         revise_prompt_text = build_revise_prompt(plan, user_feedback)
         toolkit = await self._build_active_toolkit()
         enabled_tool_names = _get_tool_names(toolkit)
-        base_prompt = await self._build_system_prompt(enabled_tool_names or None)
-        system_prompt = base_prompt + "\n\n---\n\n" + revise_prompt_text
+        base_prompt = await self._build_system_prompt(
+            enabled_tool_names or None,
+            user_input=user_feedback,
+            mode=AgentMode.PLANNING,
+            plan_context_text=revise_prompt_text,
+            async_task_results=await self._load_async_task_results(),
+        )
+        system_prompt = base_prompt
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},

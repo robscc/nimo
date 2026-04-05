@@ -138,33 +138,66 @@ class WorkspaceManager:
 
     async def load(self) -> WorkspaceFiles:
         """一次性加载所有 workspace 文件，返回 WorkspaceFiles 数据类。"""
-        await self.bootstrap()
-
-        (
-            agents, identity, soul, user, memory, context,
-            today_log, bootstrap_content, heartbeat,
-        ) = await asyncio.gather(
-            self._read(self.root / "AGENTS.md"),
-            self._read(self.root / "IDENTITY.md"),
-            self._read(self.root / "SOUL.md"),
-            self._read(self.root / "USER.md"),
-            self._read(self.root / "MEMORY.md"),
-            self._read(self.root / "CONTEXT.md"),
-            self._read_today_log(),
-            self._read(self.root / "BOOTSTRAP.md"),
-            self._read(self.root / "HEARTBEAT.md"),
+        return await self.load_sections(
+            [
+                "agents",
+                "identity",
+                "soul",
+                "user",
+                "memory",
+                "context",
+                "today_log",
+                "bootstrap",
+                "heartbeat",
+            ]
         )
 
+    async def load_sections(self, section_names: list[str]) -> WorkspaceFiles:
+        """按需加载指定 sections（渐进式揭露场景）。
+
+        Args:
+            section_names: 需要加载的 section 名称列表。
+                可选值：agents/identity/soul/user/memory/context/today_log/bootstrap/heartbeat
+        """
+        await self.bootstrap()
+
+        normalized = {s.strip() for s in section_names if s and s.strip()}
+
+        mapping: dict[str, Any] = {
+            "agents": lambda: self._read(self.root / "AGENTS.md"),
+            "identity": lambda: self._read(self.root / "IDENTITY.md"),
+            "soul": lambda: self._read(self.root / "SOUL.md"),
+            "user": lambda: self._read(self.root / "USER.md"),
+            "memory": lambda: self._read(self.root / "MEMORY.md"),
+            "context": lambda: self._read(self.root / "CONTEXT.md"),
+            "today_log": self._read_today_log,
+            "bootstrap": lambda: self._read(self.root / "BOOTSTRAP.md"),
+            "heartbeat": lambda: self._read(self.root / "HEARTBEAT.md"),
+        }
+
+        # 并发读取请求 sections
+        results: dict[str, str] = {k: "" for k in mapping}
+        coros: list[tuple[str, Any]] = []
+        for key in normalized:
+            fn = mapping.get(key)
+            if fn is not None:
+                coros.append((key, fn()))
+
+        if coros:
+            values = await asyncio.gather(*(c for _, c in coros))
+            for (key, _), value in zip(coros, values, strict=False):
+                results[key] = value
+
         return WorkspaceFiles(
-            agents=agents,
-            identity=identity,
-            soul=soul,
-            user=user,
-            memory=memory,
-            context=context,
-            today_log=today_log,
-            bootstrap=bootstrap_content,
-            heartbeat=heartbeat,
+            agents=results["agents"],
+            identity=results["identity"],
+            soul=results["soul"],
+            user=results["user"],
+            memory=results["memory"],
+            context=results["context"],
+            today_log=results["today_log"],
+            bootstrap=results["bootstrap"],
+            heartbeat=results["heartbeat"],
         )
 
     # ── 读写单个文件 ──────────────────────────────────────

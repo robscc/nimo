@@ -283,6 +283,13 @@ class SubAgent(BaseAgent):
 
                 self._log("tool_start", {"id": tc_id, "name": tc_name, "input": tc_input})
 
+                # 工具执行前 commit，避免 SQLite 锁
+                if self._db is not None:
+                    try:
+                        await self._db.commit()
+                    except Exception:
+                        pass
+
                 start_ms = int(time() * 1000)
                 output_text = ""
                 error_text = None

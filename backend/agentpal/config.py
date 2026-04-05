@@ -145,6 +145,17 @@ class Settings(BaseSettings):
     # 计划文件目录，默认 ~/.nimo/plans（可通过 PLANS_DIR 或 NIMO_HOME 环境变量覆盖）
     plans_dir: str = str(get_plans_dir())
 
+    # ── Prompt 渐进式揭露（Progressive Disclosure）──────────
+    prompt_disclosure_enabled: bool = False
+    prompt_disclosure_debug: bool = False
+    prompt_disclosure_max_full_sections_per_turn: int = 6
+    prompt_disclosure_default_ttl_turns: int = 8
+    prompt_disclosure_rollout_stage: int = 0  # 0=shadow, 1=low-risk, 2=expanded, 3=full
+    prompt_disclosure_force_legacy_builder: bool = False
+
+    # ── SubAgent ──────────────────────────────────────────────
+    sub_agent_max_tool_rounds: int = 8
+
     # ── 渠道 ──────────────────────────────────────────────
     dingtalk_enabled: bool = False
     dingtalk_app_key: str = ""

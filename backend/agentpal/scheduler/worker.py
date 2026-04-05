@@ -284,13 +284,15 @@ def _create_daemon(
 
     elif agent_type == "sub_agent":
         from agentpal.zmq_bus.sub_daemon import SubAgentDaemon
+        from agentpal.config import get_settings
 
+        settings = get_settings()
         return SubAgentDaemon(
             agent_name=kwargs.get("agent_name", "default"),
             task_id=kwargs.get("task_id", ""),
             model_config=kwargs.get("model_config"),
             role_prompt=kwargs.get("role_prompt", ""),
-            max_tool_rounds=kwargs.get("max_tool_rounds", 8),
+            max_tool_rounds=kwargs.get("max_tool_rounds", settings.sub_agent_max_tool_rounds),
             parent_session_id=kwargs.get("parent_session_id", ""),
         )
 
