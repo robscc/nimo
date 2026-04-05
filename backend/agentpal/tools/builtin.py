@@ -41,6 +41,10 @@ from agentpal.tools.builtin_fs import (  # noqa: F401
     read_file,
     write_file,
 )
+from agentpal.tools.builtin_search import (  # noqa: F401
+    glob_files,
+    grep_search,
+)
 
 # ── 工具元数据注册表 ──────────────────────────────────────
 
@@ -111,7 +115,7 @@ BUILTIN_TOOLS: list[dict] = [
     {
         "name": "plan_cli",
         "func": plan_cli,
-        "description": "管理执行计划（列出、查看状态、取消计划）",
+        "description": "管理 Plan Mode 计划（list/status/cancel，用于进度查询与取消）",
         "icon": "ClipboardList",
         "dangerous": False,
     },
@@ -136,5 +140,19 @@ BUILTIN_TOOLS: list[dict] = [
         "icon": "FileOutput",
         "dangerous": False,
         "subagent_only": True,  # 仅 SubAgent 可用
+    },
+    {
+        "name": "glob_files",
+        "func": glob_files,
+        "description": "按 glob 模式查找文件（如 **/*.py, src/**/*.ts）",
+        "icon": "Search",
+        "dangerous": False,
+    },
+    {
+        "name": "grep_search",
+        "func": grep_search,
+        "description": "在文件内容中搜索文本（基于 ripgrep，支持正则表达式）",
+        "icon": "FileSearch",
+        "dangerous": False,
     },
 ]

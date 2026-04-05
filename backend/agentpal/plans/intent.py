@@ -26,10 +26,20 @@ class IntentClassifier:
         re.compile(r"请.{0,4}规划"),
         re.compile(r"帮我.{0,6}计划"),
         re.compile(r"规划.{0,4}并"),      # "规划xxx并实现"
+        re.compile(r"拆解.{0,6}任务"),
+        re.compile(r"任务.{0,4}拆解"),
+        re.compile(r"实施.{0,4}计划"),
+        re.compile(r"执行.{0,4}方案"),
+        re.compile(r"先.{0,8}(别|不要).{0,8}写代码.{0,8}(计划|方案|思路)"),
         re.compile(r"/plan\b"),
         re.compile(r"plan\s+this"),
+        re.compile(r"plan\s+it"),
         re.compile(r"make\s+a\s+plan"),
         re.compile(r"create\s+a\s+plan"),
+        re.compile(r"implementation\s+plan"),
+        re.compile(r"break\s+.*\s+down"),
+        re.compile(r"(make|create|build)\s+.*roadmap"),
+        re.compile(r"roadmap\s+for"),
     ]
 
     _EXIT_PLAN_PATTERNS: list[re.Pattern[str]] = [
@@ -46,6 +56,7 @@ class IntentClassifier:
 
     APPROVE_TRIGGERS: list[str] = [
         "批准",
+        "通过",
         "执行吧",
         "开始",
         "可以",
@@ -55,6 +66,8 @@ class IntentClassifier:
         "确认",
         "同意",
         "好的",
+        "行，开始",
+        "开干",
         "approve",
         "go",
         "lgtm",
@@ -71,10 +84,14 @@ class IntentClassifier:
         "不对",
         "重新",
         "换一下",
+        "补充",
+        "细化",
+        "精简",
         "modify",
         "revise",
         "change",
         "update",
+        "refine",
     ]
 
     @staticmethod

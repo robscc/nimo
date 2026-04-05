@@ -16,6 +16,8 @@ class TestIsPlanTrigger:
         assert IntentClassifier.is_plan_trigger("先规划一下") is True
         assert IntentClassifier.is_plan_trigger("制定计划") is True
         assert IntentClassifier.is_plan_trigger("请帮我制定计划吧") is True
+        assert IntentClassifier.is_plan_trigger("帮我拆解这个任务") is True
+        assert IntentClassifier.is_plan_trigger("先不要写代码，先给我一个实施方案") is True
         # 中间有修饰词也能匹配
         assert IntentClassifier.is_plan_trigger("帮我制定一个计划：写一个电扇demo") is True
         assert IntentClassifier.is_plan_trigger("做一个详细的计划") is True
@@ -24,13 +26,18 @@ class TestIsPlanTrigger:
     def test_english_triggers(self) -> None:
         assert IntentClassifier.is_plan_trigger("/plan") is True
         assert IntentClassifier.is_plan_trigger("plan this task") is True
+        assert IntentClassifier.is_plan_trigger("plan it") is True
         assert IntentClassifier.is_plan_trigger("make a plan for this") is True
         assert IntentClassifier.is_plan_trigger("create a plan") is True
+        assert IntentClassifier.is_plan_trigger("need an implementation plan") is True
+        assert IntentClassifier.is_plan_trigger("break this task down") is True
+        assert IntentClassifier.is_plan_trigger("create a roadmap for migration") is True
 
     def test_not_plan_trigger(self) -> None:
         assert IntentClassifier.is_plan_trigger("你好") is False
         assert IntentClassifier.is_plan_trigger("帮我写代码") is False
         assert IntentClassifier.is_plan_trigger("这个计划怎么样") is False  # 包含"计划"但不是触发词
+        assert IntentClassifier.is_plan_trigger("请更新项目 roadmap 文档") is False
         assert IntentClassifier.is_plan_trigger("") is False
 
     def test_case_insensitive(self) -> None:
@@ -63,6 +70,7 @@ class TestIsExitPlan:
 class TestClassifyConfirm:
     def test_approve(self) -> None:
         assert IntentClassifier.classify_confirm("批准") == "approve"
+        assert IntentClassifier.classify_confirm("通过") == "approve"
         assert IntentClassifier.classify_confirm("执行吧") == "approve"
         assert IntentClassifier.classify_confirm("可以") == "approve"
         assert IntentClassifier.classify_confirm("没问题") == "approve"
@@ -76,6 +84,8 @@ class TestClassifyConfirm:
         assert IntentClassifier.classify_confirm("修改一下第三步") == "modify"
         assert IntentClassifier.classify_confirm("调整步骤顺序") == "modify"
         assert IntentClassifier.classify_confirm("不对，需要改一下") == "modify"
+        assert IntentClassifier.classify_confirm("补充一个风险评估步骤") == "modify"
+        assert IntentClassifier.classify_confirm("细化第二步") == "modify"
         assert IntentClassifier.classify_confirm("revise the plan") == "modify"
 
     def test_cancel(self) -> None:

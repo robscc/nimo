@@ -416,12 +416,44 @@ def plan_cli(
     plan_id: str = "",
     session_id: str = "",
 ) -> ToolResponse:
-    """管理执行计划 — list / status / cancel。
+    """管理 Plan Mode 执行计划（list / status / cancel）。
+
+    该工具用于“计划管理”，而不是“生成计划”：
+    - 生成/修改计划：由 Plan Mode 对话流程处理
+    - 查询/取消计划：使用本工具
+
+    ## 何时使用
+    - 用户问“当前计划执行到哪一步了” → `action="status"`
+    - 用户问“列出本会话所有计划” → `action="list"`
+    - 用户要求“停止/取消当前计划” → `action="cancel"`
+
+    ## 何时不要使用
+    - 不要用它创建计划步骤（它不支持 create/update）
+    - 不要在无 plan 上下文时调用 cancel
 
     Args:
-        action: 操作类型 (list / status / cancel)
-        plan_id: 计划 ID（status/cancel 时需要）
-        session_id: 会话 ID（list 时需要，默认当前会话，见 Runtime Environment）
+        action: 操作类型，可选：
+            - list: 列出会话下所有计划摘要
+            - status: 查看某个计划详情；若未提供 plan_id，尝试返回当前活跃计划
+            - cancel: 取消某个计划；若未提供 plan_id，取消当前活跃计划
+        plan_id: 计划 ID（status/cancel 可选；空则尝试活跃计划）
+        session_id: 会话 ID（必填，来自 Runtime Environment 的 session_id）
+
+    Returns:
+        文本结果，包含计划状态/进度/步骤摘要或错误信息。
+
+    Examples:
+        # 列出当前会话计划
+        plan_cli(action="list", session_id="abc123")
+
+        # 查看活跃计划详情
+        plan_cli(action="status", session_id="abc123")
+
+        # 查看指定计划详情
+        plan_cli(action="status", session_id="abc123", plan_id="plan-001")
+
+        # 取消活跃计划
+        plan_cli(action="cancel", session_id="abc123")
     """
     import asyncio
     import concurrent.futures
