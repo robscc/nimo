@@ -42,6 +42,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "plans": {
         "dir": "",  # 默认 ~/.nimo/plans
     },
+    "prompt_disclosure": {
+        "enabled": False,
+        "debug": False,
+        "max_full_sections_per_turn": 6,
+        "default_ttl_turns": 8,
+        "rollout_stage": 0,
+        "force_legacy_builder": False,
+    },
+    "sub_agent": {
+        "max_tool_rounds": 8,
+    },
     "channels": {
         "dingtalk": {"enabled": False, "app_key": "", "app_secret": "", "robot_code": ""},
         "feishu": {
@@ -127,6 +138,13 @@ _YAML_TO_SETTINGS: dict[str, str] = {
     "memory.sqlite_limit": "memory_sqlite_limit",
     "skills.dir": "skills_dir",
     "plans.dir": "plans_dir",
+    "prompt_disclosure.enabled": "prompt_disclosure_enabled",
+    "prompt_disclosure.debug": "prompt_disclosure_debug",
+    "prompt_disclosure.max_full_sections_per_turn": "prompt_disclosure_max_full_sections_per_turn",
+    "prompt_disclosure.default_ttl_turns": "prompt_disclosure_default_ttl_turns",
+    "prompt_disclosure.rollout_stage": "prompt_disclosure_rollout_stage",
+    "prompt_disclosure.force_legacy_builder": "prompt_disclosure_force_legacy_builder",
+    "sub_agent.max_tool_rounds": "sub_agent_max_tool_rounds",
     "channels.dingtalk.enabled": "dingtalk_enabled",
     "channels.dingtalk.app_key": "dingtalk_app_key",
     "channels.dingtalk.app_secret": "dingtalk_app_secret",
