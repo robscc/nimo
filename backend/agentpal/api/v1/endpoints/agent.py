@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import mimetypes
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -21,7 +24,7 @@ from agentpal.agents.personal_assistant import PersonalAssistant
 from agentpal.config import get_settings
 from agentpal.database import AsyncSessionLocal, get_db, utc_isoformat
 from agentpal.memory.factory import MemoryFactory
-from agentpal.models.session import SessionRecord, SessionStatus, SubAgentTask
+from agentpal.models.session import SessionRecord, SessionStatus, SubAgentTask, TaskArtifact
 
 router = APIRouter()
 
@@ -58,6 +61,7 @@ class ChatRequest(BaseModel):
     channel: str = "web"
     user_id: str = "anonymous"
     images: list[str] | None = None  # base64 data URI 列表（多模态图片输入）
+    file_ids: list[str] | None = None  # 上传文件 artifact id 列表
 
 
 class DispatchRequest(BaseModel):
@@ -92,6 +96,100 @@ class TaskListResponse(BaseModel):
     limit: int
     offset: int
 
+
+MAX_UPLOAD_SIZE = 25 * 1024 * 1024  # 25MB
+BLOCKED_UPLOAD_EXTENSIONS = {
+    ".exe",
+    ".dll",
+    ".bat",
+    ".cmd",
+    ".sh",
+    ".msi",
+    ".apk",
+    ".bin",
+    ".com",
+    ".scr",
+    ".ps1",
+    ".jar",
+}
+
+
+def _get_upload_dir() -> Path:
+    settings = get_settings()
+    upload_dir = Path(settings.workspace_dir).expanduser() / "uploads" / "chat"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    return upload_dir
+
+
+@router.post("/files/upload")
+async def upload_chat_file(
+    session_id: str = Form(...),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """上传聊天附件并注册为 uploaded_file 类型产出物。"""
+    original_name = Path(file.filename or "").name
+    if not original_name:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+
+    suffix = Path(original_name).suffix.lower()
+    if suffix in BLOCKED_UPLOAD_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"不允许上传该类型文件: {suffix}")
+
+    upload_dir = _get_upload_dir()
+    stored_name = f"{uuid.uuid4().hex}{suffix}"
+    stored_path = upload_dir / stored_name
+
+    hasher = hashlib.sha256()
+    total_size = 0
+
+    try:
+        with stored_path.open("wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > MAX_UPLOAD_SIZE:
+                    raise HTTPException(status_code=413, detail="文件大小超过 25MB 限制")
+                hasher.update(chunk)
+                f.write(chunk)
+    except HTTPException:
+        stored_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        stored_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {exc}")
+    finally:
+        await file.close()
+
+    mime_type = file.content_type or mimetypes.guess_type(original_name)[0] or "application/octet-stream"
+    artifact_id = str(uuid.uuid4())
+    artifact = TaskArtifact(
+        id=artifact_id,
+        task_id=f"upload:{session_id}",
+        name=original_name,
+        artifact_type="uploaded_file",
+        file_path=str(stored_path),
+        mime_type=mime_type,
+        size_bytes=total_size,
+        extra={
+            "session_id": session_id,
+            "source": "chat_upload",
+            "sha256": hasher.hexdigest(),
+            "stored_name": stored_name,
+        },
+    )
+    db.add(artifact)
+    await db.commit()
+
+    return {
+        "file_id": artifact_id,
+        "name": original_name,
+        "mime_type": mime_type,
+        "size_bytes": total_size,
+        "status": "ready",
+    }
 
 
 @router.post("/chat")
@@ -158,6 +256,7 @@ async def _chat_via_zmq(req: ChatRequest, zmq_manager: Any) -> StreamingResponse
         payload={
             "message": req.message,
             "images": req.images,
+            "file_ids": req.file_ids,
             "channel": req.channel,
             "user_id": req.user_id,
         },
@@ -216,7 +315,11 @@ async def _chat_direct(req: ChatRequest) -> StreamingResponse:
             memory = MemoryFactory.create(settings.memory_backend, db=db)
             assistant = PersonalAssistant(session_id=req.session_id, memory=memory, db=db)
             try:
-                async for event in assistant.reply_stream(req.message, images=req.images):
+                async for event in assistant.reply_stream(
+                    req.message,
+                    images=req.images,
+                    file_ids=req.file_ids,
+                ):
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
                     # send_file_to_user 成功 → 额外 emit file 事件

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import mimetypes
 import subprocess
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
 from agentpal.config import get_settings
+from agentpal.database import get_sync_db
+from agentpal.models.session import TaskArtifact
 
 
 def _text_response(text: str) -> ToolResponse:
@@ -133,5 +136,82 @@ def edit_file(file_path: str, old_text: str, new_text: str) -> ToolResponse:
         updated = original.replace(old_text, new_text, 1)
         path.write_text(updated, encoding="utf-8")
         return _text_response(f"✅ 已完成替换（{file_path}）")
+    except Exception as e:
+        return _text_response(f"<error>{e}</error>")
+
+
+# ── 5. read_uploaded_file ──────────────────────────────────
+
+
+def read_uploaded_file(file_id: str, max_chars: int = 4000) -> ToolResponse:
+    """读取聊天上传文件（仅限 workspace/uploads/chat 目录）。
+
+    Args:
+        file_id: 上传文件对应的 artifact id
+        max_chars: 最大返回字符数，默认 4000
+
+    Returns:
+        包含文件元信息和文本片段的结果
+    """
+    settings = get_settings()
+    upload_root = (Path(settings.workspace_dir).expanduser() / "uploads" / "chat").resolve()
+
+    try:
+        with get_sync_db() as db:
+            artifact = db.get(TaskArtifact, file_id)
+
+        if artifact is None or artifact.artifact_type != "uploaded_file":
+            return _text_response(f"<error>未找到上传文件: {file_id}</error>")
+
+        if not artifact.file_path:
+            return _text_response("<error>文件路径缺失</error>")
+
+        file_path = Path(artifact.file_path).expanduser().resolve()
+        if upload_root not in file_path.parents:
+            return _text_response("<error>拒绝访问非上传目录文件</error>")
+
+        if not file_path.exists():
+            return _text_response(f"<error>文件不存在: {file_path}</error>")
+
+        guessed_mime = artifact.mime_type or mimetypes.guess_type(artifact.name)[0] or "application/octet-stream"
+        size = file_path.stat().st_size
+        text_mime = guessed_mime.startswith("text/") or guessed_mime in {
+            "application/json",
+            "application/xml",
+            "application/javascript",
+        }
+
+        if not text_mime:
+            return _text_response(
+                "\n".join(
+                    [
+                        "[uploaded_file]",
+                        f"file_id={artifact.id}",
+                        f"name={artifact.name}",
+                        f"mime={guessed_mime}",
+                        f"size_bytes={size}",
+                        "snippet=<binary file omitted>",
+                    ]
+                )
+            )
+
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+        snippet = content[:max(1, max_chars)]
+        if len(content) > len(snippet):
+            snippet += f"\n\n[... 已截断，总长度 {len(content)} 字符]"
+
+        return _text_response(
+            "\n".join(
+                [
+                    "[uploaded_file]",
+                    f"file_id={artifact.id}",
+                    f"name={artifact.name}",
+                    f"mime={guessed_mime}",
+                    f"size_bytes={size}",
+                    "snippet:",
+                    snippet,
+                ]
+            )
+        )
     except Exception as e:
         return _text_response(f"<error>{e}</error>")

@@ -13,9 +13,19 @@ NOTE: 使用 "domcontentloaded" 而非 "networkidle" 作为页面加载状态，
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from playwright.sync_api import Page, expect
 
+from tests.e2e.helpers import (
+    cleanup_temp_assets,
+    create_real_upload_files,
+    require_backend,
+    require_frontend,
+    send_ui_message,
+    wait_for_chat_ready,
+)
 
 BASE_URL = "http://localhost:3000"
 
@@ -217,6 +227,73 @@ class TestChatConversation:
 
         # 清空后应回到欢迎界面
         expect(page.get_by_text("嗨！我是 nimo").first).to_be_visible(timeout=5000)
+
+
+
+
+# ── Chat File Upload (Real Files) ─────────────────────────
+
+
+@pytest.mark.e2e
+@require_backend
+@require_frontend
+class TestChatFileUpload:
+    """Chat 页面真实文件上传（txt/pdf/csv）测试。"""
+
+    def test_upload_real_files_and_send_for_analysis(self, page: Page):
+        """上传 txt/pdf/csv 后发送消息，验证 file_ids 随 chat 请求透传。"""
+        wait_for_chat_ready(page)
+
+        upload_paths = create_real_upload_files(prefix="chat-upload")
+        chat_payloads: list[dict] = []
+
+        def _capture_chat_request(req):
+            if req.method != "POST":
+                return
+            if not req.url.endswith("/api/v1/agent/chat"):
+                return
+            post_data = req.post_data or "{}"
+            try:
+                chat_payloads.append(json.loads(post_data))
+            except Exception:
+                chat_payloads.append({})
+
+        page.on("request", _capture_chat_request)
+
+        try:
+            upload_input = page.locator("input[type='file']")
+            expect(upload_input).to_be_attached(timeout=5000)
+            upload_input.set_input_files([str(path) for path in upload_paths])
+
+            # 上传成功后应在输入框上方显示文件 chip
+            for file_name in ["notes.txt", "report.pdf", "metrics.csv"]:
+                expect(page.get_by_text(file_name, exact=True)).to_be_visible(timeout=10000)
+
+            # 不应立刻显示上传失败提示
+            page.wait_for_timeout(800)
+            assert page.get_by_text("上传失败").count() == 0
+            assert page.get_by_text("文件「").count() == 0
+
+            # 发送消息触发 chat
+            send_ui_message(page, "请分析我上传的文件，先给出结构化摘要。")
+
+            # assistant 流程启动（出现 assistant 气泡）
+            assistant_bubble = page.locator("div.bg-white.border.rounded-2xl").last
+            expect(assistant_bubble).to_be_visible(timeout=15000)
+
+            # 等待 chat 请求发出并校验 file_ids
+            page.wait_for_timeout(1500)
+            assert chat_payloads, "应捕获到 /api/v1/agent/chat 请求"
+
+            latest_payload = chat_payloads[-1]
+            assert latest_payload.get("message"), "chat 请求应包含 message"
+            file_ids = latest_payload.get("file_ids")
+            assert isinstance(file_ids, list), f"file_ids 应为 list，实际: {file_ids!r}"
+            assert len(file_ids) == 3, f"应携带 3 个 file_ids，实际: {file_ids}"
+            assert all(isinstance(fid, str) and fid for fid in file_ids), f"file_ids 应全为非空字符串: {file_ids}"
+        finally:
+            page.remove_listener("request", _capture_chat_request)
+            cleanup_temp_assets(upload_paths)
 
 
 # ── Tools Page ────────────────────────────────────────────

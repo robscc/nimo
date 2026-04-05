@@ -17,7 +17,7 @@ from agentpal.memory.base import BaseMemory
 from agentpal.memory.factory import MemoryFactory
 from agentpal.models.cron import CronJob, CronJobExecution
 from agentpal.models.llm_usage import LLMCallLog  # noqa: F401 — 触发 Base.metadata 注册
-from agentpal.models.session import AgentMode, SessionRecord, SubAgentTask, TaskStatus
+from agentpal.models.session import AgentMode, SessionRecord, SubAgentTask, TaskArtifact, TaskStatus
 from agentpal.models.tool import ToolCallLog
 from agentpal.plans.intent import IntentClassifier
 from agentpal.plans.store import Plan, PlanStatus, PlanStep, PlanStore
@@ -517,11 +517,81 @@ class PersonalAssistant(BaseAgent):
         rows.sort(key=lambda x: str(x.get("finished_at") or ""), reverse=True)
         return rows
 
+    async def _load_chat_attachments(
+        self,
+        file_ids: list[str] | None,
+    ) -> list[TaskArtifact]:
+        """加载当前 session 可访问的上传文件附件。"""
+        if not file_ids or self._db is None:
+            return []
+
+        resolved_ids = [fid for fid in file_ids if fid]
+        if not resolved_ids:
+            return []
+
+        from sqlalchemy import select
+
+        result = await self._db.execute(
+            select(TaskArtifact).where(
+                TaskArtifact.id.in_(resolved_ids),
+                TaskArtifact.artifact_type == "uploaded_file",
+            )
+        )
+        artifacts = result.scalars().all()
+
+        allowed: list[TaskArtifact] = []
+        for artifact in artifacts:
+            extra = artifact.extra or {}
+            if extra.get("session_id") == self.session_id:
+                allowed.append(artifact)
+
+        artifact_map = {a.id: a for a in allowed}
+        ordered = [artifact_map[fid] for fid in resolved_ids if fid in artifact_map]
+        return ordered
+
+    def _build_attachment_context(self, attachments: list[TaskArtifact]) -> str | None:
+        """构建供模型使用的附件上下文摘要。"""
+        if not attachments:
+            return None
+
+        lines = ["[附件上下文] 用户上传了以下文件，可按需分析："]
+        for idx, artifact in enumerate(attachments, start=1):
+            extra = artifact.extra or {}
+            sha256 = str(extra.get("sha256") or "")
+            lines.append(
+                f"{idx}. file_id={artifact.id}; name={artifact.name}; "
+                f"mime={artifact.mime_type or 'application/octet-stream'}; "
+                f"size={artifact.size_bytes or 0}; sha256={sha256[:16]}"
+            )
+        lines.append(
+            "如需读取内容，请优先使用 read_uploaded_file 工具并传入 file_id，不要臆测文件内容。"
+        )
+        return "\n".join(lines)
+
     # ── 核心对话（含工具调用循环）────────────────────────
 
-    async def reply(self, user_input: str, images: list[str] | None = None, **kwargs: Any) -> str:
+    async def reply(
+        self,
+        user_input: str,
+        images: list[str] | None = None,
+        file_ids: list[str] | None = None,
+        **kwargs: Any,
+    ) -> str:
         """处理用户输入，支持多轮工具调用后返回最终回复。"""
-        await self._remember_user(user_input, meta={"images": images} if images else None)
+        meta: dict[str, Any] | None = None
+        if images or file_ids:
+            meta = {}
+            if images:
+                meta["images"] = images
+            if file_ids:
+                meta["file_ids"] = file_ids
+
+        attachments = await self._load_chat_attachments(file_ids)
+        attachment_context = self._build_attachment_context(attachments)
+        if meta is not None and attachment_context:
+            meta["attachment_context"] = attachment_context
+
+        await self._remember_user(user_input, meta=meta)
         # 防御性 commit：确保 user 消息持久化（防止 StreamingResponse 生命周期 bug）
         if self._db is not None:
             await self._db.commit()
@@ -546,8 +616,12 @@ class PersonalAssistant(BaseAgent):
         # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
         for msg_dict, meta in history_with_meta[:-1]:
             messages.append(_rebuild_multimodal(msg_dict, meta))
-        # 构建用户消息（支持多模态图片）
-        messages.append(_build_user_message(user_input, images))
+        # 构建用户消息（支持多模态图片 + 上传附件上下文）
+        user_message_text = (
+            f"{user_input}\n\n{attachment_context}"
+            if attachment_context else user_input
+        )
+        messages.append(_build_user_message(user_message_text, images))
 
         response = None
         usage_rounds: list[tuple[int, int, int]] = []  # (round, input, output)
@@ -633,7 +707,10 @@ class PersonalAssistant(BaseAgent):
         return final_text
 
     async def reply_stream(
-        self, user_input: str, images: list[str] | None = None,
+        self,
+        user_input: str,
+        images: list[str] | None = None,
+        file_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """流式对话，yield SSE 事件 dict。
 
@@ -668,12 +745,25 @@ class PersonalAssistant(BaseAgent):
 
             # 触发新计划
             if mode == AgentMode.NORMAL and IntentClassifier.is_plan_trigger(user_input):
-                async for event in self._handle_plan_trigger(user_input, images):
+                async for event in self._handle_plan_trigger(user_input, images, file_ids):
                     yield event
                 return
 
             # ── 正常对话流程 ─────────────────────────────────
-            await self._remember_user(user_input, meta={"images": images} if images else None)
+            meta: dict[str, Any] | None = None
+            if images or file_ids:
+                meta = {}
+                if images:
+                    meta["images"] = images
+                if file_ids:
+                    meta["file_ids"] = file_ids
+
+            attachments = await self._load_chat_attachments(file_ids)
+            attachment_context = self._build_attachment_context(attachments)
+            if meta is not None and attachment_context:
+                meta["attachment_context"] = attachment_context
+
+            await self._remember_user(user_input, meta=meta)
             # 防御性 commit：确保 user 消息持久化（防止 StreamingResponse 生命周期 bug）
             if self._db is not None:
                 await self._db.commit()
@@ -711,8 +801,12 @@ class PersonalAssistant(BaseAgent):
             # 重建历史（排除最后一条——即刚写入的 user 消息，下面手动追加多模态版本）
             for msg_dict, meta in history_with_meta[:-1]:
                 messages.append(_rebuild_multimodal(msg_dict, meta))
-            # 构建用户消息（支持多模态图片）
-            messages.append(_build_user_message(user_input, images))
+            # 构建用户消息（支持多模态图片 + 上传附件上下文）
+            user_message_text = (
+                f"{user_input}\n\n{attachment_context}"
+                if attachment_context else user_input
+            )
+            messages.append(_build_user_message(user_message_text, images))
 
             final_text = ""
             accumulated_thinking = ""
@@ -996,12 +1090,23 @@ class PersonalAssistant(BaseAgent):
     # ── Plan Mode Handlers ─────────────────────────────────
 
     async def _handle_plan_trigger(
-        self, user_input: str, images: list[str] | None = None,
+        self,
+        user_input: str,
+        images: list[str] | None = None,
+        file_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """处理计划触发：生成计划 → 进入确认阶段。"""
         from agentpal.plans.prompts import PLAN_GENERATION_PROMPT, build_confirm_context
 
-        await self._remember_user(user_input, meta={"images": images} if images else None)
+        meta: dict[str, Any] | None = None
+        if images or file_ids:
+            meta = {}
+            if images:
+                meta["images"] = images
+            if file_ids:
+                meta["file_ids"] = file_ids
+
+        await self._remember_user(user_input, meta=meta)
         if self._db is not None:
             await self._db.commit()
 
@@ -1021,10 +1126,16 @@ class PersonalAssistant(BaseAgent):
             async_task_results=await self._load_async_task_results(),
         )
         plan_prompt = base_prompt
+        attachments = await self._load_chat_attachments(file_ids)
+        attachment_context = self._build_attachment_context(attachments)
+        user_message_text = (
+            f"{user_input}\n\n{attachment_context}"
+            if attachment_context else user_input
+        )
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": plan_prompt},
-            _build_user_message(user_input, images),
+            _build_user_message(user_message_text, images),
         ]
 
         final_text = ""

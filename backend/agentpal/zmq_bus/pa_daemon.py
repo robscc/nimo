@@ -83,6 +83,7 @@ class PersonalAssistantDaemon(AgentDaemon):
 
         user_message = envelope.payload.get("message", "")
         images = envelope.payload.get("images")
+        file_ids = envelope.payload.get("file_ids")
         channel = envelope.payload.get("channel", "web")
         msg_id = envelope.msg_id  # 关联 ID，EventSubscriber 用它过滤
 
@@ -105,7 +106,11 @@ class PersonalAssistantDaemon(AgentDaemon):
 
                 # 流式对话
                 try:
-                    async for event in assistant.reply_stream(user_message, images=images):
+                    async for event in assistant.reply_stream(
+                        user_message,
+                        images=images,
+                        file_ids=file_ids,
+                    ):
                         # 发布事件到 PUB socket
                         await self._publish_sse_event(topic, msg_id, event)
 
