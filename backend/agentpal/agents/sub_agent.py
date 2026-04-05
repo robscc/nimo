@@ -23,6 +23,7 @@ from typing import Any
 from loguru import logger
 
 from agentpal.agents.base import BaseAgent
+from agentpal.database import commit_with_retry
 from agentpal.memory.base import BaseMemory
 from agentpal.models.session import SubAgentTask, TaskStatus
 
@@ -176,7 +177,16 @@ class SubAgent(BaseAgent):
             # 释放 DB 写锁
             if self._db is not None:
                 try:
-                    await self._db.commit()
+                    await commit_with_retry(
+                        self._db,
+                        context={
+                            "component": "sub_agent",
+                            "phase": "before_llm_round",
+                            "session_id": self.session_id,
+                            "task_id": self._task.id,
+                            "agent_name": self._task.agent_name,
+                        },
+                    )
                 except Exception:
                     pass
 
@@ -286,7 +296,17 @@ class SubAgent(BaseAgent):
                 # 工具执行前 commit，避免 SQLite 锁
                 if self._db is not None:
                     try:
-                        await self._db.commit()
+                        await commit_with_retry(
+                            self._db,
+                            context={
+                                "component": "sub_agent",
+                                "phase": "before_tool_call",
+                                "session_id": self.session_id,
+                                "task_id": self._task.id,
+                                "tool_name": tc_name,
+                                "agent_name": self._task.agent_name,
+                            },
+                        )
                     except Exception:
                         pass
 
@@ -333,7 +353,16 @@ class SubAgent(BaseAgent):
                 model = _build_model(self._model_config)
                 if self._db is not None:
                     try:
-                        await self._db.commit()
+                        await commit_with_retry(
+                            self._db,
+                            context={
+                                "component": "sub_agent",
+                                "phase": "before_force_summary",
+                                "session_id": self.session_id,
+                                "task_id": self._task.id,
+                                "agent_name": self._task.agent_name,
+                            },
+                        )
                     except Exception:
                         pass
                 response = await model(messages, tools=None)  # 禁用工具，强制文字输出
@@ -552,6 +581,18 @@ class SubAgent(BaseAgent):
 
         try:
             await self._db.flush()
+            # 状态变更尽快持久化，避免终态长时间停留在内存事务中。
+            await commit_with_retry(
+                self._db,
+                context={
+                    "component": "sub_agent",
+                    "phase": "update_status",
+                    "session_id": self.session_id,
+                    "task_id": self._task.id,
+                    "status": status.value,
+                    "agent_name": self._task.agent_name,
+                },
+            )
         except Exception:
             pass
 
@@ -575,6 +616,26 @@ class SubAgent(BaseAgent):
                 },
                 f"任务状态变更为 {status.value}",
             )
+
+        # 任务终态时发布 Session 事件（用于主会话实时卡片更新）
+        if status in (TaskStatus.DONE, TaskStatus.FAILED) and self._parent_session_id:
+            try:
+                from agentpal.services.session_event_bus import session_event_bus
+
+                await session_event_bus.publish(
+                    self._parent_session_id,
+                    {
+                        "type": "async_task_done",
+                        "source": "sub_agent",
+                        "task_id": self._task.id,
+                        "agent_name": self._task.agent_name,
+                        "status": status.value,
+                        "result_preview": result[:500] if result else None,
+                        "error_preview": error[:500] if error else None,
+                    },
+                )
+            except Exception:
+                pass
 
         # 任务终态时发布 WebSocket 通知
         if status in (TaskStatus.DONE, TaskStatus.FAILED):

@@ -99,6 +99,7 @@ def build_toolkit(
     extra_tools: list[dict] | None = None,
     *,
     is_subagent: bool = False,
+    exclude_names: set[str] | None = None,
 ) -> Toolkit | None:
     """根据已启用工具集构建 agentscope Toolkit。
 
@@ -106,11 +107,13 @@ def build_toolkit(
         enabled_names: 已启用的内置工具名列表
         extra_tools: 额外工具（如 Skill 工具），每项含 name/func/description
         is_subagent: 是否是 SubAgent 上下文（决定是否包含 subagent_only 工具）
+        exclude_names: 需要从最终 Toolkit 中排除的工具名集合（可用于按轮次禁用特定工具）
 
     Returns:
         Toolkit 实例（无工具时返回 None）
     """
-    has_builtin = bool(enabled_names)
+    excluded = exclude_names or set()
+    has_builtin = bool([n for n in enabled_names if n not in excluded])
     has_extra = bool(extra_tools)
 
     if not has_builtin and not has_extra:
@@ -120,6 +123,8 @@ def build_toolkit(
 
     # 注册内置工具
     for name in enabled_names:
+        if name in excluded:
+            continue
         meta = TOOL_CATALOG.get(name)
         if meta:
             # 过滤 SubAgent 专用工具

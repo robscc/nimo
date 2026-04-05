@@ -125,20 +125,27 @@ export interface HistoryMessage {
   meta?: HistoryMessageMeta | null;
 }
 
-export interface TaskListItem {
-  task_id: string;
-  status: "pending" | "running" | "done" | "failed" | "cancelled";
-  agent_name: string | null;
-  task_type: string | null;
-  task_prompt: string;
-  parent_session_id: string;
-  result: string | null;
-  error: string | null;
-  created_at: string;
-  finished_at: string | null;
+export interface PlanStepData {
+  index: number;
+  title: string;
+  description: string;
+  strategy: string;
+  tools: string[];
+  status: string;
+  task_id?: string | null;
+  result?: string | null;
+  error?: string | null;
 }
 
-/** SSE event emitted when an async task (SubAgent / Cron) completes. */
+export interface PlanData {
+  id: string;
+  goal: string;
+  summary: string;
+  status: string;
+  steps: PlanStepData[];
+  current_step: number;
+}
+
 export interface AsyncTaskDoneSSEEvent {
   type: "async_task_done";
   source: "sub_agent" | "cron";
@@ -203,6 +210,11 @@ export async function createSession(channel = "web"): Promise<{ id: string }> {
 export async function getSessionMessages(sessionId: string): Promise<HistoryMessage[]> {
   const { data } = await api.get<HistoryMessage[]>(`/sessions/${sessionId}/messages`);
   return data;
+}
+
+export async function getActivePlan(sessionId: string): Promise<PlanData | null> {
+  const { data } = await api.get<{ plan: PlanData | null }>(`/sessions/${sessionId}/plan`);
+  return data.plan;
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {

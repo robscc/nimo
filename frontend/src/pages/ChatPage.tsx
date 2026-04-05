@@ -12,7 +12,6 @@ import {
   clearMemory,
   createSession,
   getSessions,
-  getSessionMessages,
   resolveToolGuard,
   uploadAgentFile,
 } from "../api";
@@ -24,7 +23,7 @@ import { useSubAgents } from "../hooks/useSubAgents";
 import { useSessionEvents } from "../hooks/useSessionEvents";
 
 import type { Message, PlanData } from "../types/chat";
-import { mapHistoryToMessages } from "../utils/chatHelpers";
+import { loadHistoryWithPlan } from "../utils/chatHelpers";
 import {
   ThinkingBubble,
   ToolGuardCard,
@@ -231,8 +230,8 @@ export default function ChatPage() {
     (async () => {
       if (sessionIdParam) {
         // URL 已指定 session：直接加载其消息
-        const history = await getSessionMessages(sessionIdParam);
-        setMessages(mapHistoryToMessages(history));
+        const loaded = await loadHistoryWithPlan(sessionIdParam);
+        setMessages(loaded);
       } else {
         // 无 URL 参数：加载最近一条 session，没有才新建
         const sessions = await getSessions();
@@ -240,8 +239,8 @@ export default function ChatPage() {
           const latest = sessions[0];
           setSessionId(latest.id);
           setSearchParams({ session: latest.id }, { replace: true });
-          const history = await getSessionMessages(latest.id);
-          setMessages(mapHistoryToMessages(history));
+          const loaded = await loadHistoryWithPlan(latest.id);
+          setMessages(loaded);
         } else {
           const { id } = await createSession();
           setSessionId(id);
@@ -263,8 +262,8 @@ export default function ChatPage() {
     setSearchParams({ session: id });
     setPendingImages([]);
     setPendingFiles([]);
-    const history = await getSessionMessages(id);
-    setMessages(mapHistoryToMessages(history));
+    const loaded = await loadHistoryWithPlan(id);
+    setMessages(loaded);
   };
 
   // 新建对话回调

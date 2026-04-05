@@ -246,7 +246,7 @@ class SubAgentDaemon(AgentDaemon):
         import os
 
         from agentpal.agents.sub_agent import SubAgent
-        from agentpal.database import AsyncSessionLocal
+        from agentpal.database import AsyncSessionLocal, commit_with_retry
         from agentpal.memory.factory import MemoryFactory
         from agentpal.models.session import SubAgentTask
 
@@ -292,7 +292,17 @@ class SubAgentDaemon(AgentDaemon):
             result = await sub_agent.run(task_prompt)
 
             # 提交数据库变更（状态、执行日志等）
-            await db.commit()
+            await commit_with_retry(
+                db,
+                context={
+                    "component": "sub_daemon",
+                    "phase": "run_sub_agent_done",
+                    "session_id": sub_session_id,
+                    "task_id": task_id,
+                    "status": str(task.status) if task.status else "unknown",
+                    "agent_name": self._agent_name,
+                },
+            )
 
             # 发布执行日志事件（仅摘要，完整日志已持久化到 DB）
             log_count = len(task.execution_log) if task.execution_log else 0

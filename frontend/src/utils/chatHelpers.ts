@@ -1,4 +1,5 @@
-import { getSessionMessages } from "../api";
+import { getActivePlan, getSessionMessages } from "../api";
+import type { Message } from "../types/chat";
 
 // ── Shell Output Parser ─────────────────────────────────
 
@@ -33,7 +34,7 @@ export const LEVEL_LABELS: Record<number, { label: string; color: string; bg: st
 
 // ── History → Messages Mapper ───────────────────────────
 
-export function mapHistoryToMessages(history: Awaited<ReturnType<typeof getSessionMessages>>) {
+export function mapHistoryToMessages(history: Awaited<ReturnType<typeof getSessionMessages>>): Message[] {
   return history.map((m) => {
     const meta = m.meta;
     return {
@@ -58,4 +59,50 @@ export function mapHistoryToMessages(history: Awaited<ReturnType<typeof getSessi
       cardMeta: meta?.card_type ? meta : undefined,
     };
   });
+}
+
+export async function loadHistoryWithPlan(sessionId: string): Promise<Message[]> {
+  const [history, activePlan] = await Promise.all([
+    getSessionMessages(sessionId),
+    getActivePlan(sessionId),
+  ]);
+
+  const messages = mapHistoryToMessages(history);
+  if (!activePlan) return messages;
+
+  // 优先按历史消息里的 plan_id 锚定到原时间节点（通常是 plan_ready 那条 assistant 消息）
+  const anchorIndex = history
+    .map((m, idx) => ({ m, idx }))
+    .reverse()
+    .find(({ m }) => m.role === "assistant" && m.meta?.plan_id === activePlan.id)?.idx;
+
+  if (anchorIndex !== undefined) {
+    messages[anchorIndex] = {
+      ...messages[anchorIndex],
+      plan: activePlan,
+      planGenerating: false,
+    };
+    return messages;
+  }
+
+  // 回退：若没有可锚定 plan_id，再挂载到最近一条 assistant 消息
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "assistant") {
+      messages[i] = {
+        ...messages[i],
+        plan: activePlan,
+        planGenerating: false,
+      };
+      return messages;
+    }
+  }
+
+  // 兜底：若暂无 assistant 消息，则追加一条空 assistant 承载 PlanCard
+  messages.push({
+    role: "assistant",
+    content: "",
+    plan: activePlan,
+    planGenerating: false,
+  });
+  return messages;
 }

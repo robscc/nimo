@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import contextmanager
+from typing import Any
 
+from loguru import logger
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -78,6 +82,126 @@ def get_sync_db():
         raise
     finally:
         session.close()
+
+
+def _is_sqlite_locked_error(exc: Exception) -> bool:
+    """判断异常是否为 SQLite 锁冲突（database is locked / SQLITE_BUSY）。"""
+    if not isinstance(exc, OperationalError):
+        return False
+    msg = str(exc).lower()
+    return (
+        "database is locked" in msg
+        or "sqlite_busy" in msg
+        or "database table is locked" in msg
+    )
+
+
+def _format_commit_retry_context(context: dict[str, Any] | str | None) -> str:
+    """标准化 commit 重试上下文。
+
+    统一输出固定字段集（key=value），便于 grep 聚合：
+    component / phase / session_id / task_id / tool_name / status / agent_name
+    """
+    if context is None:
+        context = {}
+
+    if isinstance(context, str):
+        # 兼容历史字符串上下文，仍保证有统一字段前缀
+        return (
+            "component=n/a phase=n/a session_id=n/a task_id=n/a "
+            "tool_name=n/a status=n/a agent_name=n/a "
+            f"raw={context.replace(' ', '_')}"
+        )
+
+    fixed_keys = (
+        "component",
+        "phase",
+        "session_id",
+        "task_id",
+        "tool_name",
+        "status",
+        "agent_name",
+    )
+
+    parts: list[str] = []
+    for key in fixed_keys:
+        value = context.get(key)
+        text = "n/a" if value is None else str(value).replace(" ", "_")
+        parts.append(f"{key}={text}")
+
+    # 额外字段按 key 排序附加，保留扩展能力
+    for key in sorted(k for k in context.keys() if k not in fixed_keys):
+        value = context.get(key)
+        if value is None:
+            continue
+        parts.append(f"{key}={str(value).replace(' ', '_')}")
+
+    return " ".join(parts)
+
+
+async def commit_with_retry(
+    session: AsyncSession,
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 0.05,
+    context: dict[str, Any] | str | None = None,
+) -> None:
+    """为 SQLite 短暂锁竞争提供轻量重试的 commit。
+
+    仅针对锁冲突重试；其他异常直接抛出。
+    每次失败后 rollback 清理事务，再指数退避等待。
+
+    Args:
+        session: AsyncSession 实例
+        max_attempts: 最大尝试次数（含首次 commit）
+        base_delay: 指数退避基础延迟（秒）
+        context: 可观测性上下文（如 "session=... tool=..."）
+    """
+    attempt = 0
+    ctx = _format_commit_retry_context(context)
+
+    while True:
+        try:
+            await session.commit()
+            if attempt > 0:
+                logger.info(
+                    "sqlite_commit_retry event=success context='{}' attempts={}",
+                    ctx,
+                    attempt + 1,
+                )
+            return
+        except Exception as exc:
+            attempt += 1
+            is_locked = _is_sqlite_locked_error(exc)
+            if not is_locked:
+                logger.error(
+                    "sqlite_commit_retry event=non_retryable_error context='{}' attempts={} error={}",
+                    ctx,
+                    attempt,
+                    exc,
+                )
+                raise
+
+            if attempt >= max_attempts:
+                logger.error(
+                    "sqlite_commit_retry event=exhausted context='{}' max_attempts={} error={}",
+                    ctx,
+                    max_attempts,
+                    exc,
+                )
+                raise
+
+            delay = base_delay * (2 ** (attempt - 1))
+            logger.warning(
+                "sqlite_commit_retry event=retrying context='{}' attempt={}/{} delay_ms={} error={}",
+                ctx,
+                attempt,
+                max_attempts,
+                int(delay * 1000),
+                exc,
+            )
+            await session.rollback()
+            await asyncio.sleep(delay)
 
 
 class Base(DeclarativeBase):

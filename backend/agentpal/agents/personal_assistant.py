@@ -13,6 +13,7 @@ from typing import Any
 
 from agentpal.agents.base import BaseAgent
 from agentpal.config import get_settings
+from agentpal.database import commit_with_retry
 from agentpal.memory.base import BaseMemory
 from agentpal.memory.factory import MemoryFactory
 from agentpal.models.cron import CronJob, CronJobExecution
@@ -568,6 +569,42 @@ class PersonalAssistant(BaseAgent):
         )
         return "\n".join(lines)
 
+    def _is_plan_control_turn(self, user_input: str) -> bool:
+        """判断本轮是否在操控/查询计划（不应忽略计划上下文）。"""
+        text = (user_input or "").strip()
+        if not text:
+            return False
+
+        if IntentClassifier.is_exit_plan(text):
+            return True
+
+        intent = IntentClassifier.classify_confirm(text)
+        if intent in {"approve", "modify", "cancel"}:
+            return True
+
+        lowered = text.lower()
+        plan_keywords = ("计划", "步骤", "进度", "plan", "roadmap")
+        control_keywords = (
+            "状态", "查询", "查看", "第几步", "继续", "开始执行", "取消", "暂停", "恢复",
+            "status", "progress", "continue", "start", "cancel", "list",
+        )
+        return any(k in lowered for k in plan_keywords) and any(k in lowered for k in control_keywords)
+
+    def _should_ignore_previous_plan_context(
+        self,
+        user_input: str,
+        mode: str,
+    ) -> bool:
+        """判断本轮是否应忽略上轮计划语境。
+
+        泛化规则：只要当前处于计划态（confirming/executing/planning）且本轮不是
+        “计划控制语句”，就把本轮视为独立用户请求，避免计划语境绑架后续对话。
+        """
+        if mode == AgentMode.NORMAL:
+            return False
+
+        return not self._is_plan_control_turn(user_input)
+
     # ── 核心对话（含工具调用循环）────────────────────────
 
     async def reply(
@@ -734,14 +771,19 @@ class PersonalAssistant(BaseAgent):
                     yield event
                 return
 
-            # 确认阶段
-            if mode == AgentMode.CONFIRMING:
+            # 执行中用户插话 → 不中断步骤执行，fall through 到正常回复
+            # (执行由 SubAgent 进行，PA 仍可正常聊天)
+
+            ignore_plan_context = self._should_ignore_previous_plan_context(
+                user_input=user_input,
+                mode=mode,
+            )
+
+            # confirming 阶段：仅计划控制语句进入确认流程；其他输入按正常对话处理
+            if mode == AgentMode.CONFIRMING and not ignore_plan_context:
                 async for event in self._handle_confirming(user_input):
                     yield event
                 return
-
-            # 执行中用户插话 → 不中断步骤执行，fall through 到正常回复
-            # (执行由 SubAgent 进行，PA 仍可正常聊天)
 
             # 触发新计划
             if mode == AgentMode.NORMAL and IntentClassifier.is_plan_trigger(user_input):
@@ -768,16 +810,17 @@ class PersonalAssistant(BaseAgent):
             if self._db is not None:
                 await self._db.commit()
             history_with_meta = await self._get_history_with_meta(limit=20)
-            toolkit = await self._build_active_toolkit()
+            excluded_tools = {"plan_cli"} if ignore_plan_context else None
+            toolkit = await self._build_active_toolkit(exclude_tools=excluded_tools)
 
             enabled_tool_names = _get_tool_names(toolkit)
             skill_prompts = await self._load_prompt_skills()
             mention_hint = await self._extract_mention_hint(user_input)
-            async_task_results = await self._load_async_task_results()
+            async_task_results = [] if ignore_plan_context else await self._load_async_task_results()
 
             # Plan Mode 执行阶段：构建计划进度上下文（由披露引擎决定注入粒度）
             plan_context_text: str | None = None
-            if mode == AgentMode.EXECUTING:
+            if mode == AgentMode.EXECUTING and not ignore_plan_context:
                 try:
                     from agentpal.plans.prompts import build_execution_context
 
@@ -1312,9 +1355,12 @@ class PersonalAssistant(BaseAgent):
         await self._set_agent_mode(AgentMode.EXECUTING)
 
         msg = f"计划开始执行！共 {len(plan.steps)} 步。"
-        await self._remember_assistant(msg)
+        await self._remember_assistant(msg, meta={"plan_id": plan.id})
         if self._db is not None:
             await self._db.commit()
+
+        # 先推送当前计划快照，让前端本轮 assistant 占位消息可立即渲染 PlanCard
+        yield {"type": "plan_ready", "plan": plan.to_dict()}
         yield {"type": "text_delta", "delta": msg}
 
         # 启动第一步
@@ -1402,55 +1448,96 @@ class PersonalAssistant(BaseAgent):
             "step": {"title": step.title, "description": step.description},
             "total_steps": len(plan.steps),
         }
+        yield {
+            "type": "thinking_delta",
+            "delta": f"\n[计划执行] 正在派发第 {step_index + 1} 步给 SubAgent：{step.title}\n",
+        }
 
-        # 使用 Scheduler 派遣 SubAgent
+        # 使用 Scheduler 派遣 SubAgent（透出为 tool-like 事件，提升交互一致性）
         from agentpal.tools.builtin import _get_scheduler
         scheduler = _get_scheduler()
-        if scheduler is not None:
-            await scheduler.dispatch_sub_agent(
-                task_id=task_id,
-                task_prompt=task_prompt,
-                parent_session_id=self.session_id,
-                agent_name=agent_name or "default",
-                model_config=model_config,
-                role_prompt=role_prompt,
-                max_tool_rounds=max_tool_rounds,
-            )
-        else:
-            # Fallback: in-process 执行
-            from agentpal.agents.sub_agent import SubAgent
-            from agentpal.database import AsyncSessionLocal
+        dispatch_tool_call_id = f"plan-dispatch-{task_id}"
+        dispatch_input = {
+            "agent_name": agent_name or "default",
+            "task_prompt": task_prompt,
+            "parent_session_id": self.session_id,
+            "blocking": False,
+        }
+        yield {
+            "type": "tool_start",
+            "id": dispatch_tool_call_id,
+            "name": "dispatch_sub_agent",
+            "input": dispatch_input,
+        }
+        dispatch_start = time()
+        try:
+            if scheduler is not None:
+                await scheduler.dispatch_sub_agent(
+                    task_id=task_id,
+                    task_prompt=task_prompt,
+                    parent_session_id=self.session_id,
+                    agent_name=agent_name or "default",
+                    model_config=model_config,
+                    role_prompt=role_prompt,
+                    max_tool_rounds=max_tool_rounds,
+                )
+            else:
+                # Fallback: in-process 执行
+                from agentpal.agents.sub_agent import SubAgent
+                from agentpal.database import AsyncSessionLocal
 
-            _tid = task_id
-            _ssid = sub_session_id
-            _mc = model_config
-            _rp = role_prompt
-            _mtr = max_tool_rounds
-            _pid = self.session_id
-            _tp = task_prompt
+                _tid = task_id
+                _ssid = sub_session_id
+                _mc = model_config
+                _rp = role_prompt
+                _mtr = max_tool_rounds
+                _pid = self.session_id
+                _tp = task_prompt
 
-            async def _run_bg() -> None:
-                from loguru import logger as _l
+                async def _run_bg() -> None:
+                    from loguru import logger as _l
 
-                async with AsyncSessionLocal() as bg_db:
-                    bg_task = await bg_db.get(SubAgentTask, _tid)
-                    if bg_task is None:
-                        return
-                    sub_memory = MemoryFactory.create("buffer")
-                    sub_agent = SubAgent(
-                        session_id=_ssid,
-                        memory=sub_memory,
-                        task=bg_task,
-                        db=bg_db,
-                        model_config=_mc,
-                        role_prompt=_rp,
-                        max_tool_rounds=_mtr,
-                        parent_session_id=_pid,
-                    )
-                    await sub_agent.run(_tp)
-                    await bg_db.commit()
+                    async with AsyncSessionLocal() as bg_db:
+                        bg_task = await bg_db.get(SubAgentTask, _tid)
+                        if bg_task is None:
+                            return
+                        sub_memory = MemoryFactory.create("buffer")
+                        sub_agent = SubAgent(
+                            session_id=_ssid,
+                            memory=sub_memory,
+                            task=bg_task,
+                            db=bg_db,
+                            model_config=_mc,
+                            role_prompt=_rp,
+                            max_tool_rounds=_mtr,
+                            parent_session_id=_pid,
+                        )
+                        await sub_agent.run(_tp)
+                        await bg_db.commit()
 
-            asyncio.create_task(_run_bg())
+                asyncio.create_task(_run_bg())
+
+            duration_ms = int((time() - dispatch_start) * 1000)
+            yield {
+                "type": "tool_done",
+                "id": dispatch_tool_call_id,
+                "name": "dispatch_sub_agent",
+                "output": f"任务已派发，task_id={task_id}，agent={agent_name or 'default'}",
+                "error": None,
+                "duration_ms": duration_ms,
+            }
+        except Exception as exc:
+            duration_ms = int((time() - dispatch_start) * 1000)
+            yield {
+                "type": "tool_done",
+                "id": dispatch_tool_call_id,
+                "name": "dispatch_sub_agent",
+                "output": "",
+                "error": str(exc),
+                "duration_ms": duration_ms,
+            }
+            yield {"type": "error", "message": f"派发计划步骤失败: {exc}"}
+            return
 
     async def handle_plan_step_done(self, payload: dict[str, Any]) -> AsyncGenerator[dict[str, Any], None]:
         """处理计划步骤完成事件（由 PA daemon 调用）。
@@ -1475,6 +1562,10 @@ class PersonalAssistant(BaseAgent):
                 "type": "plan_step_done",
                 "step_index": step_index,
                 "result": result[:500],
+            }
+            yield {
+                "type": "thinking_delta",
+                "delta": f"\n[计划执行] 第 {step_index + 1} 步完成，正在判断下一步...\n",
             }
         else:
             error = payload.get("error", result or "步骤执行失败")
@@ -1877,7 +1968,19 @@ class PersonalAssistant(BaseAgent):
                     error=error_text,
                     duration_ms=duration_ms,
                 )
+                # 关键：工具日志 flush 后立即提交，避免在后续模型推理期间
+                # 长时间持有 SQLite 写锁（Plan 模式下多轮工具调用更易触发）。
+                await commit_with_retry(
+                    self._db,
+                    context={
+                        "component": "personal_assistant",
+                        "phase": "run_tool_log_commit",
+                        "session_id": self.session_id,
+                        "tool_name": tool_name,
+                    },
+                )
             except Exception:
+                # 日志失败不影响主流程
                 pass
 
         return output_text, error_text, duration_ms
@@ -1985,7 +2088,7 @@ class PersonalAssistant(BaseAgent):
         except Exception:
             return []
 
-    async def _build_active_toolkit(self) -> Any:
+    async def _build_active_toolkit(self, *, exclude_tools: set[str] | None = None) -> Any:
         """从 DB 读取已启用工具 + 已启用 Skill 工具，构建 agentscope Toolkit。
 
         支持 session 级别的工具/技能覆盖：
@@ -2048,7 +2151,11 @@ class PersonalAssistant(BaseAgent):
         except Exception:
             pass
 
-        return build_toolkit(enabled, extra_tools=skill_tools or None)
+        return build_toolkit(
+            enabled,
+            extra_tools=skill_tools or None,
+            exclude_names=exclude_tools,
+        )
 
 
 # ── 辅助函数 — 从 _llm_helpers.py re-export（保持向后兼容） ──
