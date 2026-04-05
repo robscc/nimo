@@ -9,43 +9,53 @@ export default function TaskResultCard({ msg }: { msg: Message }) {
   const isCron = msg.cardType === "cron_result";
 
   const agentName = (msg.cardMeta?.agent_name as string) || (isSubAgent ? "SubAgent" : "Cron");
-  const taskId = (msg.cardMeta?.task_id as string) || "";
-  const jobName = (msg.cardMeta?.job_name as string) || "";
-
-  const title = isSubAgent
-    ? `SubAgent「${agentName}」任务完成`
-    : `定时任务「${jobName}」执行完成`;
+  const taskPrompt = (msg.cardMeta?.task_prompt as string) || "";
+  const taskId = msg.cardMeta?.task_id as string | undefined;
+  const jobName = msg.cardMeta?.job_name as string | undefined;
 
   const accentColor = isSubAgent
-    ? { border: "border-indigo-200", bg: "bg-gradient-to-br from-indigo-50 to-white", icon: "text-indigo-500", badge: "bg-indigo-100 text-indigo-700", headerBg: "bg-indigo-500" }
-    : { border: "border-amber-200", bg: "bg-gradient-to-br from-amber-50 to-white", icon: "text-amber-500", badge: "bg-amber-100 text-amber-700", headerBg: "bg-amber-500" };
-
-  const Icon = isSubAgent ? Users : CalendarClock;
+    ? {
+        border: "border-blue-200",
+        bg: "bg-blue-50",
+        icon: "text-blue-600",
+        hover: "hover:bg-blue-50",
+      }
+    : {
+        border: "border-purple-200",
+        bg: "bg-purple-50",
+        icon: "text-purple-600",
+        hover: "hover:bg-purple-50",
+      };
 
   return (
-    <div className={clsx("rounded-xl border shadow-sm overflow-hidden max-w-[85%]", accentColor.border)}>
+    <div className="max-w-full rounded-lg border bg-white shadow-sm overflow-hidden">
       {/* Header */}
-      <div className={clsx("flex items-center gap-2 px-3.5 py-2", accentColor.headerBg)}>
-        <Icon size={15} className="text-white shrink-0" />
-        <span className="text-xs font-semibold text-white truncate">{title}</span>
-        <div className="ml-auto flex items-center gap-1.5">
-          <CheckCircle2 size={13} className="text-white/80" />
-          <button
-            onClick={() => setCollapsed(!collapsed)}
-            className="text-white/70 hover:text-white transition-colors"
-          >
-            {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-          </button>
+      <button
+        onClick={() => setCollapsed(!collapsed)}
+        className={clsx(
+          "w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors",
+          accentColor.hover
+        )}
+      >
+        <div className={clsx("shrink-0", accentColor.icon)}>
+          {isSubAgent ? <Users size={18} /> : <CalendarClock size={18} />}
         </div>
-      </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-gray-900 truncate">{agentName}</span>
+            <CheckCircle2 size={14} className="text-green-600 shrink-0" />
+          </div>
+          <p className="text-xs text-gray-600 mt-0.5 truncate">{taskPrompt}</p>
+        </div>
+        <div className="shrink-0">
+          {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+        </div>
+      </button>
 
-      {/* Meta badges */}
-      <div className={clsx("flex items-center gap-2 px-3.5 py-1.5 border-b text-[11px]", accentColor.border, accentColor.bg)}>
-        <span className={clsx("px-1.5 py-0.5 rounded font-medium", accentColor.badge)}>
-          {isSubAgent ? agentName : "cron"}
-        </span>
+      {/* Metadata */}
+      <div className={clsx("flex items-center gap-3 px-3.5 py-1.5 text-xs border-t", accentColor.border)}>
         {taskId && (
-          <span className="text-gray-400 font-mono truncate max-w-[180px]" title={taskId}>
+          <span className="text-gray-500 font-mono truncate max-w-[180px]" title={taskId}>
             ID: {taskId.slice(0, 8)}…
           </span>
         )}
@@ -56,7 +66,10 @@ export default function TaskResultCard({ msg }: { msg: Message }) {
 
       {/* Content */}
       {!collapsed && (
-        <div className={clsx("px-3.5 py-2.5 text-sm text-gray-700 leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto", accentColor.bg)}>
+        <div
+          className={clsx("px-3.5 py-2.5 text-sm text-gray-700 leading-relaxed whitespace-pre-wrap overflow-auto", accentColor.bg)}
+          style={{ maxHeight: '400px' }}
+        >
           {msg.content}
         </div>
       )}
