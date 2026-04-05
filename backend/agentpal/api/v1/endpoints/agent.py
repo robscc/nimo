@@ -265,11 +265,11 @@ async def dispatch_sub_agent(req: DispatchRequest, request: Request, db: AsyncSe
     """
     zmq_manager = _get_zmq_manager(request)
 
-    if zmq_manager is not None and not req.blocking:
-        # ── ZMQ 非阻塞派遣 ──────────────────────────────
+    if zmq_manager is not None:
+        # ── ZMQ 派遣（支持阻塞和非阻塞）──────────────────
         return await _dispatch_via_zmq(req, zmq_manager, db)
     else:
-        # ── 直接模式（阻塞模式或 ZMQ 不可用）───────────
+        # ── 直接模式（ZMQ 不可用时的降级方案）───────────
         return await _dispatch_direct(req, db)
 
 
