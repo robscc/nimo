@@ -1,0 +1,9 @@
+{
+  "name": "smoke",
+  "include_case_ids": [],
+  "include_labels": [
+    "task_failure",
+    "retry_recovered"
+  ],
+  "exclude_case_ids": []
+}
