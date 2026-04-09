@@ -1,0 +1,5 @@
+{
+  "min_task_success_rate": 0.7,
+  "min_tool_accuracy": 0.75,
+  "min_stability_score": 0.6
+}
