@@ -12,7 +12,7 @@ from loguru import logger
 
 from agentpal.api.v1.router import router as v1_router
 from agentpal.config import get_settings
-from agentpal.database import init_db, run_migrations
+from agentpal.database import init_db, run_migrations, shutdown_checkpoint
 
 
 def _setup_llm_debug_logging() -> None:
@@ -120,6 +120,9 @@ async def lifespan(app: FastAPI):
     if hasattr(app, "state") and hasattr(app.state, "scheduler"):
         await app.state.scheduler.stop()
         logger.info("SchedulerClient 已停止（所有子进程已关闭）")
+
+    # 关服前 TRUNCATE checkpoint，把 WAL 刷回主库
+    await shutdown_checkpoint()
 
     logger.info("AgentPal 已关闭")
 

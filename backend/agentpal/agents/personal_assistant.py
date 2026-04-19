@@ -13,7 +13,7 @@ from typing import Any
 
 from agentpal.agents.base import BaseAgent
 from agentpal.config import get_settings
-from agentpal.database import commit_with_retry
+from agentpal.database import commit_with_retry, write_session
 from agentpal.memory.base import BaseMemory
 from agentpal.memory.factory import MemoryFactory
 from agentpal.models.cron import CronJob, CronJobExecution
@@ -427,22 +427,32 @@ class PersonalAssistant(BaseAgent):
             return {}
 
     async def _save_prompt_disclosure_bundle(self, bundle: dict[str, Any]) -> None:
-        """写回 session.extra.prompt_disclosure（轻量持久化）。"""
+        """写回 session.extra.prompt_disclosure（轻量持久化）。
+
+        使用独立 write_session（BEGIN IMMEDIATE + 抖动重试），避免热点写竞争
+        污染流式 chat 的主事务。
+        """
         if self._db is None:
             return
         try:
             from sqlalchemy import select
 
-            result = await self._db.execute(
-                select(SessionRecord).where(SessionRecord.id == self.session_id)
-            )
-            session_record = result.scalar_one_or_none()
-            if session_record is None:
-                return
-            extra = dict(session_record.extra or {})
-            extra["prompt_disclosure"] = bundle
-            session_record.extra = extra
-            await self._db.flush()
+            async with write_session(
+                context={
+                    "component": "personal_assistant",
+                    "phase": "save_prompt_disclosure",
+                    "session_id": self.session_id,
+                }
+            ) as tmp_db:
+                result = await tmp_db.execute(
+                    select(SessionRecord).where(SessionRecord.id == self.session_id)
+                )
+                session_record = result.scalar_one_or_none()
+                if session_record is None:
+                    return
+                extra = dict(session_record.extra or {})
+                extra["prompt_disclosure"] = bundle
+                session_record.extra = extra
         except Exception:
             pass
 

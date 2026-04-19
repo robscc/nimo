@@ -218,24 +218,31 @@ class ReMeLightMemory(BaseMemory):
         if message.id is None:
             message.id = str(uuid.uuid4())
 
-        # 1. 写入 SQLite（如果有 db）
+        # 1. 写入 SQLite（如果有 db） — 走独立 write_session 避免污染主事务
         if self._db is not None:
             try:
+                from agentpal.database import write_session
                 from agentpal.models.memory import MemoryRecord
 
-                record = MemoryRecord(
-                    id=message.id,
-                    session_id=message.session_id,
-                    role=str(message.role),
-                    content=message.content,
-                    created_at=message.created_at or datetime.now(timezone.utc),
-                    meta=message.metadata,
-                    user_id=message.user_id,
-                    channel=message.channel,
-                    memory_type=message.memory_type or "conversation",
-                )
-                self._db.add(record)
-                await self._db.flush()
+                async with write_session(
+                    context={
+                        "component": "reme_light_adapter",
+                        "phase": "add_memory",
+                        "session_id": message.session_id,
+                    }
+                ) as wdb:
+                    record = MemoryRecord(
+                        id=message.id,
+                        session_id=message.session_id,
+                        role=str(message.role),
+                        content=message.content,
+                        created_at=message.created_at or datetime.now(timezone.utc),
+                        meta=message.metadata,
+                        user_id=message.user_id,
+                        channel=message.channel,
+                        memory_type=message.memory_type or "conversation",
+                    )
+                    wdb.add(record)
             except Exception:
                 logger.warning("ReMeLightMemory SQLite 写入失败", exc_info=True)
 

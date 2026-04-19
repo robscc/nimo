@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
-from contextlib import contextmanager
+import random
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -20,6 +21,16 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from agentpal.config import get_settings
 
 settings = get_settings()
+
+# Hermes-style write retry with random jitter — breaks the "convoy effect"
+# where deterministic SQLite busy handlers wake all contending writers at the
+# same instant, causing them to collide on the write lock again.
+_WRITE_MAX_RETRIES = 15
+_WRITE_RETRY_MIN_S = 0.020  # 20ms
+_WRITE_RETRY_MAX_S = 0.150  # 150ms
+_CHECKPOINT_EVERY = 50
+_write_count = 0
+_write_count_lock = asyncio.Lock()
 
 engine = create_async_engine(
     settings.database_url,
@@ -40,7 +51,10 @@ _sync_engine = create_engine(
 def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=15000")
+    cursor.execute("PRAGMA busy_timeout=3000")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA wal_autocheckpoint=1000")
     cursor.close()
 
 
@@ -49,7 +63,10 @@ def _set_sqlite_pragma(dbapi_connection, connection_record):
 def _set_sqlite_pragma_sync(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=15000")
+    cursor.execute("PRAGMA busy_timeout=3000")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA wal_autocheckpoint=1000")
     cursor.close()
 
 AsyncSessionLocal = async_sessionmaker(
@@ -142,20 +159,22 @@ def _format_commit_retry_context(context: dict[str, Any] | str | None) -> str:
 async def commit_with_retry(
     session: AsyncSession,
     *,
-    max_attempts: int = 3,
-    base_delay: float = 0.05,
+    max_attempts: int = _WRITE_MAX_RETRIES,
+    base_delay: float | None = None,
     context: dict[str, Any] | str | None = None,
 ) -> None:
-    """为 SQLite 短暂锁竞争提供轻量重试的 commit。
+    """为 SQLite 短暂锁竞争提供带抖动重试的 commit。
 
     仅针对锁冲突重试；其他异常直接抛出。
-    每次失败后 rollback 清理事务，再指数退避等待。
+    每次失败后 rollback 清理事务，再按 Hermes 风格随机抖动等待 —
+    打破确定性 busy handler 的"车队效应"。
 
     Args:
         session: AsyncSession 实例
-        max_attempts: 最大尝试次数（含首次 commit）
-        base_delay: 指数退避基础延迟（秒）
-        context: 可观测性上下文（如 "session=... tool=..."）
+        max_attempts: 最大尝试次数（含首次 commit），默认 15
+        base_delay: 若提供则固定使用该延迟（秒，主要用于测试）；
+            否则每次重试在 [20, 150] ms 间随机抽取。
+        context: 可观测性上下文
     """
     attempt = 0
     ctx = _format_commit_retry_context(context)
@@ -169,6 +188,7 @@ async def commit_with_retry(
                     ctx,
                     attempt + 1,
                 )
+            await _maybe_checkpoint(session)
             return
         except Exception as exc:
             attempt += 1
@@ -191,7 +211,10 @@ async def commit_with_retry(
                 )
                 raise
 
-            delay = base_delay * (2 ** (attempt - 1))
+            if base_delay is None:
+                delay = random.uniform(_WRITE_RETRY_MIN_S, _WRITE_RETRY_MAX_S)
+            else:
+                delay = base_delay
             logger.warning(
                 "sqlite_commit_retry event=retrying context='{}' attempt={}/{} delay_ms={} error={}",
                 ctx,
@@ -201,7 +224,61 @@ async def commit_with_retry(
                 exc,
             )
             await session.rollback()
-            await asyncio.sleep(delay)
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+
+async def _maybe_checkpoint(session: AsyncSession) -> None:
+    """每 _CHECKPOINT_EVERY 次成功写入后做一次 passive WAL checkpoint。
+
+    PASSIVE 模式不会阻塞其他读写，失败时静默忽略 —
+    防止 WAL 文件在长时间运行中无限增长。
+    """
+    global _write_count
+    async with _write_count_lock:
+        _write_count += 1
+        should_checkpoint = _write_count % _CHECKPOINT_EVERY == 0
+
+    if not should_checkpoint:
+        return
+
+    try:
+        await session.execute(text("PRAGMA wal_checkpoint(PASSIVE)"))
+    except Exception as exc:
+        logger.debug("wal_checkpoint_passive_failed error={}", exc)
+
+
+@asynccontextmanager
+async def write_session(
+    context: dict[str, Any] | str | None = None,
+) -> AsyncIterator[AsyncSession]:
+    """显式写事务上下文：BEGIN IMMEDIATE + 抖动重试 commit。
+
+    用于热点写路径（memory inserts、tool logs、agent_messages 等）。
+    BEGIN IMMEDIATE 在事务起点就抢 RESERVED 写锁，冲突立刻暴露并进入
+    抖动重试循环，避免做完一串 INSERT 才在 COMMIT 撞锁回滚。
+
+    纯读路径请继续用 AsyncSessionLocal() / get_db()，这里只影响显式写，
+    不会拖慢读并发。
+    """
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("BEGIN IMMEDIATE"))
+        try:
+            yield session
+            await commit_with_retry(session, context=context)
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def shutdown_checkpoint() -> None:
+    """进程关闭前做一次 TRUNCATE checkpoint，把 WAL 刷回主库。"""
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        logger.info("sqlite_shutdown_checkpoint event=done")
+    except Exception as exc:
+        logger.warning("sqlite_shutdown_checkpoint event=failed error={}", exc)
 
 
 class Base(DeclarativeBase):
